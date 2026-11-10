@@ -256,6 +256,18 @@ public class MainActivity extends Activity {
     private Bitmap watchSwipeBitmap;
     private int watchSwipeIndex = -1;
     private int watchSwipeToken = 0;
+    /**
+     * 相邻图解码线程池。以前每次滑动都 new Thread：连划十下就是十个线程同时解 1600px 大图，
+     * 峰值内存直接顶穿堆，这就是「划一会儿就闪退」的另一半原因。单线程串行最稳。
+     */
+    private final java.util.concurrent.ExecutorService swipePool =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "vsp-swipe-image");
+                t.setDaemon(true);
+                return t;
+            });
+    /** 已启动落定动画、但 endAction 还没执行的方向（0 = 无）。中途再按下要先把它结掉 */
+    private int swipePending = 0;
     private boolean swipeLocked;
     private int swipeDirection = 0;
     private float swipeDownX = 0f, swipeDownY = 0f, swipeDx = 0f;
@@ -1842,12 +1854,7 @@ public class MainActivity extends Activity {
             final boolean canRecycle = recyclable;
             ui.post(() -> {
                 if (token != watchImageToken) {
-                    if (got != null && canRecycle) {
-                        try {
-                            got.recycle();
-                        } catch (Throwable ignored) {
-                        }
-                    }
+                    if (got != null && canRecycle) recycleQuiet(got);
                     return;
                 }
                 if (got == null) {
@@ -1859,13 +1866,10 @@ public class MainActivity extends Activity {
                 watchImageBitmap = got;
                 watchImageRecyclable = canRecycle;
                 playerImage.setImageBitmap(got);
-                playerImage.post(this::applyImageFit);
-                if (old != null && old != got && oldRecyclable) {
-                    try {
-                        old.recycle();
-                    } catch (Throwable ignored) {
-                    }
-                }
+                // 同步算矩阵：以前是 post 出去的，换图与重算之间会有一帧
+                // 拿新位图套旧 scale 画出来，看着就是「闪一下、图跳一下」
+                applyImageFit();
+                if (old != null && old != got && oldRecyclable) recycleQuiet(old);
             });
         }, "vsp-view-image").start();
     }
@@ -1876,12 +1880,7 @@ public class MainActivity extends Activity {
         releaseSwipeImage();
         if (playerImage != null) playerImage.setImageDrawable(null);
         if (watchImageBitmap != null) {
-            if (watchImageRecyclable) {
-                try {
-                    watchImageBitmap.recycle();
-                } catch (Throwable ignored) {
-                }
-            }
+            if (watchImageRecyclable) recycleQuiet(watchImageBitmap);
             watchImageBitmap = null;
             watchImageRecyclable = false;
         }
@@ -2484,6 +2483,9 @@ public class MainActivity extends Activity {
         boolean zoomed = imageScale > imageBaseScale() + 0.02f;
         switch (ev.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
+                // 上一次落定的 190ms 动画还没跑完就又按下：立刻结账。
+                // 否则两次 commitSwipe 会前后脚改 watchIndex，索引错位后位图跟着错，直接崩。
+                if (swipePending != 0) settleSwipeNow();
                 swipeDx = 0f;
                 swipeLocked = false;
                 swipeDirection = 0;
@@ -2554,17 +2556,27 @@ public class MainActivity extends Activity {
         if (edge == null) return;
         int target = watchIndex + dir;
         float w = Math.max(1f, playerImage.getWidth());
+        // 先无条件断开上一张的引用。上一张的位图可能已经在落定后被主图接管并 recycle 了，
+        // 这时候只要 View 还拿着它、还被显示出来，绘制线程就会抛
+        // "Cannot draw a recycled bitmap" —— 这是本次闪退的直接原因。
+        edge.setImageDrawable(null);
         edge.setTranslationX(dir > 0 ? w : -w);
-        edge.setVisibility(View.VISIBLE);
         if (target < 0 || target >= watchSiblings.size()) {
             // 到头了：这一侧没有图，只让主图跟着走一点做反馈
-            edge.setImageDrawable(null);
+            edge.setVisibility(View.VISIBLE);
             watchSwipeIndex = -1;
             return;
         }
-        if (watchSwipeIndex != target || watchSwipeBitmap == null) {
-            loadSwipeImage(target);
+        if (watchSwipeIndex == target && watchSwipeBitmap != null
+                && !watchSwipeBitmap.isRecycled()) {
+            // 上一轮回弹时解出来的还留着，直接贴上去，省一次解码
+            edge.setImageBitmap(watchSwipeBitmap);
+            edge.setVisibility(View.VISIBLE);
+            return;
         }
+        // 还没解码：先别显形（黑底闪一下也是「闪烁」），等位图回来自动滑进来
+        edge.setVisibility(View.INVISIBLE);
+        loadSwipeImage(target);
     }
 
     /** 后台解码相邻图（1600px 够拖动时看清内容，比主图的 2400 更快） */
@@ -2574,64 +2586,69 @@ public class MainActivity extends Activity {
         MediaItem m = watchSiblings.get(pos);
         final String src = m.source;
         final boolean isContent = src != null && src.startsWith("content://");
-        new Thread(() -> {
+        swipePool.execute(() -> {
             Bitmap b;
             if (isContent) b = decodeContentImage(src, 1600);
             else b = decodeSampled(new File(src), 1600);
             final Bitmap got = b;
             ui.post(() -> {
                 if (token != watchSwipeToken || watchSwipeImage == null) {
-                    if (got != null) {
-                        try {
-                            got.recycle();
-                        } catch (Throwable ignored) {
-                        }
-                    }
+                    if (got != null) recycleQuiet(got);
                     return;
                 }
                 Bitmap old = watchSwipeBitmap;
                 watchSwipeBitmap = got;
-                if (got != null) watchSwipeImage.setImageBitmap(got);
-                if (old != null && old != got) {
-                    try {
-                        old.recycle();
-                    } catch (Throwable ignored) {
+                if (got != null && !got.isRecycled()) {
+                    watchSwipeImage.setImageBitmap(got);
+                    // 手指还按着才显形：松手了就别再让一张图突然冒出来
+                    if (swipeLocked && swipeDirection != 0) {
+                        watchSwipeImage.setVisibility(View.VISIBLE);
+                        applySwipeOffset(swipeDx);
                     }
                 }
+                if (old != null && old != got) recycleQuiet(old);
             });
-        }, "vsp-swipe-image").start();
+        });
     }
 
     /** 拖动中：主图跟着手指，相邻图贴着它一起走 */
     private void applySwipeOffset(float dx) {
         float w = Math.max(1f, playerImage.getWidth());
-        boolean hasEdge = watchSwipeImage != null && watchSwipeImage.getVisibility() == View.VISIBLE;
-        boolean atEdge = !canStep(swipeDirection);
-        if (!hasEdge) return;
-        if (atEdge) {
+        // 这里不再看 watchSwipeImage 是否 VISIBLE：解码还没回来时那一层是 INVISIBLE 的，
+        // 但主图必须照样跟手，否则前几十毫秒手指是拖不动的。
+        if (!canStep(swipeDirection)) {
             // 边界外没有图：加阻力，拖不远，松手自动弹回
             playerImage.setTranslationX(dx * 0.32f);
-            watchSwipeImage.setTranslationX(swipeDirection > 0 ? w : -w);
+            if (watchSwipeImage != null) {
+                watchSwipeImage.setTranslationX(swipeDirection > 0 ? w : -w);
+            }
             return;
         }
         playerImage.setTranslationX(dx);
-        watchSwipeImage.setTranslationX((swipeDirection > 0 ? w : -w) + dx);
+        if (watchSwipeImage != null) {
+            watchSwipeImage.setTranslationX((swipeDirection > 0 ? w : -w) + dx);
+        }
     }
 
     private void finishSwipe(boolean commit) {
         float w = Math.max(1f, playerImage.getWidth());
         boolean hasEdge = watchSwipeImage != null && watchSwipeImage.getVisibility() == View.VISIBLE;
         playerImage.animate().cancel();
+        if (watchSwipeImage != null) watchSwipeImage.animate().cancel();
         if (!commit) {
+            swipePending = 0;
             playerImage.animate().translationX(0f).setDuration(160).start();
             if (hasEdge) {
                 watchSwipeImage.animate().translationX(swipeDirection > 0 ? w : -w)
                         .setDuration(160)
                         .withEndAction(this::hideSwipeView)
                         .start();
+            } else {
+                hideSwipeView();
             }
             return;
         }
+        swipePending = swipeDirection;
         playerImage.animate().translationX(-swipeDirection * w).setDuration(190)
                 .withEndAction(this::commitSwipe)
                 .start();
@@ -2640,43 +2657,57 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** 动画还没结束就又按下了：别等 endAction，立刻把待落定的那一步做完 */
+    private void settleSwipeNow() {
+        if (swipePending == 0) return;
+        playerImage.animate().cancel();
+        if (watchSwipeImage != null) watchSwipeImage.animate().cancel();
+        if (swipeDirection == 0) swipeDirection = swipePending;
+        commitSwipe();
+    }
+
     /** 落定：把相邻图的内容挪到主图，再切索引，视觉上不会闪一下黑 */
     private void commitSwipe() {
+        swipePending = 0;
         int dir = swipeDirection;
         int target = watchIndex + dir;
         if (watchSiblings == null || target < 0 || target >= watchSiblings.size()) {
-            hideSwipeView();
+            playerImage.animate().cancel();
             playerImage.setTranslationX(0f);
+            hideSwipeView();
             return;
         }
         Bitmap edge = watchSwipeBitmap;
-        boolean edgeRecyclable = true;
         watchSwipeBitmap = null;
-        hideSwipeView();
         playerImage.animate().cancel();
-        playerImage.setTranslationX(0f);
-        if (edge != null) {
+        if (edge != null && !edge.isRecycled()) {
+            // 顺序很要紧：先换图、再同步重算矩阵、最后才把相邻层藏掉。
+            // 原来是先藏再换，藏起来到换完之间那一帧主图还是上一张，
+            // 肉眼看到的就是一次「闪回旧图」。
             Bitmap old = watchImageBitmap;
             boolean oldRecyclable = watchImageRecyclable;
             watchImageBitmap = edge;
-            watchImageRecyclable = edgeRecyclable;
+            watchImageRecyclable = true;
             playerImage.setImageBitmap(edge);
-            playerImage.post(this::applyImageFit);
-            if (old != null && old != edge && oldRecyclable) {
-                try {
-                    old.recycle();
-                } catch (Throwable ignored) {
-                }
+            applyImageFit();
+            if (old != null && old != edge) {
+                if (oldRecyclable) recycleQuiet(old);
             }
         }
+        playerImage.setTranslationX(0f);
+        hideSwipeView();
         swipeDirection = 0;
         switchWatchImage(target);
     }
 
     private void hideSwipeView() {
-        watchSwipeToken++;
+        watchSwipeToken++;   // 在途解码的结果直接作废
         if (watchSwipeImage == null) return;
         watchSwipeImage.animate().cancel();
+        // 关键：必须把 ImageView 上的位图引用断掉。相邻图落定后会被主图接管，
+        // 主图换原尺寸时又会把这张位图 recycle；如果 View 还拿着它，
+        // 下次一显示就是 "Cannot draw a recycled bitmap"，直接闪退。
+        watchSwipeImage.setImageDrawable(null);
         watchSwipeImage.setVisibility(View.GONE);
         watchSwipeImage.setTranslationX(0f);
     }
@@ -2685,13 +2716,22 @@ public class MainActivity extends Activity {
     private void releaseSwipeImage() {
         hideSwipeView();
         if (watchSwipeBitmap != null) {
-            try {
-                watchSwipeBitmap.recycle();
-            } catch (Throwable ignored) {
-            }
+            recycleQuiet(watchSwipeBitmap);
             watchSwipeBitmap = null;
         }
         watchSwipeIndex = -1;
+        swipeLocked = false;
+        swipeDirection = 0;
+        swipePending = 0;
+    }
+
+    /** 回收位图，任何异常都吞掉：宁可漏回收一点内存，也不能因为一次 recycle 把界面搞崩 */
+    private void recycleQuiet(Bitmap b) {
+        if (b == null) return;
+        try {
+            if (!b.isRecycled()) b.recycle();
+        } catch (Throwable ignored) {
+        }
     }
 
     /** 左右滑动到边界时给一句提示（拖到尽头只回弹，不静默） */
@@ -2804,6 +2844,11 @@ public class MainActivity extends Activity {
     }
 
     private void applyImageFit() {
+        if (playerImage.getWidth() <= 0 || playerImage.getHeight() <= 0) {
+            // 还没量过尺寸，等下一帧再算；直接算会把 scale 定成 1，图像先放大再缩回去，很晃
+            playerImage.post(this::applyImageFit);
+            return;
+        }
         float base = imageBaseScale();
         imageScale = base;
         imageTx = 0f;
@@ -2816,7 +2861,8 @@ public class MainActivity extends Activity {
         imageScale = 1f;
         imageTx = 0f;
         imageTy = 0f;
-        playerImage.post(this::applyImageFit);
+        if (playerImage.getWidth() > 0) applyImageFit();
+        else playerImage.post(this::applyImageFit);
     }
 
     /** 图片模式：顶部标题与底部缩略图条一起显示，3.5 秒后自动收起，点画面可再次唤出 */
@@ -5170,6 +5216,7 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         super.onDestroy();
         if (taskPoller != null) taskPoller.shutdownNow();
+        if (swipePool != null) swipePool.shutdownNow();
         ui.removeCallbacksAndMessages(null);
         stopPlayer();
     }

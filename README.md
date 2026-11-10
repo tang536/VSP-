@@ -2,7 +2,7 @@
 
 把「在线解析 → 下载 → 本地观看 / 处理」串成一条链的工具，含 **Android app**、**Web 前端**、**Web 后端** 三部分。
 
-- 当前版本：**v1.0.4**（versionCode 10400）
+- 当前版本：**v1.0.5**（versionCode 10500）
 - 安装包：[GitHub Releases](https://github.com/tang536/VSP-/releases/latest) ｜ [Gitee Releases](https://gitee.com/tang-rongqiang/VSP/releases/latest)
 - 平台：Android 7.0+（minSdk 24 / targetSdk 36，arm64-v8a）
 
@@ -133,6 +133,7 @@ app 内检查更新同时查两边，取版本更高的那个；Gitee 侧没有 
 
 | 版本 | 主要内容 |
 |---|---|
+| **v1.0.5** | 修左右滑动的闪烁与闪退：隐藏相邻层时断开位图引用（否则回到 draw recycled bitmap 崩溃）、落定改为「换图→重算矩阵→归位→藏层」、矩阵同步重算、未解码不发黑底、连划前先结掉待落定动画、相邻图解码改用单线程池 |
 | **v1.0.4** | 图片左右滑动改成跟手（当前图跟手位移、相邻图顶进来、松手按位移落定或回弹）；下载队列补齐 total/downloaded，显示「已下载 / 总大小 · 速度」；预览失败加本地转发代理（带 UA/Referer 拉流、转发 Range）；网络图改用站点 Referer |
 | **v1.0.3** | 修复点更新报「服务器返回 302」：下载跟随最多 8 跳（Gitee 的 releases/download → attach_files → foruda CDN 是两跳），HTML 错误页直接判失败，大小复核 + CDN 无长度时用索引大小兜底，失败改为「打开下载页」对话框；Gitee 兜底索引路径修正为 apk/dist/latest.json |
 | **v1.0.2** | 图片浏览重构：切图不再重建观看层与缩略图条、主图解码移后台并回收旧位图、缩略图按 360px 采样落盘且磁盘缓存封顶 32MB、缩略图解码改固定线程池；本地/视频卡片改正方形；下载进度与速度同行 |
