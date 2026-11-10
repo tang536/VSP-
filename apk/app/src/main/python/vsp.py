@@ -1,5 +1,5 @@
 import json, os, threading, tempfile, shutil, re, time
-import urllib.request, urllib.parse
+import urllib.request, urllib.parse, urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 import yt_dlp
@@ -1059,6 +1059,12 @@ def get_preview_url(url, format_id):
 
 _proxy_port = [0]
 _proxy_lock = threading.Lock()
+# 短 ID 表：CDN 直链常带一两千字符的签名参数，直接塞进 ?u= 会让播放器
+# （以及部分机型 native 的 URL 解析）拒绝连接，所以只给播放器一个 /v/<id>。
+_preview_store = {}
+_preview_store_lock = threading.Lock()
+_preview_seq = [0]
+_PREVIEW_KEEP = 64
 
 
 class _PreviewProxy(BaseHTTPRequestHandler):
@@ -1066,17 +1072,27 @@ class _PreviewProxy(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-    def do_GET(self):
+    def _target(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path not in ("/p", "/preview"):
+        m = re.match(r"^/v/([0-9]+)$", parsed.path)
+        if m:
+            with _preview_store_lock:
+                hit = _preview_store.get(m.group(1))
+            return hit if hit else None
+        if parsed.path in ("/p", "/preview"):
+            qs = urllib.parse.parse_qs(parsed.query)
+            url = (qs.get("u") or [""])[0]
+            ref = (qs.get("r") or [""])[0]
+            if url.lower().startswith(("http://", "https://")):
+                return (url, ref)
+        return None
+
+    def _serve(self, with_body):
+        hit = self._target()
+        if not hit:
             self.send_error(404)
             return
-        qs = urllib.parse.parse_qs(parsed.query)
-        target = (qs.get("u") or [""])[0]
-        referer = (qs.get("r") or [""])[0]
-        if not target.lower().startswith(("http://", "https://")):
-            self.send_error(400)
-            return
+        target, referer = hit
         headers = {"User-Agent": UA, "Accept": "*/*"}
         if referer:
             headers["Referer"] = referer
@@ -1084,25 +1100,28 @@ class _PreviewProxy(BaseHTTPRequestHandler):
         if rng:
             headers["Range"] = rng
         try:
-            req = urllib.request.Request(target, headers=headers)
-            resp = urllib.request.urlopen(req, timeout=30)
+            resp = urllib.request.urlopen(urllib.request.Request(target, headers=headers), timeout=30)
+        except urllib.error.HTTPError as e:
+            self.send_error(e.code, "target %d" % e.code)
+            return
         except Exception as e:
-            self.send_error(502, str(e)[:200])
+            self.send_error(502, str(e)[:120])
             return
         try:
             self.send_response(getattr(resp, "status", 200) or 200)
-            self.send_header("Content-Type",
-                             resp.headers.get("Content-Type") or "application/octet-stream")
+            ctype = resp.headers.get("Content-Type") or "application/octet-stream"
+            self.send_header("Content-Type", ctype)
             cr = resp.headers.get("Content-Range")
             if cr:
                 self.send_header("Content-Range", cr)
-            else:
-                cl = resp.headers.get("Content-Length")
-                if cl:
-                    self.send_header("Content-Length", cl)
+            cl = resp.headers.get("Content-Length")
+            if cl:
+                self.send_header("Content-Length", cl)
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("Connection", "close")
             self.end_headers()
+            if not with_body:
+                return
             while True:
                 chunk = resp.read(65536)
                 if not chunk:
@@ -1115,6 +1134,12 @@ class _PreviewProxy(BaseHTTPRequestHandler):
                 resp.close()
             except Exception:
                 pass
+
+    def do_GET(self):
+        self._serve(True)
+
+    def do_HEAD(self):
+        self._serve(False)
 
 
 def _ensure_proxy():
@@ -1135,7 +1160,7 @@ def _ensure_proxy():
 
 
 def preview_proxy_url(url, referer=""):
-    """把直链包成 127.0.0.1 的地址交给播放器；参数不合法时返回空串。"""
+    """把直链包成 127.0.0.1 的短地址交给播放器；参数不合法时返回空串。"""
     url = (url or "").strip()
     if not url.lower().startswith(("http://", "https://")):
         return ""
@@ -1143,8 +1168,62 @@ def preview_proxy_url(url, referer=""):
         port = _ensure_proxy()
     except Exception:
         return ""
-    q = urllib.parse.urlencode({"u": url, "r": referer or ""})
-    return "http://127.0.0.1:%d/p?%s" % (port, q)
+    with _preview_store_lock:
+        _preview_seq[0] += 1
+        pid = str(_preview_seq[0])
+        _preview_store[pid] = ((url, referer or ""))
+        # 只留最近若干条，避免长会话里越攒越多
+        if len(_preview_store) > _PREVIEW_KEEP:
+            for k in sorted(_preview_store, key=lambda x: int(x))[:-_PREVIEW_KEEP]:
+                _preview_store.pop(k, None)
+    return "http://127.0.0.1:%d/v/%s" % (port, pid)
+
+
+def warm_proxy():
+    """提前把转发服务拉起来，免得第一次点预览时还要在 UI 线程里 bind 一次端口。"""
+    try:
+        return bool(_ensure_proxy())
+    except Exception:
+        return False
+
+
+def preview_probe(url, referer=""):
+    """预览诊断：真去拉一次，把状态码 / 类型 / 文件头 / 代理地址一起返回。
+
+    播放器报错时 App 会调它，把结果直接摊给用户，免得「预览失败」四个字谁都看不懂。
+    """
+    url = (url or "").strip()
+    info = {"host": "", "status": 0, "type": "", "len": 0, "magic": "", "error": ""}
+    try:
+        info["host"] = (urllib.parse.urlparse(url).hostname or "")[:80]
+    except Exception:
+        pass
+    if url.lower().startswith(("http://", "https://")):
+        headers = {"User-Agent": UA, "Accept": "*/*"}
+        if referer:
+            headers["Referer"] = referer
+        try:
+            resp = urllib.request.urlopen(
+                urllib.request.Request(url, headers=headers), timeout=20)
+            info["status"] = getattr(resp, "status", 200) or 200
+            info["type"] = (resp.headers.get("Content-Type") or "")[:60]
+            try:
+                info["len"] = int(resp.headers.get("Content-Length") or 0)
+            except Exception:
+                info["len"] = 0
+            head = resp.read(16)
+            info["magic"] = head.hex()
+            resp.close()
+        except urllib.error.HTTPError as e:
+            info["status"] = e.code
+            info["error"] = ("HTTP %d" % e.code)[:120]
+        except Exception as e:
+            info["error"] = str(e)[:120]
+    try:
+        info["proxy"] = preview_proxy_url(url, referer)
+    except Exception:
+        info["proxy"] = ""
+    return json.dumps(info, ensure_ascii=False)
 
 
 def format_has_audio(url, format_id):

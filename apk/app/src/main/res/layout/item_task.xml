@@ -73,6 +73,17 @@
                 android:singleLine="true"
                 android:ellipsize="end"
                 android:visibility="gone" />
+            <!-- 速度单独一格，跟在「已下载 / 总大小」右边 -->
+            <TextView
+                android:id="@+id/t_speed"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:textColor="#f97316"
+                android:tag="accent"
+                android:textSize="10sp"
+                android:singleLine="true"
+                android:visibility="gone" />
         </LinearLayout>
     </LinearLayout>
     <TextView

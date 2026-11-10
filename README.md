@@ -2,7 +2,7 @@
 
 把「在线解析 → 下载 → 本地观看 / 处理」串成一条链的工具，含 **Android app**、**Web 前端**、**Web 后端** 三部分。
 
-- 当前版本：**v1.0.5**（versionCode 10500）
+- 当前版本：**v1.0.6**（versionCode 10600）
 - 安装包：[GitHub Releases](https://github.com/tang536/VSP-/releases/latest) ｜ [Gitee Releases](https://gitee.com/tang-rongqiang/VSP/releases/latest)
 - 平台：Android 7.0+（minSdk 24 / targetSdk 36，arm64-v8a）
 
@@ -133,6 +133,7 @@ app 内检查更新同时查两边，取版本更高的那个；Gitee 侧没有 
 
 | 版本 | 主要内容 |
 |---|---|
+| **v1.0.6** | 预览改走本机转发代理（与下载同一取流路径，短 ID 避免超长直链），支持 HEAD 与 Range；预览失败弹诊断（状态码/类型/文件头/错误码，可复制）；下载队列速度独立显示在大小右侧 |
 | **v1.0.5** | 修左右滑动的闪烁与闪退：隐藏相邻层时断开位图引用（否则回到 draw recycled bitmap 崩溃）、落定改为「换图→重算矩阵→归位→藏层」、矩阵同步重算、未解码不发黑底、连划前先结掉待落定动画、相邻图解码改用单线程池 |
 | **v1.0.4** | 图片左右滑动改成跟手（当前图跟手位移、相邻图顶进来、松手按位移落定或回弹）；下载队列补齐 total/downloaded，显示「已下载 / 总大小 · 速度」；预览失败加本地转发代理（带 UA/Referer 拉流、转发 Range）；网络图改用站点 Referer |
 | **v1.0.3** | 修复点更新报「服务器返回 302」：下载跟随最多 8 跳（Gitee 的 releases/download → attach_files → foruda CDN 是两跳），HTML 错误页直接判失败，大小复核 + CDN 无长度时用索引大小兜底，失败改为「打开下载页」对话框；Gitee 兜底索引路径修正为 apk/dist/latest.json |

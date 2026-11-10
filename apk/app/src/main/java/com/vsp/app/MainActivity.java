@@ -470,6 +470,11 @@ public class MainActivity extends Activity {
                     py.getModule("vsp").callAttr("set_private_dir", privateDir.getAbsolutePath());
                     downloadDir = py.getModule("vsp").callAttr("get_save_dir").toString();
                     pyReady = true;
+                    // 后台把预览转发服务先拉起来，别等用户点预览时在 UI 线程里启动
+                    try {
+                        py.getModule("vsp").callAttr("warm_proxy");
+                    } catch (Throwable ignored) {
+                    }
                     startTaskPolling();
                     ui.post(this::refreshStorage);
                 } catch (Throwable t) {
@@ -1776,7 +1781,9 @@ public class MainActivity extends Activity {
                 String previewUrl = py.getModule("vsp").callAttr("get_preview_url", currentUrl, formatId).toString();
                 ui.post(() -> {
                     if (previewUrl == null || previewUrl.isEmpty()) {
-                        Toast.makeText(this, "无法获取预览", Toast.LENGTH_SHORT).show();
+                        // 解析层根本没给出直链，也把原因摊出来（别只丢一句「无法获取预览」）
+                        showPreviewDiagnosis(null, -1, -1,
+                                "解析没有返回可播放的直链（该条目可能只有分离的音视频轨）");
                     } else {
                         openPlayer(previewUrl, type, title, false);
                     }
@@ -1983,7 +1990,14 @@ public class MainActivity extends Activity {
             headers.put("User-Agent", UA);
             String ref = refererFor(source);
             if (ref != null) headers.put("Referer", ref);
+            // 网络源首次就走 127.0.0.1 的转发代理。
+            // 以前是直链播失败后才重试代理，但很多直链在 MediaPlayer 里根本不报错，
+            // 只是一直缓冲 = 用户看到的「预览不了」。下载那条路（Python 带齐请求头拉流）
+            // 既然能成，预览就让它走同一条路。
+            final String playSrc = playUrlFor(source, local, isContent);
+            final boolean viaProxy = playSrc != null && playSrc.contains("127.0.0.1");
             if (local && !isContent) playerVideo.setVideoPath(source);
+            else if (viaProxy) playerVideo.setVideoURI(Uri.parse(playSrc));
             else playerVideo.setVideoURI(Uri.parse(source), headers);
             playerVideo.setOnPreparedListener(mp -> {
                 currentMp = mp;
@@ -1994,45 +2008,9 @@ public class MainActivity extends Activity {
                 ui.post(progressTick);
             });
             final boolean[] retriedPlain = {false};
-            final boolean[] retriedProxy = {false};
             playerVideo.setOnErrorListener((mp, what, extra) -> {
-                // 第一次失败先走本地代理：抖音 / 快手这类直链会 302 到 CDN，
-                // MediaPlayer 跟随跳转时常常丢掉 Referer，于是「能下载、播不了」。
-                // 代理由 Python 带齐请求头去拉流，App 只连 127.0.0.1。
-                if (!retriedProxy[0] && !local && !isContent && pyReady
-                        && !source.contains("127.0.0.1")) {
-                    retriedProxy[0] = true;
-                    Toast.makeText(this, "正在用本地代理重试…", Toast.LENGTH_SHORT).show();
-                    final String src = source;
-                    new Thread(() -> {
-                        String purl = "";
-                        try {
-                            String proxyRef = refererFor(src);
-                            purl = py.getModule("vsp")
-                                    .callAttr("preview_proxy_url", src, proxyRef == null ? "" : proxyRef)
-                                    .toString();
-                        } catch (Throwable ignored) {
-                        }
-                        final String got = purl == null ? "" : purl;
-                        ui.post(() -> {
-                            if (got.isEmpty()) {
-                                Toast.makeText(this, "预览失败：该直链无法播放（可下载后本地看）",
-                                        Toast.LENGTH_LONG).show();
-                                return;
-                            }
-                            try {
-                                playerVideo.setVideoURI(Uri.parse(got));
-                                playerVideo.start();
-                            } catch (Throwable t) {
-                                Toast.makeText(this, "预览失败：" + shortMsg(new Exception(t)),
-                                        Toast.LENGTH_LONG).show();
-                            }
-                        });
-                    }, "vsp-preview-proxy").start();
-                    return true;
-                }
-                // 少数直链对自定义请求头更敏感（带 Referer 反而 403），去掉头再试一次
-                if (!retriedPlain[0] && !local && !isContent) {
+                // 代理播不了就退回直链裸播（个别 CDN 反而对自定义请求头敏感）
+                if (!retriedPlain[0] && !local && !isContent && viaProxy) {
                     retriedPlain[0] = true;
                     try {
                         playerVideo.setVideoURI(Uri.parse(source));
@@ -2041,7 +2019,14 @@ public class MainActivity extends Activity {
                     } catch (Throwable ignored) {
                     }
                 }
-                Toast.makeText(this, "无法播放该视频（格式或直链可能受限）", Toast.LENGTH_SHORT).show();
+                // 本地 / content 文件播不了就是格式问题，探测也没意义，保持原来的提示
+                if (local || isContent) {
+                    Toast.makeText(this, "无法播放该视频（格式可能不受支持）",
+                            Toast.LENGTH_SHORT).show();
+                    return true;
+                }
+                // 网络直链两条路都断了：别只给一句「无法播放」，把能查的都摊出来
+                showPreviewDiagnosis(source, what, extra, null);
                 return true;
             });
             playerVideo.setOnCompletionListener(mp -> {
@@ -3083,11 +3068,16 @@ public class MainActivity extends Activity {
             } else if (local) {
                 mp.setDataSource(source);
             } else {
-                Map<String, String> headers = new HashMap<>();
-                headers.put("User-Agent", UA);
-                String ref = refererFor(source);
-                if (ref != null) headers.put("Referer", ref);
-                mp.setDataSource(this, Uri.parse(source), headers);
+                String playSrc = playUrlFor(source, false, false);
+                if (playSrc != null && playSrc.contains("127.0.0.1")) {
+                    mp.setDataSource(playSrc);
+                } else {
+                    Map<String, String> headers = new HashMap<>();
+                    headers.put("User-Agent", UA);
+                    String ref = refererFor(source);
+                    if (ref != null) headers.put("Referer", ref);
+                    mp.setDataSource(this, Uri.parse(source), headers);
+                }
             }
             mp.setOnPreparedListener(m -> {
                 audioPrepared = true;
@@ -3107,7 +3097,11 @@ public class MainActivity extends Activity {
                 ui.removeCallbacks(progressTick);
             });
             mp.setOnErrorListener((m, what, extra) -> {
-                Toast.makeText(this, "无法播放该音频", Toast.LENGTH_SHORT).show();
+                if (local) {
+                    Toast.makeText(this, "无法播放该音频", Toast.LENGTH_SHORT).show();
+                } else {
+                    showPreviewDiagnosis(source, what, extra, null);
+                }
                 return true;
             });
             audioPlayer = mp;
@@ -3148,6 +3142,133 @@ public class MainActivity extends Activity {
      * 播放 / 请求该地址时站点要求的 Referer。
      * B 站 CDN 最挑：缺 Referer 或给成 CDN 自己的域名都会 403，播放器就只剩黑屏。
      */
+    /**
+     * 网络流统一走本地转发代理：App 只连 127.0.0.1，由 Python 带齐 UA / Referer 去拉真实地址，
+     * 再把状态码、类型、长度和 Range 原样转发回来。
+     *
+     * 这么改的理由：下载走的就是 Python 拉流，下载能成；预览却交给 MediaPlayer 直连，
+     * 一遇到 302 跳 CDN 就丢 Referer、或者干脆不报错一直缓冲。让预览走和下载同一条路，
+     * 只要下载能成，预览就能成。
+     */
+    private String playUrlFor(String source, boolean local, boolean isContent) {
+        if (source == null || local || isContent) return source;
+        if (!source.startsWith("http")) return source;
+        if (source.contains("127.0.0.1")) return source;
+        if (!pyReady) return source;
+        try {
+            String ref = refererFor(source);
+            String got = py.getModule("vsp")
+                    .callAttr("preview_proxy_url", source, ref == null ? "" : ref)
+                    .toString();
+            if (got != null && got.startsWith("http://127.0.0.1")) return got;
+        } catch (Throwable t) {
+            Log.w("VSP", "起预览代理失败，退回直链", t);
+        }
+        return source;
+    }
+
+    /**
+     * 预览失败时把能查的东西全摊出来：播放器错误码、目标站返回的状态码 / 类型 / 长度、
+     * 文件头对应的容器格式、代理地址。一键复制就能贴出来，不用再靠猜。
+     */
+    private void showPreviewDiagnosis(String source, int what, int extra, String note) {
+        final String src = source == null ? "" : source;
+        new Thread(() -> {
+            String probe = "";
+            if (pyReady) {
+                try {
+                    String ref = refererFor(src);
+                    probe = py.getModule("vsp")
+                            .callAttr("preview_probe", src, ref == null ? "" : ref)
+                            .toString();
+                } catch (Throwable ignored) {
+                }
+            }
+            final String json = probe == null ? "" : probe;
+            ui.post(() -> {
+                StringBuilder sb = new StringBuilder();
+                if (what >= 0) {
+                    sb.append("播放器：what=").append(what).append(" extra=").append(extra)
+                            .append("（").append(mediaErrorHint(extra)).append("）\n");
+                }
+                if (note != null && !note.isEmpty()) sb.append(note).append('\n');
+                JSONObject o = null;
+                try {
+                    o = new JSONObject(json);
+                } catch (Throwable ignored) {
+                }
+                if (o == null) {
+                    sb.append("拉流探测：不可用").append(json.isEmpty() ? "" : "（" + json + "）");
+                } else {
+                    String host = o.optString("host", "");
+                    sb.append("目标：").append(host.isEmpty() ? "（无法解析）" : host).append('\n');
+                    sb.append("HTTP：").append(o.optInt("status", 0));
+                    String err = o.optString("error", "");
+                    if (!err.isEmpty()) sb.append("（").append(err).append("）");
+                    sb.append('\n');
+                    String type = o.optString("type", "");
+                    if (!type.isEmpty()) sb.append("类型：").append(type).append('\n');
+                    long len = o.optLong("len", 0);
+                    if (len > 0) sb.append("大小：").append(humanSize(len)).append('\n');
+                    String magic = o.optString("magic", "");
+                    sb.append("文件头：").append(magic.isEmpty() ? "（空）" : magic)
+                            .append(" → ").append(guessContainer(magic)).append('\n');
+                    String proxy = o.optString("proxy", "");
+                    sb.append("代理：").append(proxy.isEmpty() ? "未启动" : "已就绪");
+                }
+                final String text = sb.toString();
+                new AlertDialog.Builder(this)
+                        .setTitle("预览失败诊断")
+                        .setMessage(text)
+                        .setPositiveButton("复制", (d, w) -> {
+                            try {
+                                android.content.ClipboardManager cm =
+                                        (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                                cm.setPrimaryClip(android.content.ClipData.newPlainText("vsp", text));
+                                Toast.makeText(this, "已复制，可以直接发出来", Toast.LENGTH_SHORT).show();
+                            } catch (Throwable ignored) {
+                            }
+                        })
+                        .setNegativeButton("关闭", null)
+                        .show();
+            });
+        }, "vsp-preview-probe").start();
+    }
+
+    /** MediaPlayer 的 extra 码翻成人话 */
+    private String mediaErrorHint(int extra) {
+        switch (extra) {
+            case -1004:
+                return "IO 错误，多半是请求被拒或连接被断开";
+            case -1005:
+                return "数据格式错误";
+            case -1010:
+                return "编码 / 容器不支持";
+            case -110:
+                return "超时";
+            case -2147483648:
+                return "未知";
+            default:
+                return extra == 0 ? "无附加信息" : "参考 MediaPlayer 错误码";
+        }
+    }
+
+    /** 文件头前 4~16 字节 → 容器类型，用来判断是不是播放器支持不了的格式 */
+    private String guessContainer(String hexMagic) {
+        if (hexMagic == null || hexMagic.length() < 8) return "没读到数据";
+        String h = hexMagic.toLowerCase();
+        if (h.contains("66747970")) return "MP4 / MOV（ftyp）";
+        if (h.startsWith("1a45dfa3")) return "WebM / MKV";
+        if (h.startsWith("234558544d33")) return "HLS 分片播放列表（m3u8）";
+        if (h.startsWith("ffd8ff")) return "JPEG 图片";
+        if (h.startsWith("89504e47")) return "PNG 图片";
+        if (h.startsWith("474946")) return "GIF";
+        if (h.startsWith("3026b275")) return "ASF / WMV";
+        if (h.startsWith("52494646")) return "RIFF（AVI / WAV）";
+        if (h.startsWith("3c6874") || h.startsWith("3c2144")) return "HTML 页面（多半是拦截页或链接过期）";
+        return "未识别的容器";
+    }
+
     private String refererFor(String url) {
         try {
             Uri u = Uri.parse(url);
@@ -4994,13 +5115,19 @@ public class MainActivity extends Activity {
                         : (!speed.isEmpty() && !realSpeed) ? speed
                         : "下载中 · " + pct + "%");
                 // 进度条右边紧跟「已下载 / 总大小 · 速度」，进度与速度在同一行
+                // 进度条右边是「已下载 / 总大小」，速度再单独占一格贴在它右边
                 String sizeLine;
                 if (total > 0) sizeLine = humanSize(done) + "/" + humanSize(total);
                 else if (done > 0) sizeLine = humanSize(done);
                 else sizeLine = "连接中…";
-                if (realSpeed) sizeLine += "  " + speed;
                 h.size.setText(sizeLine);
                 h.size.setVisibility(View.VISIBLE);
+                if (realSpeed) {
+                    h.speed.setText(speed);
+                    h.speed.setVisibility(View.VISIBLE);
+                } else {
+                    h.speed.setVisibility(View.GONE);
+                }
                 h.progress.setVisibility(View.VISIBLE);
                 h.progress.setProgress(pct);
                 h.open.setVisibility(View.GONE);
@@ -5016,6 +5143,7 @@ public class MainActivity extends Activity {
                 h.status.setText("done".equals(status) ? "完成"
                         : "已取消".equals(err) ? "已取消" : "失败");
                 h.size.setVisibility(View.GONE);
+                h.speed.setVisibility(View.GONE);
                 h.progress.setVisibility(View.GONE);
                 boolean canOpen = "done".equals(status) && (isPlayable(fn) || isImageFile(fn));
                 h.open.setVisibility(canOpen ? View.VISIBLE : View.GONE);
@@ -5043,7 +5171,7 @@ public class MainActivity extends Activity {
         }
 
         class VH extends RecyclerView.ViewHolder {
-            TextView title, status, open, size;
+            TextView title, status, open, size, speed;
             ImageView thumb, pause;
             CheckBox check;
             ProgressBar progress;
@@ -5053,6 +5181,7 @@ public class MainActivity extends Activity {
                 title = v.findViewById(R.id.t_title);
                 status = v.findViewById(R.id.t_status);
                 size = v.findViewById(R.id.t_size);
+                speed = v.findViewById(R.id.t_speed);
                 thumb = v.findViewById(R.id.t_thumb);
                 check = v.findViewById(R.id.t_check);
                 progress = v.findViewById(R.id.t_progress);
