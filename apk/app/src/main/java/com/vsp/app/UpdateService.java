@@ -39,6 +39,15 @@ public class UpdateService extends Service {
     public static final String ACTION_CANCEL = "com.vsp.app.UPDATE_CANCEL";
     public static final String EXTRA_URL = "url";
     public static final String EXTRA_VERSION = "version";
+    public static final String EXTRA_SIZE = "size";
+
+    /** 跳转最多跟这么多层：Gitee 的 releases/download 要跳两次才到 CDN */
+    private static final int MAX_HOPS = 8;
+
+    /** 下载用的 UA：Gitee 的 CDN / GitHub 的 release-assets 对自造 UA 不太友好 */
+    private static final String UA =
+            "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) "
+                    + "Chrome/122.0.0.0 Mobile Safari/537.36 VSPParse";
 
     private static final String CHANNEL_ID = "vsp_update_channel";
     private static final int NOTI_ID = 0x5A11;
@@ -56,22 +65,26 @@ public class UpdateService extends Service {
 
     private static final AtomicBoolean cancelFlag = new AtomicBoolean(false);
     private volatile HttpURLConnection conn;
+    /** 检查更新时报文里给出的安装包大小，CDN 不给 Content-Length 时用它兜底 */
+    private static volatile long expectedSize = 0L;
 
-    public static void start(Context ctx, String url, String ver) {
+    public static void start(Context ctx, String url, String ver, long size) {
         cancelFlag.set(false);
         state = "downloading";
         running = true;
         percent = 0;
         downloaded = 0L;
-        totalSize = 0L;
+        totalSize = size > 0 ? size : 0L;
         speedText = "";
         savedPath = "";
         errorText = "";
+        expectedSize = size > 0 ? size : 0L;
         version = ver;
         Intent i = new Intent(ctx, UpdateService.class);
         i.setAction(ACTION_START);
         i.putExtra(EXTRA_URL, url);
         i.putExtra(EXTRA_VERSION, ver);
+        i.putExtra(EXTRA_SIZE, size);
         try {
             if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i);
             else ctx.startService(i);
@@ -105,6 +118,8 @@ public class UpdateService extends Service {
         }
         String url = intent == null ? null : intent.getStringExtra(EXTRA_URL);
         String ver = intent == null ? "" : String.valueOf(intent.getStringExtra(EXTRA_VERSION));
+        long want = intent == null ? 0L : intent.getLongExtra(EXTRA_SIZE, 0L);
+        if (want > 0) expectedSize = want;
         if (url == null || url.isEmpty()) {
             stopSelf();
             return START_NOT_STICKY;
@@ -126,17 +141,35 @@ public class UpdateService extends Service {
             if (out.exists()) out.delete();
             if (part.exists()) part.delete();
 
-            conn = open(url, true);
-            int code = conn.getResponseCode();
-            // GitHub 会 302 到 objects.githubusercontent.com，Gitee 走 oschina 的 CDN
-            if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
+            // Gitee：releases/download → attach_files/…/download → foruda.gitee.com 的 CDN，
+            // 两跳才拿得到 200；GitHub：releases/download → release-assets.githubusercontent.com，
+            // 也要一跳。以前只跟一次，第二次的 302 就被当成失败报「服务器返回 302」。
+            String cur = url;
+            int code = 0;
+            conn = open(cur);
+            code = conn.getResponseCode();
+            for (int hops = 0; conn != null; hops++) {
+                if (code != 301 && code != 302 && code != 303 && code != 307 && code != 308) break;
+                if (hops >= MAX_HOPS) throw new Exception("下载地址跳转次数过多");
                 String loc = conn.getHeaderField("Location");
                 conn.disconnect();
-                if (loc == null) throw new Exception("下载地址跳转失败");
-                conn = open(loc, false);
+                if (loc == null || loc.trim().isEmpty()) throw new Exception("下载地址跳转失败（缺少跳转地址）");
+                loc = loc.trim();
+                if (!loc.startsWith("http://") && !loc.startsWith("https://")) {
+                    loc = new URL(new URL(cur), loc).toString();
+                }
+                cur = loc;
+                conn = open(cur);
                 code = conn.getResponseCode();
             }
             if (code != 200 && code != 206) throw new Exception("服务器返回 " + code);
+
+            // 跳到 CDN 后拿到的可能是「链接已过期」的网页，按 HTML 直接判失败，
+            // 免得把一个几百 KB 的错误页当安装包存下来
+            String ctype = conn.getContentType();
+            if (ctype != null && ctype.toLowerCase(Locale.ROOT).contains("text/html")) {
+                throw new Exception("下载地址已失效，请再点一次检查更新");
+            }
 
             long len = conn.getContentLengthLong();
             if (len <= 0) {
@@ -148,6 +181,8 @@ public class UpdateService extends Service {
                     }
                 }
             }
+            // CDN 偶尔用 chunked 不给长度，退回检查更新时拿到的大小，进度条才有百分比
+            if (len <= 0 && expectedSize > 0) len = expectedSize;
             totalSize = len > 0 ? len : 0L;
 
             in = conn.getInputStream();
@@ -181,12 +216,17 @@ public class UpdateService extends Service {
             fos.close();
             fos = null;
             if (part.length() < 1024 * 200) throw new Exception("下载内容不完整");
+            long tol = totalSize > 0 ? Math.max(64L * 1024, totalSize / 50) : 0L;
+            if (totalSize > 0 && Math.abs(part.length() - totalSize) > tol) {
+                throw new Exception("安装包大小不符（" + human(part.length())
+                        + " / " + human(totalSize) + "），请重试");
+            }
             if (out.exists()) out.delete();
             if (!part.renameTo(out)) throw new Exception("保存安装包失败");
 
             savedPath = out.getAbsolutePath();
             downloaded = out.length();
-            if (totalSize <= 0) totalSize = downloaded;
+            totalSize = downloaded;
             percent = 100;
             state = "done";
             running = false;
@@ -225,14 +265,15 @@ public class UpdateService extends Service {
         }
     }
 
-    private HttpURLConnection open(String url, boolean first) throws Exception {
+    private HttpURLConnection open(String url) throws Exception {
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
         c.setConnectTimeout(20000);
         c.setReadTimeout(30000);
         c.setInstanceFollowRedirects(false);
-        c.setRequestProperty("User-Agent", "VSP-Parse-Updater/1.6 (Android)");
+        c.setRequestProperty("User-Agent", UA);
         c.setRequestProperty("Accept", "*/*");
-        if (first) c.setRequestProperty("Accept-Encoding", "identity");
+        // 每跳都要 identity：跳到 CDN 那一步若被 gzip，Content-Length 与实际字节数不符
+        c.setRequestProperty("Accept-Encoding", "identity");
         return c;
     }
 

@@ -129,11 +129,9 @@ public class MainActivity extends Activity {
             "https://github.com/" + UPDATE_REPO + "/releases.atom";
     private static final String GITEE_API =
             "https://gitee.com/api/v5/repos/" + GITEE_REPO + "/releases/latest";
-    /** Gitee 还没建 Release 时，读仓库里的 dist/latest.json（随源码一起推上去） */
+    /** Gitee 还没建 Release 时，读仓库里的 apk/dist/latest.json（随源码一起推上去） */
     private static final String GITEE_INDEX =
-            "https://gitee.com/" + GITEE_REPO + "/raw/main/dist/latest.json";
-    private static final String GITEE_DIST =
-            "https://gitee.com/" + GITEE_REPO + "/raw/main/";
+            "https://gitee.com/" + GITEE_REPO + "/raw/main/apk/dist/latest.json";
     private static final String UPDATE_PAGE = "https://github.com/" + UPDATE_REPO + "/releases";
     private static final String GITEE_PAGE = "https://gitee.com/" + GITEE_REPO + "/releases";
 
@@ -3918,8 +3916,14 @@ public class MainActivity extends Activity {
         info.notes = idx.optString("notes", "").trim();
         info.date = idx.optString("date", "").trim();
         String apk = idx.optString("apk", "").trim();
-        if (apk.isEmpty()) apk = "dist/VSP-Parse-v" + ver + ".apk";
-        info.apkUrl = GITEE_DIST + apk;
+        if (apk.startsWith("http://") || apk.startsWith("https://")) {
+            info.apkUrl = apk;
+        } else {
+            // 安装包不进源码仓（apk/dist/* 被忽略），索引里的 apk 只是文件名参考；
+            // 能下的是 release 附件，约定路径与 fromGitee 的兜底一致
+            info.apkUrl = "https://gitee.com/" + GITEE_REPO
+                    + "/releases/download/v" + ver + "/VSP-Parse-v" + ver + ".apk";
+        }
         info.size = idx.optLong("size", 0L);
         return info;
     }
@@ -4124,12 +4128,12 @@ public class MainActivity extends Activity {
             return;
         }
         if (apkUrl == null || apkUrl.isEmpty()) {
-            openUrl(UPDATE_PAGE);
+            openUrl("gitee".equals(latestSource) ? GITEE_PAGE : UPDATE_PAGE);
             return;
         }
         ensureNotificationPermission();
         updating = true;
-        UpdateService.start(this, apkUrl, ver);
+        UpdateService.start(this, apkUrl, ver, latestSize);
         showUpdateProgress();
         pollUpdateProgress();
     }
@@ -4249,8 +4253,15 @@ public class MainActivity extends Activity {
         UpdateService.state = "idle";
         dismissUpdateDialog();
         if (!ok) {
-            Toast.makeText(this, err == null || err.isEmpty()
-                    ? "更新包下载失败，请稍后重试" : "下载失败：" + err, Toast.LENGTH_LONG).show();
+            // 自动下载失败别只弹一句提示：给一个浏览器下载页，用户还能手动装上
+            String msg = err == null || err.isEmpty() ? "更新包下载失败，请稍后重试" : err;
+            String page = "gitee".equals(latestSource) ? GITEE_PAGE : UPDATE_PAGE;
+            new AlertDialog.Builder(this)
+                    .setTitle("下载失败")
+                    .setMessage(msg + "\n\n可以改用浏览器打开下载页，手动下载安装包。")
+                    .setPositiveButton("打开下载页", (d, w) -> openUrl(page))
+                    .setNegativeButton("关闭", null)
+                    .show();
             return;
         }
         File f = new File(path == null ? "" : path);

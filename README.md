@@ -2,7 +2,7 @@
 
 把「在线解析 → 下载 → 本地观看 / 处理」串成一条链的工具，含 **Android app**、**Web 前端**、**Web 后端** 三部分。
 
-- 当前版本：**v1.0.2**（versionCode 10200）
+- 当前版本：**v1.0.3**（versionCode 10300）
 - 安装包：[GitHub Releases](https://github.com/tang536/VSP-/releases/latest) ｜ [Gitee Releases](https://gitee.com/tang-rongqiang/VSP/releases/latest)
 - 平台：Android 7.0+（minSdk 24 / targetSdk 36，arm64-v8a）
 
@@ -127,12 +127,13 @@ dotnet run
 | Gitee | https://gitee.com/tang-rongqiang/VSP | 国内镜像、更新源、下载更快 |
 
 app 内检查更新同时查两边，取版本更高的那个；Gitee 侧没有 Release 时会读
-`dist/latest.json` 兜底。发版时两个仓库都要同步 Release 与附件。
+`apk/dist/latest.json` 兜底。发版时两个仓库都要同步 Release 与附件。
 
 ## 版本
 
 | 版本 | 主要内容 |
 |---|---|
+| **v1.0.3** | 修复点更新报「服务器返回 302」：下载跟随最多 8 跳（Gitee 的 releases/download → attach_files → foruda CDN 是两跳），HTML 错误页直接判失败，大小复核 + CDN 无长度时用索引大小兜底，失败改为「打开下载页」对话框；Gitee 兜底索引路径修正为 apk/dist/latest.json |
 | **v1.0.2** | 图片浏览重构：切图不再重建观看层与缩略图条、主图解码移后台并回收旧位图、缩略图按 360px 采样落盘且磁盘缓存封顶 32MB、缩略图解码改固定线程池；本地/视频卡片改正方形；下载进度与速度同行 |
 | v1.0.1 | 修复预览与下载全部失败（Referer 按原页面站点取、补 CDN 域、去掉 Origin 与 HTML Accept、直链改原生流式下载）；音量改竖排；视频默认竖屏预览态 + 全屏播放按钮；修复键盘态进观看层错乱与进度条永久消失；图片左右滑动切图、缩略图铺满整批；网格卡片只留封面与时长 |
 | v1.0.0 | 首发：B 站合流解析修复无声、播放器不再误调 PlaybackParams、按站点补 Referer、观看层避开状态栏与刘海、底部横向进度条、横竖屏切换、标题自动隐藏、头像长按菜单、下载队列显示大小与速度 |
