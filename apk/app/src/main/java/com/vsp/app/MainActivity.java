@@ -251,6 +251,14 @@ public class MainActivity extends Activity {
     private boolean watchImageRecyclable;
     /** 切图序号：后台解码回来时若序号已变，说明用户又划走了，结果直接丢弃 */
     private int watchImageToken = 0;
+    /** 跟手翻页用的相邻图：和主图并排，拖动时从侧边顶进来 */
+    private ImageView watchSwipeImage;
+    private Bitmap watchSwipeBitmap;
+    private int watchSwipeIndex = -1;
+    private int watchSwipeToken = 0;
+    private boolean swipeLocked;
+    private int swipeDirection = 0;
+    private float swipeDownX = 0f, swipeDownY = 0f, swipeDx = 0f;
     private static final float[] SPEEDS = {0.5f, 1.0f, 1.25f, 1.5f, 2.0f};
     private int speedIndex = 1;
 
@@ -1399,11 +1407,10 @@ public class MainActivity extends Activity {
             c.setReadTimeout(12000);
             c.setInstanceFollowRedirects(true);
             c.setRequestProperty("User-Agent", UA);
-            try {
-                URL u = new URL(url);
-                c.setRequestProperty("Referer", u.getProtocol() + "://" + u.getHost() + "/");
-            } catch (Exception ignored) {
-            }
+            // 图床（hdslb / douyinpic / kwaicdn）都要求原站 Referer，
+            // 拿图床自己的域名当 Referer 会被判盗链
+            String ref = refererFor(url);
+            if (ref != null) c.setRequestProperty("Referer", ref);
             BitmapFactory.Options opt = new BitmapFactory.Options();
             opt.inSampleSize = Math.max(1, sample);
             return BitmapFactory.decodeStream(c.getInputStream(), null, opt);
@@ -1805,9 +1812,20 @@ public class MainActivity extends Activity {
      * 连续左右滑动时，前一张的解码回来晚了也不会盖掉当前这张。
      */
     private void loadWatchImage(final String source, final boolean local, final boolean isContent) {
+        loadWatchImage(source, local, isContent, false);
+    }
+
+    /**
+     * @param keepOld true 时先保留当前画面，等新图解码完再替换。
+     *                跟手翻页落定后要用它：相邻图已经顶到正中，这时再清空会黑一下。
+     */
+    private void loadWatchImage(final String source, final boolean local, final boolean isContent,
+                                final boolean keepOld) {
         final int token = ++watchImageToken;
-        playerImage.setBackgroundColor(Color.BLACK);
-        playerImage.setImageDrawable(null);
+        if (!keepOld) {
+            playerImage.setBackgroundColor(Color.BLACK);
+            playerImage.setImageDrawable(null);
+        }
         new Thread(() -> {
             Bitmap b;
             boolean recyclable = true;
@@ -1855,6 +1873,7 @@ public class MainActivity extends Activity {
     /** 释放当前主图（退出观看、切到视频时调用） */
     private void releaseWatchImage() {
         watchImageToken++;
+        releaseSwipeImage();
         if (playerImage != null) playerImage.setImageDrawable(null);
         if (watchImageBitmap != null) {
             if (watchImageRecyclable) {
@@ -1976,7 +1995,43 @@ public class MainActivity extends Activity {
                 ui.post(progressTick);
             });
             final boolean[] retriedPlain = {false};
+            final boolean[] retriedProxy = {false};
             playerVideo.setOnErrorListener((mp, what, extra) -> {
+                // 第一次失败先走本地代理：抖音 / 快手这类直链会 302 到 CDN，
+                // MediaPlayer 跟随跳转时常常丢掉 Referer，于是「能下载、播不了」。
+                // 代理由 Python 带齐请求头去拉流，App 只连 127.0.0.1。
+                if (!retriedProxy[0] && !local && !isContent && pyReady
+                        && !source.contains("127.0.0.1")) {
+                    retriedProxy[0] = true;
+                    Toast.makeText(this, "正在用本地代理重试…", Toast.LENGTH_SHORT).show();
+                    final String src = source;
+                    new Thread(() -> {
+                        String purl = "";
+                        try {
+                            String proxyRef = refererFor(src);
+                            purl = py.getModule("vsp")
+                                    .callAttr("preview_proxy_url", src, proxyRef == null ? "" : proxyRef)
+                                    .toString();
+                        } catch (Throwable ignored) {
+                        }
+                        final String got = purl == null ? "" : purl;
+                        ui.post(() -> {
+                            if (got.isEmpty()) {
+                                Toast.makeText(this, "预览失败：该直链无法播放（可下载后本地看）",
+                                        Toast.LENGTH_LONG).show();
+                                return;
+                            }
+                            try {
+                                playerVideo.setVideoURI(Uri.parse(got));
+                                playerVideo.start();
+                            } catch (Throwable t) {
+                                Toast.makeText(this, "预览失败：" + shortMsg(new Exception(t)),
+                                        Toast.LENGTH_LONG).show();
+                            }
+                        });
+                    }, "vsp-preview-proxy").start();
+                    return true;
+                }
                 // 少数直链对自定义请求头更敏感（带 Referer 反而 403），去掉头再试一次
                 if (!retriedPlain[0] && !local && !isContent) {
                     retriedPlain[0] = true;
@@ -2404,39 +2459,244 @@ public class MainActivity extends Activity {
 
                     @Override
                     public boolean onFling(MotionEvent e1, MotionEvent e2, float vx, float vy) {
-                        // 未放大时左右一划就切上一张 / 下一张（相册的基本手势）
-                        if (e1 == null || e2 == null) return false;
-                        if (imageScale > imageBaseScale() + 0.02f) return false;
-                        float dx = e2.getX() - e1.getX();
-                        float dy = e2.getY() - e1.getY();
-                        if (Math.abs(dx) < dp(56)) return false;
-                        if (Math.abs(dx) < Math.abs(dy) * 1.4f) return false;
-                        if (Math.abs(vx) < 200f) return false;
-                        stepWatch(dx < 0 ? 1 : -1);
-                        return true;
+                        // 翻页已经不在这里做了：左右滑动改成跟手拖动（见 handleWatchTouch），
+                        // 两处都处理会一次划动翻两页
+                        return false;
                     }
                 });
         playerImage.setOnTouchListener((v, ev) -> {
             if (playerType != TYPE_IMAGE) return false;
             if (imageScaleDetector != null) imageScaleDetector.onTouchEvent(ev);
             if (imageGestureDetector != null) imageGestureDetector.onTouchEvent(ev);
-            return true;
+            return handleWatchTouch(ev);
         });
     }
 
-    /** 在看图 / 看视频时切到相邻的一项（左滑下一张，右滑上一张） */
-    private void stepWatch(int delta) {
-        if (watchSiblings == null || watchSiblings.isEmpty() || watchIndex < 0) return;
-        int next = watchIndex + delta;
-        if (next < 0) {
-            showTopHint("已经是第一张");
+    // ---------------- 图片左右滑动（跟手） ----------------
+
+    /**
+     * 跟手翻页：手指往哪拖，当前图就往哪走，下一张（或上一张）从另一侧跟进来，
+     * 松手按位移决定落定还是回弹。以前是 fling 一甩就瞬间换图，看不到过程。
+     *
+     * @return true 表示本手势已被处理
+     */
+    private boolean handleWatchTouch(MotionEvent ev) {
+        boolean zoomed = imageScale > imageBaseScale() + 0.02f;
+        switch (ev.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                swipeDx = 0f;
+                swipeLocked = false;
+                swipeDirection = 0;
+                swipeDownX = ev.getX();
+                swipeDownY = ev.getY();
+                return true;
+            case MotionEvent.ACTION_MOVE:
+                if (zoomed || watchSiblings == null || watchSiblings.size() < 2) return true;
+                float dx = ev.getX() - swipeDownX;
+                float dy = ev.getY() - swipeDownY;
+                if (!swipeLocked) {
+                    if (Math.abs(dx) < dp(10)) return true;
+                    // 竖向为主的滑动不算翻页，避免和下拉/上滑冲突
+                    if (Math.abs(dx) < Math.abs(dy) * 1.2f) return true;
+                    swipeLocked = true;
+                    swipeDirection = dx < 0 ? 1 : -1;
+                    beginSwipe(swipeDirection);
+                }
+                swipeDx = dx;
+                applySwipeOffset(dx);
+                return true;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                if (swipeLocked) {
+                    float w = Math.max(1f, playerImage.getWidth());
+                    boolean atEdge = !canStep(swipeDirection);
+                    boolean commit = !atEdge && Math.abs(swipeDx) > w * 0.24f;
+                    // 拖到尽头给一句提示，不然只有回弹会让人以为卡住了
+                    if (atEdge && Math.abs(swipeDx) > w * 0.12f) hintEdge(swipeDirection < 0);
+                    finishSwipe(commit);
+                    swipeLocked = false;
+                    swipeDx = 0f;
+                }
+                return true;
+            default:
+                return true;
+        }
+    }
+
+    private boolean canStep(int dir) {
+        if (watchSiblings == null || watchIndex < 0) return false;
+        int next = watchIndex + dir;
+        return next >= 0 && next < watchSiblings.size();
+    }
+
+    /** 相邻图的那一层：加在主图下面，拖动时两张图并排出现 */
+    private ImageView ensureSwipeView() {
+        if (watchSwipeImage != null) return watchSwipeImage;
+        if (playerImage == null || !(playerImage.getParent() instanceof ViewGroup)) return null;
+        ViewGroup parent = (ViewGroup) playerImage.getParent();
+        ImageView iv = new ImageView(this);
+        iv.setLayoutParams(new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        iv.setBackgroundColor(Color.BLACK);
+        iv.setVisibility(View.GONE);
+        iv.setClickable(false);
+        iv.setFocusable(false);
+        int idx = parent.indexOfChild(playerImage);
+        parent.addView(iv, idx < 0 ? 0 : idx, iv.getLayoutParams());
+        watchSwipeImage = iv;
+        return iv;
+    }
+
+    /** 开始拖动：把相邻图放到对应一侧并开始解码 */
+    private void beginSwipe(int dir) {
+        ImageView edge = ensureSwipeView();
+        if (edge == null) return;
+        int target = watchIndex + dir;
+        float w = Math.max(1f, playerImage.getWidth());
+        edge.setTranslationX(dir > 0 ? w : -w);
+        edge.setVisibility(View.VISIBLE);
+        if (target < 0 || target >= watchSiblings.size()) {
+            // 到头了：这一侧没有图，只让主图跟着走一点做反馈
+            edge.setImageDrawable(null);
+            watchSwipeIndex = -1;
             return;
         }
-        if (next >= watchSiblings.size()) {
-            showTopHint("已经是最后一张");
+        if (watchSwipeIndex != target || watchSwipeBitmap == null) {
+            loadSwipeImage(target);
+        }
+    }
+
+    /** 后台解码相邻图（1600px 够拖动时看清内容，比主图的 2400 更快） */
+    private void loadSwipeImage(final int pos) {
+        final int token = ++watchSwipeToken;
+        watchSwipeIndex = pos;
+        MediaItem m = watchSiblings.get(pos);
+        final String src = m.source;
+        final boolean isContent = src != null && src.startsWith("content://");
+        new Thread(() -> {
+            Bitmap b;
+            if (isContent) b = decodeContentImage(src, 1600);
+            else b = decodeSampled(new File(src), 1600);
+            final Bitmap got = b;
+            ui.post(() -> {
+                if (token != watchSwipeToken || watchSwipeImage == null) {
+                    if (got != null) {
+                        try {
+                            got.recycle();
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                    return;
+                }
+                Bitmap old = watchSwipeBitmap;
+                watchSwipeBitmap = got;
+                if (got != null) watchSwipeImage.setImageBitmap(got);
+                if (old != null && old != got) {
+                    try {
+                        old.recycle();
+                    } catch (Throwable ignored) {
+                    }
+                }
+            });
+        }, "vsp-swipe-image").start();
+    }
+
+    /** 拖动中：主图跟着手指，相邻图贴着它一起走 */
+    private void applySwipeOffset(float dx) {
+        float w = Math.max(1f, playerImage.getWidth());
+        boolean hasEdge = watchSwipeImage != null && watchSwipeImage.getVisibility() == View.VISIBLE;
+        boolean atEdge = !canStep(swipeDirection);
+        if (!hasEdge) return;
+        if (atEdge) {
+            // 边界外没有图：加阻力，拖不远，松手自动弹回
+            playerImage.setTranslationX(dx * 0.32f);
+            watchSwipeImage.setTranslationX(swipeDirection > 0 ? w : -w);
             return;
         }
-        switchWatchImage(next);
+        playerImage.setTranslationX(dx);
+        watchSwipeImage.setTranslationX((swipeDirection > 0 ? w : -w) + dx);
+    }
+
+    private void finishSwipe(boolean commit) {
+        float w = Math.max(1f, playerImage.getWidth());
+        boolean hasEdge = watchSwipeImage != null && watchSwipeImage.getVisibility() == View.VISIBLE;
+        playerImage.animate().cancel();
+        if (!commit) {
+            playerImage.animate().translationX(0f).setDuration(160).start();
+            if (hasEdge) {
+                watchSwipeImage.animate().translationX(swipeDirection > 0 ? w : -w)
+                        .setDuration(160)
+                        .withEndAction(this::hideSwipeView)
+                        .start();
+            }
+            return;
+        }
+        playerImage.animate().translationX(-swipeDirection * w).setDuration(190)
+                .withEndAction(this::commitSwipe)
+                .start();
+        if (hasEdge) {
+            watchSwipeImage.animate().translationX(0f).setDuration(190).start();
+        }
+    }
+
+    /** 落定：把相邻图的内容挪到主图，再切索引，视觉上不会闪一下黑 */
+    private void commitSwipe() {
+        int dir = swipeDirection;
+        int target = watchIndex + dir;
+        if (watchSiblings == null || target < 0 || target >= watchSiblings.size()) {
+            hideSwipeView();
+            playerImage.setTranslationX(0f);
+            return;
+        }
+        Bitmap edge = watchSwipeBitmap;
+        boolean edgeRecyclable = true;
+        watchSwipeBitmap = null;
+        hideSwipeView();
+        playerImage.animate().cancel();
+        playerImage.setTranslationX(0f);
+        if (edge != null) {
+            Bitmap old = watchImageBitmap;
+            boolean oldRecyclable = watchImageRecyclable;
+            watchImageBitmap = edge;
+            watchImageRecyclable = edgeRecyclable;
+            playerImage.setImageBitmap(edge);
+            playerImage.post(this::applyImageFit);
+            if (old != null && old != edge && oldRecyclable) {
+                try {
+                    old.recycle();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+        swipeDirection = 0;
+        switchWatchImage(target);
+    }
+
+    private void hideSwipeView() {
+        watchSwipeToken++;
+        if (watchSwipeImage == null) return;
+        watchSwipeImage.animate().cancel();
+        watchSwipeImage.setVisibility(View.GONE);
+        watchSwipeImage.setTranslationX(0f);
+    }
+
+    /** 丢掉相邻图与位图（退出观看、切到视频时调用） */
+    private void releaseSwipeImage() {
+        hideSwipeView();
+        if (watchSwipeBitmap != null) {
+            try {
+                watchSwipeBitmap.recycle();
+            } catch (Throwable ignored) {
+            }
+            watchSwipeBitmap = null;
+        }
+        watchSwipeIndex = -1;
+    }
+
+    /** 左右滑动到边界时给一句提示（拖到尽头只回弹，不静默） */
+    private void hintEdge(boolean first) {
+        showTopHint(first ? "已经是第一张" : "已经是最后一张");
     }
 
     /**
@@ -2463,7 +2723,7 @@ public class MainActivity extends Activity {
         playerKind.setText("图片");
         updateThumbSelection();
         fillImageMeta(m.source, true);
-        loadWatchImage(m.source, true, m.source != null && m.source.startsWith("content://"));
+        loadWatchImage(m.source, true, m.source != null && m.source.startsWith("content://"), true);
         resetImageZoom();
     }
 
@@ -2848,7 +3108,8 @@ public class MainActivity extends Activity {
             String host = u.getHost();
             if (host == null) return null;
             String h = host.toLowerCase(Locale.ROOT);
-            if (h.contains("bilibili") || h.contains("bilivideo") || h.contains("b23.tv"))
+            if (h.contains("bilibili") || h.contains("bilivideo") || h.contains("b23.tv")
+                    || h.contains("hdslb"))
                 return "https://www.bilibili.com/";
             if (h.contains("douyin") || h.contains("douyinvod") || h.contains("zjcdn")
                     || h.contains("snssdk") || h.contains("amemv"))
