@@ -1,4 +1,4 @@
-import json, os, threading, tempfile, shutil, re
+import json, os, threading, tempfile, shutil, re, time
 import urllib.request, urllib.parse
 import yt_dlp
 
@@ -27,23 +27,41 @@ HTML_HEADERS = {
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6",
 }
 
-# 站点 -> Referer：这些站在校验 Referer 后才会返回 play_addr / 直链
+# 站点 -> Referer：这些站在校验 Referer 后才会返回 play_addr / 直链。
+# 直链通常落在 CDN 域名上（bilivideo / douyinvod / kwaicdn …），
+# 光靠主域名匹配不到，所以 CDN 域名也要单独列出来，否则下载会 403。
 _SITE_REFERERS = (
     ("bilibili.com", "https://www.bilibili.com/"),
     ("b23.tv", "https://www.bilibili.com/"),
+    ("bilivideo.com", "https://www.bilibili.com/"),
+    ("hdslb.com", "https://www.bilibili.com/"),
     ("douyin.com", "https://www.douyin.com/"),
     ("iesdouyin.com", "https://www.douyin.com/"),
+    ("douyinvod.com", "https://www.douyin.com/"),
+    ("douyinstatic.com", "https://www.douyin.com/"),
+    ("snssdk.com", "https://www.douyin.com/"),
+    ("amemv.com", "https://www.douyin.com/"),
+    ("bytecdn.com", "https://www.douyin.com/"),
     ("kuaishou.com", "https://www.kuaishou.com/"),
+    ("kwaicdn.com", "https://www.kuaishou.com/"),
+    ("gifshow.com", "https://www.kuaishou.com/"),
     ("xiaohongshu.com", "https://www.xiaohongshu.com/"),
+    ("xhscdn.com", "https://www.xiaohongshu.com/"),
     ("weibo.com", "https://weibo.com/"),
     ("weibo.cn", "https://m.weibo.cn/"),
+    ("sinaimg.cn", "https://weibo.com/"),
     ("ixigua.com", "https://www.ixigua.com/"),
+    ("ixiguavideo.com", "https://www.ixigua.com/"),
     ("zhihu.com", "https://www.zhihu.com/"),
+    ("zhimg.com", "https://www.zhihu.com/"),
     ("v.qq.com", "https://v.qq.com/"),
+    ("gtimg.com", "https://v.qq.com/"),
     ("iqiyi.com", "https://www.iqiyi.com/"),
     ("youku.com", "https://www.youku.com/"),
+    ("ykimg.com", "https://v.youku.com/"),
     ("haokan.baidu.com", "https://haokan.baidu.com/"),
     ("acfun.cn", "https://www.acfun.cn/"),
+    ("aixifan.com", "https://www.acfun.cn/"),
     ("huya.com", "https://www.huya.com/"),
     ("douyu.com", "https://www.douyu.com/"),
 )
@@ -64,10 +82,23 @@ def _headers_for(url, extra=None):
     headers = dict(HTML_HEADERS)
     ref = _referer_for(url)
     if ref:
+        # 只带 Referer：有些防盗链 CDN 见到 Origin 会直接 403
         headers["Referer"] = ref
-        headers["Origin"] = ref.rstrip("/")
     if extra:
         headers.update(extra)
+    return headers
+
+
+def _play_headers(url):
+    """给播放器 / 直链用的精简请求头：只要 UA 与站点 Referer。
+
+    不能把 HTML_HEADERS 的 Accept 一起塞进来：Accept: text/html 会让某些
+    CDN 或接口按「要网页」处理，返回 HTML 而不是媒体流。
+    """
+    headers = {"User-Agent": UA}
+    ref = _referer_for(url)
+    if ref:
+        headers["Referer"] = ref
     return headers
 
 
@@ -79,7 +110,7 @@ def _ydl_opts(url, **over):
         'socket_timeout': 25, 'retries': 2, 'extractor_retries': 1,
         # Android 上默认缓存目录可能不可写，关掉它避免解析直接被 IO 异常带崩
         'cachedir': False,
-        'http_headers': _headers_for(url),
+        'http_headers': _play_headers(url),
     }
     opts.update(over)
     return opts
@@ -802,12 +833,13 @@ def start_download(url, format_id, title, thumb="", needs_merge=False):
         return progress_hook
 
     def ydl_download(target, fmt, outtmpl, base_from, base_to):
-        # 下载也要带站点 Referer：B 站 / 抖音的 CDN 会校验，缺了直接 403
+        # Referer 取「原页面」的站点，而不是直链所在的 CDN 域名：
+        # B 站 / 抖音只认自己站点主页，给成 CDN 域名反而 403
         opts = {
             'quiet': True, 'no_warnings': True, 'noplaylist': True,
             'format': fmt, 'outtmpl': outtmpl,
             'progress_hooks': [make_hook(base_from, base_to)],
-            'http_headers': _headers_for(target),
+            'http_headers': _play_headers(url),
             'nocheckcertificate': True,
             'retries': 3,
             'cachedir': False,
@@ -816,6 +848,30 @@ def start_download(url, format_id, title, thumb="", needs_merge=False):
             ydl_instances[tid] = ydl
             ydl.download([target])
 
+    def raw_download(target, dest, base_from, base_to):
+        """直链（mp4/m4a）直接用 urllib 流式落盘：比走 yt-dlp 少一层解析，更不容易失败。"""
+        req = urllib.request.Request(target, headers=_play_headers(url))
+        with urllib.request.urlopen(req, timeout=30) as r, open(dest, "wb") as f:
+            total = int(r.headers.get("Content-Length") or 0)
+            done = 0
+            last_bytes, last_time = 0, time.time()
+            while True:
+                wait_if_paused()
+                buf = r.read(256 * 1024)
+                if not buf:
+                    break
+                f.write(buf)
+                done += len(buf)
+                pct = (done / total) if total else 0
+                now = time.time()
+                speed = ""
+                if now - last_time >= 0.4:
+                    speed = human_size((done - last_bytes) / (now - last_time)) + "/s"
+                    last_bytes, last_time = done, now
+                _set_task(tid, progress=base_from + pct * (base_to - base_from),
+                          total=total, downloaded=done, speed=speed)
+        return dest
+
     def do_download():
         tmpdir = tempfile.mkdtemp()
         try:
@@ -823,11 +879,17 @@ def start_download(url, format_id, title, thumb="", needs_merge=False):
                 fpath = _download_thumb(url, title, tmpdir)
                 _set_task(tid, progress=90)
             elif direct:
-                # 通用兜底拿到的直链：m3u8 / mp4，yt-dlp 能直接处理
-                outtmpl = os.path.join(tmpdir, "%(title)s.%(ext)s")
-                ydl_download(target_url, "best", outtmpl, 0, 92)
-                fpath = pick_media([os.path.join(tmpdir, f) for f in os.listdir(tmpdir)])
-                if not fpath:
+                # 通用兜底拿到的直链：mp4 直接流式下载，m3u8 分片交给 yt-dlp
+                low = target_url.lower()
+                if ".m3u8" in low:
+                    outtmpl = os.path.join(tmpdir, "%(title)s.%(ext)s")
+                    ydl_download(target_url, "best", outtmpl, 0, 92)
+                    fpath = pick_media([os.path.join(tmpdir, f) for f in os.listdir(tmpdir)])
+                else:
+                    ext = _ext_of(target_url) or ".mp4"
+                    fpath = os.path.join(tmpdir, _safe_name(title, ext))
+                    raw_download(target_url, fpath, 0, 92)
+                if not fpath or not os.path.exists(fpath) or os.path.getsize(fpath) == 0:
                     _set_task(tid, status="error", error="未找到媒体文件")
                     return
             else:
@@ -970,9 +1032,7 @@ def get_preview_url(url, format_id):
     """获取可直接播放/查看的预览 URL；通用兜底的直链直接返回。"""
     if format_id.startswith(DIRECT_PREFIX):
         return format_id[len(DIRECT_PREFIX):]
-    opts = {'quiet': True, 'no_warnings': True, 'noplaylist': True, 'skip_download': True,
-            'http_headers': {'User-Agent': UA}, 'nocheckcertificate': True}
-    with yt_dlp.YoutubeDL(opts) as ydl:
+    with yt_dlp.YoutubeDL(_ydl_opts(url)) as ydl:
         info = ydl.extract_info(url, download=False)
     if format_id == "thumb":
         return info.get("thumbnail", "")

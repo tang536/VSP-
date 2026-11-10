@@ -217,6 +217,11 @@ public class MainActivity extends Activity {
     private View playerImgBar, playerSeekWrap, playerImgActions;
     private View playerCtrlRow, playerBottom;
     private ImageView playerOrient;
+    // 视频预览态：时长 / 分辨率 + 全屏播放按钮；音量浮层（竖排）
+    private View playerInlineBar, playerVolumePop;
+    private TextView playerInlineMeta, playerFullBtn;
+    /** 视频是否已进入「全屏播放」。false = 竖屏预览态（画面照常播，底部给全屏按钮） */
+    private boolean playerFull = false;
     private LinearLayout playerThumbs;
     private HorizontalScrollView playerThumbsScroll;
     private View playerImgShare, playerImgInfo, playerImgDelete;
@@ -582,6 +587,10 @@ public class MainActivity extends Activity {
         btnSpeed = playerPanel.findViewById(R.id.btn_speed);
         playerVolume = playerPanel.findViewById(R.id.player_volume);
         playerVolumeVal = playerPanel.findViewById(R.id.player_volume_val);
+        playerVolumePop = playerPanel.findViewById(R.id.player_volume_pop);
+        playerInlineBar = playerPanel.findViewById(R.id.player_inline_bar);
+        playerInlineMeta = playerPanel.findViewById(R.id.player_inline_meta);
+        playerFullBtn = playerPanel.findViewById(R.id.player_full_btn);
         playerTitle = playerPanel.findViewById(R.id.player_title);
         playerKind = playerPanel.findViewById(R.id.player_kind);
         try {
@@ -642,15 +651,22 @@ public class MainActivity extends Activity {
         btnSpeed.setText(speedLabel());
         playerVolume.setProgress(100);
         playerVolumeVal.setText("100%");
-        // 音量滑杆默认收起，点音量图标才展开
-        playerVolume.setVisibility(View.GONE);
-        playerVolumeVal.setVisibility(View.GONE);
+        // 音量浮层默认收起，点音量图标才在图标上方展开（滑杆是竖排的）
+        if (playerVolumePop != null) playerVolumePop.setVisibility(View.GONE);
         playerPanel.findViewById(R.id.player_volume_icon).setOnClickListener(v -> {
-            boolean show = playerVolume.getVisibility() != View.VISIBLE;
-            playerVolume.setVisibility(show ? View.VISIBLE : View.GONE);
-            playerVolumeVal.setVisibility(show ? View.VISIBLE : View.GONE);
-            showPlayerOverlay();
+            boolean show = playerVolumePop != null
+                    && playerVolumePop.getVisibility() != View.VISIBLE;
+            if (playerVolumePop != null) {
+                playerVolumePop.setVisibility(show ? View.VISIBLE : View.GONE);
+            }
+            // 展开时先别让控制条自己收起来，否则浮层会跟着消失
+            ui.removeCallbacks(hideOverlay);
+            if (show) ui.postDelayed(hideOverlay, 6000);
+            else showPlayerOverlay();
         });
+        if (playerFullBtn != null) {
+            playerFullBtn.setOnClickListener(v -> enterFullPlay());
+        }
         // 图片模式：缩略图条 + 底部操作（对照系统相册的看图界面）
         playerSub = playerPanel.findViewById(R.id.player_sub);
         playerImgBar = playerPanel.findViewById(R.id.player_img_bar);
@@ -1680,8 +1696,12 @@ public class MainActivity extends Activity {
                 fullscreenHost.setBackgroundColor(Color.BLACK);
                 fullscreenHost.setLayoutParams(new ViewGroup.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-                ViewGroup decor = findViewById(android.R.id.content);
-                decor.addView(fullscreenHost);
+                ViewGroup decor = (ViewGroup) getWindow().getDecorView();
+                // 挂在 DecorView 上而不是 android.R.id.content：
+                // content 会被软键盘 / adjustResize 压缩，观看层跟着被压扁就只剩一条缝
+                decor.addView(fullscreenHost, new FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT));
             }
             fullscreenHost.setVisibility(View.VISIBLE);
             if (playerPanel.getParent() != fullscreenHost) {
@@ -1703,11 +1723,15 @@ public class MainActivity extends Activity {
 
     private void openPlayer(String source, int type, String title, boolean local,
                             List<MediaItem> siblings, int index) {
+        // 解析输入框还带着焦点时直接进观看层，软键盘会把窗口顶起来：
+        // 观看层被压扁、底部进度条跑到屏幕外，只能退出 app 重进才恢复。先进来先收键盘。
+        dismissKeyboard();
         stopPlayer();
         attachToWatchHost();
         playerPanel.setBackgroundColor(Color.BLACK);
         playerPanel.setVisibility(View.VISIBLE);
         boolean media = type != TYPE_IMAGE;
+        boolean keepFull = playerFull;
         playerType = type;
         fullscreen = true;
         watchingAvatar = false;
@@ -1716,14 +1740,20 @@ public class MainActivity extends Activity {
         watchLocal = local;
         watchSiblings = siblings;
         watchIndex = index;
+        // 视频沿用上一次是否全屏；图片 / 音频不进全屏播放态
+        playerFull = keepFull && type == TYPE_VIDEO;
         // 切换文件时不触发顶部标题的淡出动画，末尾统一按类型亮一次
         ui.removeCallbacks(hideOverlay);
         ui.removeCallbacks(hideImageChrome);
         if (playerOverlay != null) playerOverlay.setVisibility(View.GONE);
         if (playerImgBar != null) {
             playerImgBar.setVisibility(media ? View.GONE : View.VISIBLE);
-        }        if (playerOverlay != null && !media) playerOverlay.setVisibility(View.GONE);
-        if (playerSeekWrap != null && !media) playerSeekWrap.setVisibility(View.GONE);        playerVideo.setVisibility(type == TYPE_VIDEO ? View.VISIBLE : View.GONE);
+        }
+        // 进度条必须在这里显式恢复：曾经只写了「非媒体就 GONE」，
+        // 结果看过一次图片之后，之后所有视频的进度条都再也不出现。
+        if (playerSeekWrap != null) playerSeekWrap.setVisibility(View.VISIBLE);
+        if (playerVolumePop != null) playerVolumePop.setVisibility(View.GONE);
+        playerVideo.setVisibility(type == TYPE_VIDEO ? View.VISIBLE : View.GONE);
         playerAudio.setVisibility(type == TYPE_AUDIO ? View.VISIBLE : View.GONE);
         playerImage.setVisibility(type == TYPE_IMAGE ? View.VISIBLE : View.GONE);
         playerAudioSeek.setProgress(0);
@@ -1734,9 +1764,9 @@ public class MainActivity extends Activity {
         // 顶部：文件名 + 类型
         playerTitle.setText(title == null || title.trim().isEmpty() ? "未命名" : title.trim());
         playerKind.setText(type == TYPE_VIDEO ? "视频" : type == TYPE_AUDIO ? "音频" : "图片");
-        // 视频横屏观看，图片 / 音频保持当前方向
+        // 视频默认竖屏「预览态」（和图片一样先看内容），点全屏播放按钮才转横屏
         try {
-            setRequestedOrientation(type == TYPE_VIDEO
+            setRequestedOrientation(type == TYPE_VIDEO && playerFull
                     ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                     : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
         } catch (Throwable ignored) {
@@ -1756,10 +1786,22 @@ public class MainActivity extends Activity {
                 currentMp = mp;
                 applyPlaybackSettings(mp);
                 playerAudioToggle.setImageResource(R.drawable.ic_pause);
+                updateVideoInlineMeta(mp, source, local);
                 ui.removeCallbacks(progressTick);
                 ui.post(progressTick);
             });
+            final boolean[] retriedPlain = {false};
             playerVideo.setOnErrorListener((mp, what, extra) -> {
+                // 少数直链对自定义请求头更敏感（带 Referer 反而 403），去掉头再试一次
+                if (!retriedPlain[0] && !local && !isContent) {
+                    retriedPlain[0] = true;
+                    try {
+                        playerVideo.setVideoURI(Uri.parse(source));
+                        playerVideo.start();
+                        return true;
+                    } catch (Throwable ignored) {
+                    }
+                }
                 Toast.makeText(this, "无法播放该视频（格式或直链可能受限）", Toast.LENGTH_SHORT).show();
                 return true;
             });
@@ -1811,10 +1853,99 @@ public class MainActivity extends Activity {
             // 图片：副标题显示尺寸与体积，底部铺缩略图条
             renderWatchThumbs();
             fillImageMeta(source, local);
+        } else {
+            updateVideoInlineMeta(null, source, local);
         }
-        // 刚打开时先亮一下控制条与顶部标题，随后按超时自动收起
-        if (media) showPlayerOverlay();
-        else showImageChrome();
+        // 视频预览态只亮顶部标题（下方常驻「全屏播放」按钮）；
+        // 全屏播放与音频照旧唤出完整控制条，图片走相册式 chrome
+        if (type == TYPE_VIDEO && !playerFull) {
+            setInlineBarVisible(true);
+            setHeaderVisible(true);
+            ui.removeCallbacks(hideOverlay);
+            ui.postDelayed(hideOverlay, 3200);
+        } else if (media) {
+            setInlineBarVisible(false);
+            showPlayerOverlay();
+        } else {
+            setInlineBarVisible(false);
+            showImageChrome();
+        }
+    }
+
+    /** 收起软键盘并把焦点从输入框上摘掉（否则进观看层时窗口会被键盘压缩） */
+    private void dismissKeyboard() {
+        try {
+            View focus = getCurrentFocus();
+            if (focus != null) focus.clearFocus();
+            android.view.inputmethod.InputMethodManager imm =
+                    (android.view.inputmethod.InputMethodManager)
+                            getSystemService(INPUT_METHOD_SERVICE);
+            if (imm != null) {
+                imm.hideSoftInputFromWindow(getWindow().getDecorView().getWindowToken(), 0);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 视频预览态底部那一行（时长 · 分辨率 · 体积）：只放媒体信息，不放路径 */
+    private void setInlineBarVisible(boolean visible) {
+        if (playerInlineBar == null) return;
+        playerInlineBar.setVisibility(visible ? View.VISIBLE : View.GONE);
+    }
+
+    private void updateVideoInlineMeta(MediaPlayer mp, String source, boolean local) {
+        if (playerInlineMeta == null) return;
+        StringBuilder sb = new StringBuilder();
+        int dur = 0;
+        if (mp != null) {
+            try {
+                dur = mp.getDuration();
+            } catch (Throwable ignored) {
+            }
+        }
+        MediaItem m = currentWatchItem();
+        if (dur <= 0 && m != null && m.duration > 0) dur = (int) m.duration;
+        if (dur > 0) sb.append(fmtTime(dur));
+        if (mp != null) {
+            try {
+                int w = mp.getVideoWidth();
+                int h = mp.getVideoHeight();
+                if (w > 0 && h > 0) {
+                    if (sb.length() > 0) sb.append(" · ");
+                    sb.append(w).append("×").append(h);
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        long bytes = 0;
+        if (m != null) bytes = m.size;
+        if (bytes <= 0 && local && source != null && !source.startsWith("content://")) {
+            try {
+                bytes = new File(source).length();
+            } catch (Throwable ignored) {
+            }
+        }
+        if (bytes > 0) {
+            if (sb.length() > 0) sb.append(" · ");
+            sb.append(humanSize(bytes));
+        }
+        playerInlineMeta.setText(sb.toString());
+        playerInlineMeta.setVisibility(sb.length() == 0 ? View.GONE : View.VISIBLE);
+    }
+
+    /** 预览态 → 全屏播放：转横屏、收掉按钮、展开完整控制条 */
+    private void enterFullPlay() {
+        if (playerType != TYPE_VIDEO) return;
+        playerFull = true;
+        setInlineBarVisible(false);
+        try {
+            setRequestedOrientation(
+                    android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+        } catch (Throwable ignored) {
+        }
+        applyImmersive(true);
+        showPlayerOverlay();
+        showTopHint("已全屏 · 点画面唤出控制条，左上角退出");
     }
 
     /** 图片副标题：分辨率 · 体积（系统相册头部那两行信息） */
@@ -1873,26 +2004,50 @@ public class MainActivity extends Activity {
         }
         int size = dp(46);
         int gap = dp(4);
-        int end = Math.min(watchSiblings.size(), 80);
-        for (int i = 0; i < end; i++) {
+        // 以前写死只渲染前 80 张，图片多的用户会觉得「缩略图不全」，这里铺满整批
+        for (int i = 0; i < watchSiblings.size(); i++) {
             final int pos = i;
             MediaItem m = watchSiblings.get(i);
-            ImageView iv = new ImageView(this);
+            FrameLayout cell = new FrameLayout(this);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(size, size);
             lp.rightMargin = gap;
-            iv.setLayoutParams(lp);
+            cell.setLayoutParams(lp);
+            if (i == watchIndex) cell.setBackgroundResource(R.drawable.thumb_ring);
+
+            ImageView iv = new ImageView(this);
+            FrameLayout.LayoutParams ilp = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT);
+            if (i == watchIndex) ilp.setMargins(dp(2), dp(2), dp(2), dp(2));
+            iv.setLayoutParams(ilp);
             iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
             iv.setBackgroundColor(0xFF1A1A1A);
-            if (i == watchIndex) {
-                iv.setBackgroundResource(R.drawable.thumb_ring);
-                iv.setPadding(dp(2), dp(2), dp(2), dp(2));
-            }
             loadMediaThumb(iv, m);
-            iv.setOnClickListener(v -> {
+            cell.addView(iv);
+
+            // 缩略图只叠时长，不显示文件名 / 路径这类文件信息；照片没有时长就不加
+            if (m.duration > 0) {
+                TextView d = new TextView(this);
+                d.setText(fmtTime((int) m.duration));
+                d.setTextSize(9);
+                d.setTextColor(0xFFFFFFFF);
+                d.setBackgroundColor(0x99000000);
+                d.setPadding(dp(3), 0, dp(3), 0);
+                FrameLayout.LayoutParams dlp = new FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.WRAP_CONTENT,
+                        FrameLayout.LayoutParams.WRAP_CONTENT);
+                dlp.gravity = android.view.Gravity.BOTTOM | android.view.Gravity.END;
+                dlp.setMargins(0, 0, dp(2), dp(2));
+                d.setLayoutParams(dlp);
+                cell.addView(d);
+            }
+
+            cell.setOnClickListener(v -> {
                 if (pos == watchIndex) return;
-                openPlayer(m.source, m.type, m.name, true, watchSiblings, pos);
+                openPlayer(m.source, m.type >= 0 ? m.type : guessType(m.name),
+                        m.name, true, watchSiblings, pos);
             });
-            playerThumbs.addView(iv);
+            playerThumbs.addView(cell);
         }
         if (watchIndex > 0) {
             final int idx = watchIndex;
@@ -2092,6 +2247,20 @@ public class MainActivity extends Activity {
                         }
                         return true;
                     }
+
+                    @Override
+                    public boolean onFling(MotionEvent e1, MotionEvent e2, float vx, float vy) {
+                        // 未放大时左右一划就切上一张 / 下一张（相册的基本手势）
+                        if (e1 == null || e2 == null) return false;
+                        if (imageScale > imageBaseScale() + 0.02f) return false;
+                        float dx = e2.getX() - e1.getX();
+                        float dy = e2.getY() - e1.getY();
+                        if (Math.abs(dx) < dp(56)) return false;
+                        if (Math.abs(dx) < Math.abs(dy) * 1.4f) return false;
+                        if (Math.abs(vx) < 200f) return false;
+                        stepWatch(dx < 0 ? 1 : -1);
+                        return true;
+                    }
                 });
         playerImage.setOnTouchListener((v, ev) -> {
             if (playerType != TYPE_IMAGE) return false;
@@ -2099,6 +2268,23 @@ public class MainActivity extends Activity {
             if (imageGestureDetector != null) imageGestureDetector.onTouchEvent(ev);
             return true;
         });
+    }
+
+    /** 在看图 / 看视频时切到相邻的一项（左滑下一张，右滑上一张） */
+    private void stepWatch(int delta) {
+        if (watchSiblings == null || watchSiblings.isEmpty() || watchIndex < 0) return;
+        int next = watchIndex + delta;
+        if (next < 0) {
+            showTopHint("已经是第一张");
+            return;
+        }
+        if (next >= watchSiblings.size()) {
+            showTopHint("已经是最后一张");
+            return;
+        }
+        MediaItem m = watchSiblings.get(next);
+        openPlayer(m.source, m.type >= 0 ? m.type : guessType(m.name), m.name, true,
+                watchSiblings, next);
     }
 
     /** 铺满可用区域且不裁切的基准缩放 */
@@ -2175,6 +2361,8 @@ public class MainActivity extends Activity {
         }
         playerOverlay.setVisibility(View.VISIBLE);
         setHeaderVisible(true);
+        // 控制条展开时让出下方的「全屏播放」那一行，避免两块叠在一起
+        setInlineBarVisible(false);
         ui.removeCallbacks(hideOverlay);
         ui.postDelayed(hideOverlay, 3000);
     }
@@ -2182,7 +2370,10 @@ public class MainActivity extends Activity {
     private void hidePlayerOverlay() {
         ui.removeCallbacks(hideOverlay);
         if (playerOverlay != null) playerOverlay.setVisibility(View.GONE);
+        if (playerVolumePop != null) playerVolumePop.setVisibility(View.GONE);
         setHeaderVisible(false);
+        // 预览态收起控制条后，把全屏播放按钮放回来
+        setInlineBarVisible(playerType == TYPE_VIDEO && !playerFull);
     }
 
     /** 顶部返回键 + 文件名：淡入淡出，收起后不占点击区域 */
@@ -2225,12 +2416,16 @@ public class MainActivity extends Activity {
     private void toggleOrientation() {
         boolean landscape = getResources().getConfiguration().orientation
                 == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
+        boolean video = playerType == TYPE_VIDEO;
+        // 转回竖屏即退出「全屏播放」，全屏播放按钮跟着回来
+        if (video) playerFull = !landscape;
         try {
             setRequestedOrientation(landscape
                     ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
                     : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
         } catch (Throwable ignored) {
         }
+        setInlineBarVisible(video && landscape);
         showTopHint(landscape ? "竖屏观看" : "横屏观看");
     }
 
@@ -2275,6 +2470,19 @@ public class MainActivity extends Activity {
         if (playerImgActions != null) {
             playerImgActions.setPadding(watchInsetLeft, dp(8), watchInsetRight, bottomGap + dp(6));
         }
+        // 视频预览态的「全屏播放」按钮：贴在底部手势条上方
+        if (playerInlineBar != null) {
+            playerInlineBar.setPadding(0, dp(10), 0, bottomGap + dp(18));
+        }
+        // 音量浮层要抬到控制行上方，别被手势条盖住
+        if (playerVolumePop != null) {
+            ViewGroup.LayoutParams lp = playerVolumePop.getLayoutParams();
+            if (lp instanceof ViewGroup.MarginLayoutParams) {
+                ViewGroup.MarginLayoutParams mp = (ViewGroup.MarginLayoutParams) lp;
+                mp.bottomMargin = dp(104) + watchInsetBottom;
+                playerVolumePop.setLayoutParams(mp);
+            }
+        }
     }
 
     // ---------------- 观看 / 退出 ----------------
@@ -2301,6 +2509,9 @@ public class MainActivity extends Activity {
             watchingAvatar = false;
             watchSiblings = null;
             watchIndex = -1;
+            playerFull = false;
+            setInlineBarVisible(false);
+            if (playerVolumePop != null) playerVolumePop.setVisibility(View.GONE);
             resetImageZoom();
         } catch (Throwable t) {
             Log.w("VSP", "退出观看失败", t);
@@ -4333,10 +4544,17 @@ public class MainActivity extends Activity {
         @Override
         public void onBindViewHolder(VH h, int i) {
             final MediaItem m = data.get(i);
-            h.name.setText(m.name);
-            String meta = humanSize(m.size);
-            if (m.duration > 0) meta = fmtTime((int) m.duration) + " · " + meta;
-            h.meta.setText(meta);
+            // 卡片只留封面 + 时长这类媒体信息，不再摆文件名 / 体积（照片没有时长就不显示）
+            if (h.name != null) h.name.setVisibility(View.GONE);
+            if (h.meta != null) {
+                if (m.duration > 0) {
+                    h.meta.setText(fmtTime((int) m.duration));
+                    h.meta.setVisibility(View.VISIBLE);
+                } else {
+                    h.meta.setText("");
+                    h.meta.setVisibility(View.GONE);
+                }
+            }
             if (h.dur != null) {
                 if (m.duration > 0) {
                     h.dur.setText(fmtTime((int) m.duration));

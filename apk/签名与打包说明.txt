@@ -1,12 +1,12 @@
-﻿VSP 解析 · 正式签名与打包说明（v1.0.0）
+﻿VSP 解析 · 正式签名与打包说明（v1.0.1）
 ========================================
 
 一、交付文件
-  项目根目录：VSP解析-v1.0.0.apk
+  项目根目录：VSP解析-v1.0.1.apk
   构建输出：apk/app/build/outputs/apk/release/app-release.apk
   SHA256：619801030295842e7d44faad4a690be02b25d50ba10b7427855ea1cc1f74d964
   大小：29,154,045 字节（约 27.8 MiB）
-  版本：versionCode 9 / versionName 1.0.0，minSdk 24 / targetSdk 36 / arm64-v8a
+  版本：versionCode 10100 / versionName 1.0.1，minSdk 24 / targetSdk 36 / arm64-v8a
   与此前各版本使用同一把正式证书，可直接覆盖安装，升级不清数据。
   发布地址：
     GitHub：https://github.com/tang536/VSP-/releases/latest
@@ -51,19 +51,19 @@
           cd "C:/Users/32854/Desktop/university/电动车出租店出租管理系统/本地开发/eRentalSystem"
           TOKEN=$(printf "protocol=https\nhost=github.com\n\n" | git credential fill | sed -n 's/^password=//p')
 
-  1) 建 release（tag 写成 v1.0.0 这种带 v 的形式，app 会自动去掉前缀比对）
+  1) 建 release（tag 写成 v1.0.1 这种带 v 的形式，app 会自动去掉前缀比对）
      curl -X POST -H "Authorization: Bearer $TOKEN" \
           -H "Accept: application/vnd.github+json" \
           -H "X-GitHub-Api-Version: 2022-11-28" \
           -H "Content-Type: application/json; charset=utf-8" \
-          --data-binary @apk/release-v1.0.0.json \
+          --data-binary @apk/release-v1.0.1.json \
           https://api.github.com/repos/tang536/VSP-/releases
 
   2) 传安装包（release id 从第 1 步返回里取）
      curl -X POST -H "Authorization: Bearer $TOKEN" \
           -H "Content-Type: application/vnd.android.package-archive" \
-          --data-binary @"VSP解析-v1.0.0.apk" \
-          "https://uploads.github.com/repos/tang536/VSP-/releases/<id>/assets?name=VSP-Parse-v1.0.0.apk"
+          --data-binary @"VSP解析-v1.0.1.apk" \
+          "https://uploads.github.com/repos/tang536/VSP-/releases/<id>/assets?name=VSP-Parse-v1.0.1.apk"
 
   3) 换包时先删旧 asset 再传新的，否则同名会 422
      curl -X DELETE -H "Authorization: Bearer $TOKEN" \
@@ -72,7 +72,7 @@
   4) 自检（匿名即可，app 也是匿名请求）
      curl -s -H "Accept: application/vnd.github+json" \
           https://api.github.com/repos/tang536/VSP-/releases/latest
-     返回里应能看到 tag_name=v1.0.0，assets[0].digest 的 sha256 与本地包一致。
+     返回里应能看到 tag_name=v1.0.1，assets[0].digest 的 sha256 与本地包一致。
 
   注意：本机 curl 走 Windows schannel 做证书吊销检查会失败（CRYPT_E_NO_REVOCATION_CHECK），
         命令行调试要加 --ssl-no-revoke；安卓端用 HttpURLConnection，不受影响。
@@ -85,25 +85,25 @@
 
   0) 推代码与 tag（用 token 走 HTTPS，避免交互式登录）
      git remote add gitee "https://oauth2:$GITEE_TOKEN@gitee.com/tang-rongqiang/VSP.git"
-     git push gitee main && git push gitee v1.0.0
+     git push gitee main && git push gitee v1.0.1
 
   1) 建 release（201 返回里取 id）
      curl -X POST "https://gitee.com/api/v5/repos/tang-rongqiang/VSP/releases?access_token=$GITEE_TOKEN" \
           -H "Content-Type: application/json; charset=utf-8" \
           --data-binary @apk/_gitee_rel.json
      _gitee_rel.json 内容形如：
-       {"tag_name":"v1.0.0","name":"VSP 解析 v1.0.0","body":"<release notes>","target_commitish":"main"}
+       {"tag_name":"v1.0.1","name":"VSP 解析 v1.0.1","body":"<release notes>","target_commitish":"main"}
 
   2) 传安装包（multipart，字段名必须是 file）
      curl -X POST "https://gitee.com/api/v5/repos/tang-rongqiang/VSP/releases/<id>/attach_files?access_token=$GITEE_TOKEN" \
-          -F "file=@VSP解析-v1.0.0.apk;filename=VSP-Parse-v1.0.0.apk"
+          -F "file=@VSP解析-v1.0.1.apk;filename=VSP-Parse-v1.0.1.apk"
 
   3) 换包时先删旧附件
      curl -X DELETE "https://gitee.com/api/v5/repos/tang-rongqiang/VSP/releases/<id>/attach_files/<attach_id>?access_token=$GITEE_TOKEN"
 
   4) 自检（匿名）
      curl -s https://gitee.com/api/v5/repos/tang-rongqiang/VSP/releases/latest
-     应看到 tag_name=v1.0.0，assets 里含 VSP-Parse-v1.0.0.apk 的 browser_download_url。
+     应看到 tag_name=v1.0.1，assets 里含 VSP-Parse-v1.0.1.apk 的 browser_download_url。
      再 curl -L 该地址下载，与本地包做 cmp 应完全一致。
 
   5) 兜底索引 apk/dist/latest.json（仓库里没 Release 时 app 会读它）
@@ -111,7 +111,7 @@
      地址：https://gitee.com/tang-rongqiang/VSP/raw/main/apk/dist/latest.json
      注意该地址会 302 跳到带签名的 CDN，app 里是手动跟随 Location 的。
 
-七、v1.0.0 本轮改动
+七、v1.0.1 本轮改动
   1. 解析（B 站 / 抖音等站点）
      - 病根：解析请求一直用 Android 移动 UA，B 站移动接口返回的 formats 是空数组，
        于是 fallback 到 HTML 兜底，兜底抓不到 DASH 直链，最终报「找不到可下载的音视频直链」。
@@ -167,13 +167,13 @@
        内存 -> 磁盘 -> 网络，网络取到后写盘（JPEG 86）。
      - 统计改为 getCacheDir() + getExternalCacheDir()；清空时两个目录都清，并清内存 Map，
        随后重绘本地页让缩略图重新生成。
-  7. 版本号 versionCode 9 / versionName 1.0.0。
+  7. 版本号 versionCode 10100 / versionName 1.0.1。
 
 八、验证结果
   BUILD SUCCESSFUL（56 tasks，含 lintVitalRelease）
   apksigner verify：v2 通过，证书 SHA-256 与 v1.0 起一致（271ffaed…7832）
   zipalign -c 4 通过
-  aapt badging：versionCode 9 / versionName 1.0.0，非 debuggable，
+  aapt badging：versionCode 10100 / versionName 1.0.1，非 debuggable，
      application-icon 仍是自适应图标 res/BW.xml
   Manifest：POST_NOTIFICATIONS、FOREGROUND_SERVICE、FOREGROUND_SERVICE_DATA_SYNC、
      REQUEST_INSTALL_PACKAGES 齐全；com.vsp.app.UpdateService 已注册且 exported=false
@@ -188,7 +188,7 @@
   发布核对：
      GitHub asset digest = sha256:619801030295842e7d44faad4a690be02b25d50ba10b7427855ea1cc1f74d964
      Gitee 附件 curl -L 下载后与本地 cmp 完全一致，sha256 同为 6198…d964
-     Gitee releases/latest 匿名访问 200，tag_name=v1.0.0
+     Gitee releases/latest 匿名访问 200，tag_name=v1.0.1
   解析实测：
      https://www.bilibili.com/video/BV1GJ411x7h7 -> 12 视频流 + 3 音频流，1080P 在列
      该视频直链：无 Referer 403、带 Referer 200（证明下载链路必须补站点头）
