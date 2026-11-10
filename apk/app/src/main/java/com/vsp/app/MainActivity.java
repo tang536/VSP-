@@ -244,6 +244,15 @@ public class MainActivity extends Activity {
     private ScaleGestureDetector imageScaleDetector;
     private android.view.GestureDetector imageGestureDetector;
     private float imageScale = 1f, imageTx = 0f, imageTy = 0f;
+    /**
+     * 当前正在显示的图片位图。切图时先换上新图再释放旧图，
+     * 否则连划十几张大图会一路吃满堆内存直接闪退。
+     */
+    private Bitmap watchImageBitmap;
+    /** 当前主图是否由我们自己解码（可以安全 recycle）；网络图可能来自缓存，不能回收 */
+    private boolean watchImageRecyclable;
+    /** 切图序号：后台解码回来时若序号已变，说明用户又划走了，结果直接丢弃 */
+    private int watchImageToken = 0;
     private static final float[] SPEEDS = {0.5f, 1.0f, 1.25f, 1.5f, 2.0f};
     private int speedIndex = 1;
 
@@ -256,6 +265,16 @@ public class MainActivity extends Activity {
     private TextView selCount;
 
     private final Map<String, Bitmap> thumbCache = new LinkedHashMap<>();
+    /** 缩略图长边上限（像素）：46dp 的格子用 360 已经很清，再大纯粹是浪费内存和磁盘 */
+    private static final int THUMB_PX = 360;
+    /** 写盘计数，每 32 张检查一次缓存总量 */
+    private int thumbWriteCount = 0;
+    /**
+     * 缩略图解码线程池。以前每张缩略图各开一个线程，进一次缩略图条能瞬间起上百个线程，
+     * 解码又都是大图，内存和 CPU 一起炸；固定两个线程排队做，稳得多。
+     */
+    private final java.util.concurrent.ExecutorService thumbPool =
+            java.util.concurrent.Executors.newFixedThreadPool(2);
     private AlertDialog historyDialog;
 
     // 全屏
@@ -364,6 +383,8 @@ public class MainActivity extends Activity {
             recentPrefs = getSharedPreferences(RECENT_KEY, MODE_PRIVATE);
             darkMode = prefs.getBoolean("dark_mode", true);
             P = darkMode ? Palette.dark() : Palette.light();
+            // 启动时清一次缩略图缓存：旧版本按 1000px 存过一批，堆到几十上百 MB
+            new Thread(this::trimThumbDir, "vsp-trim-thumbs").start();
             avatarFile = new File(getFilesDir(), "avatar.png");
 
             setContentView(R.layout.activity_main);
@@ -1225,7 +1246,13 @@ public class MainActivity extends Activity {
         try {
             File f = thumbDiskFile(key);
             if (!f.exists() || f.length() == 0) return null;
-            return BitmapFactory.decodeFile(f.getAbsolutePath());
+            // 旧版本写过 1000px 级的图，这里也按 360 采样，别再整张读进内存
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            BitmapFactory.decodeFile(f.getAbsolutePath(), bounds);
+            BitmapFactory.Options opt = new BitmapFactory.Options();
+            opt.inSampleSize = sampleFor(bounds, THUMB_PX);
+            return BitmapFactory.decodeFile(f.getAbsolutePath(), opt);
         } catch (Throwable t) {
             return null;
         }
@@ -1238,7 +1265,7 @@ public class MainActivity extends Activity {
             File f = thumbDiskFile(key);
             File tmp = new File(f.getAbsolutePath() + ".tmp");
             fos = new FileOutputStream(tmp);
-            bmp.compress(Bitmap.CompressFormat.JPEG, 86, fos);
+            bmp.compress(Bitmap.CompressFormat.JPEG, 82, fos);
             fos.flush();
             if (f.exists()) f.delete();
             if (!tmp.renameTo(f)) tmp.delete();
@@ -1246,6 +1273,71 @@ public class MainActivity extends Activity {
         } finally {
             try {
                 if (fos != null) fos.close();
+            } catch (Throwable ignored) {
+            }
+        }
+        // 每写 32 张检查一次总量，超了就从最旧的开始删，避免缓存目录无限膨胀
+        if (++thumbWriteCount % 32 == 0) trimThumbDir();
+    }
+
+    /** 缩略图缓存上限；超过就按最后修改时间删掉最旧的一部分 */
+    private void trimThumbDir() {
+        final long limit = 32L * 1024 * 1024;
+        try {
+            File dir = thumbDir();
+            File[] fs = dir.listFiles();
+            if (fs == null || fs.length == 0) return;
+            long total = 0;
+            for (File f : fs) total += f.length();
+            if (total <= limit) return;
+            java.util.Arrays.sort(fs, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
+            for (File f : fs) {
+                if (total <= limit) break;
+                long len = f.length();
+                if (f.delete()) total -= len;
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 按目标像素算采样率：长边不超过 targetPx */
+    private static int sampleFor(BitmapFactory.Options bounds, int targetPx) {
+        int sample = 1;
+        int max = Math.max(bounds.outWidth, bounds.outHeight);
+        while (max > 0 && max / sample > targetPx) sample *= 2;
+        return Math.max(1, sample);
+    }
+
+    /** 本地图片生成缩略图：先量尺寸再按 360 采样，内存与磁盘占用都被按住 */
+    private Bitmap decodeLocalThumb(String source) {
+        InputStream in = null;
+        try {
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            if (source.startsWith("content://")) {
+                in = getContentResolver().openInputStream(Uri.parse(source));
+                if (in == null) return null;
+                BitmapFactory.decodeStream(in, null, bounds);
+                try {
+                    in.close();
+                } catch (Throwable ignored) {
+                }
+                in = null;
+                BitmapFactory.Options opt = new BitmapFactory.Options();
+                opt.inSampleSize = sampleFor(bounds, THUMB_PX);
+                in = getContentResolver().openInputStream(Uri.parse(source));
+                if (in == null) return null;
+                return BitmapFactory.decodeStream(in, null, opt);
+            }
+            BitmapFactory.decodeFile(source, bounds);
+            BitmapFactory.Options opt = new BitmapFactory.Options();
+            opt.inSampleSize = sampleFor(bounds, THUMB_PX);
+            return BitmapFactory.decodeFile(source, opt);
+        } catch (Throwable t) {
+            return null;
+        } finally {
+            try {
+                if (in != null) in.close();
             } catch (Throwable ignored) {
             }
         }
@@ -1272,7 +1364,7 @@ public class MainActivity extends Activity {
         }
         iv.setImageResource(R.drawable.ic_image);
         iv.setColorFilter(P.icon);
-        new Thread(() -> {
+        thumbPool.execute(() -> {
             Bitmap bmp = readDiskThumb(key);
             if (bmp == null) {
                 bmp = fetchBitmap(key, sample);
@@ -1281,7 +1373,8 @@ public class MainActivity extends Activity {
             if (bmp != null) {
                 synchronized (thumbCache) {
                     thumbCache.put(key, bmp);
-                    if (thumbCache.size() > 80) {
+                    // 360px 缩略图单张约 400KB，60 张封顶约 24MB；再多就是白白占堆
+                    if (thumbCache.size() > 60) {
                         Iterator<String> it = thumbCache.keySet().iterator();
                         if (it.hasNext()) {
                             it.next();
@@ -1297,7 +1390,7 @@ public class MainActivity extends Activity {
                     iv.clearColorFilter();
                 }
             });
-        }, "vsp-thumb").start();
+        });
     }
 
     private Bitmap fetchBitmap(String url, int sample) {
@@ -1343,22 +1436,13 @@ public class MainActivity extends Activity {
         }
         iv.setImageResource(m.type == TYPE_IMAGE ? R.drawable.ic_image : R.drawable.ic_video);
         iv.setColorFilter(P.icon);
-        new Thread(() -> {
+        thumbPool.execute(() -> {
             Bitmap bmp = readDiskThumb(key);
             try {
                 if (bmp != null) {
                     // 命中磁盘缓存
                 } else if (m.type == TYPE_IMAGE) {
-                    if (m.source.startsWith("content://")) {
-                        BitmapFactory.Options opt = new BitmapFactory.Options();
-                        opt.inSampleSize = 4;
-                        bmp = BitmapFactory.decodeStream(
-                                getContentResolver().openInputStream(Uri.parse(m.source)), null, opt);
-                    } else {
-                        BitmapFactory.Options opt = new BitmapFactory.Options();
-                        opt.inSampleSize = 4;
-                        bmp = BitmapFactory.decodeFile(m.source, opt);
-                    }
+                    bmp = decodeLocalThumb(m.source);
                 } else {
                     bmp = videoThumb(m);
                 }
@@ -1368,7 +1452,8 @@ public class MainActivity extends Activity {
                 writeDiskThumb(key, bmp);
                 synchronized (thumbCache) {
                     thumbCache.put(key, bmp);
-                    if (thumbCache.size() > 80) {
+                    // 360px 缩略图单张约 400KB，60 张封顶约 24MB；再多就是白白占堆
+                    if (thumbCache.size() > 60) {
                         Iterator<String> it = thumbCache.keySet().iterator();
                         if (it.hasNext()) {
                             it.next();
@@ -1384,7 +1469,7 @@ public class MainActivity extends Activity {
                     iv.clearColorFilter();
                 }
             });
-        }, "vsp-media-thumb").start();
+        });
     }
 
     private Bitmap videoThumb(MediaItem m) {
@@ -1717,6 +1802,106 @@ public class MainActivity extends Activity {
         }
     }
 
+    /**
+     * 加载观看层主图。解码全部放后台线程，并用递增序号丢弃过期结果：
+     * 连续左右滑动时，前一张的解码回来晚了也不会盖掉当前这张。
+     */
+    private void loadWatchImage(final String source, final boolean local, final boolean isContent) {
+        final int token = ++watchImageToken;
+        playerImage.setBackgroundColor(Color.BLACK);
+        playerImage.setImageDrawable(null);
+        new Thread(() -> {
+            Bitmap b;
+            boolean recyclable = true;
+            if (isContent) {
+                b = decodeContentImage(source, 2400);
+            } else if (local) {
+                b = decodeSampled(new File(source), 2400);
+            } else {
+                // 网络图可能来自 thumbCache，不能随手 recycle
+                b = fetchBitmap(source, 1);
+                recyclable = false;
+            }
+            final Bitmap got = b;
+            final boolean canRecycle = recyclable;
+            ui.post(() -> {
+                if (token != watchImageToken) {
+                    if (got != null && canRecycle) {
+                        try {
+                            got.recycle();
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                    return;
+                }
+                if (got == null) {
+                    Toast.makeText(this, "图片加载失败", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                Bitmap old = watchImageBitmap;
+                boolean oldRecyclable = watchImageRecyclable;
+                watchImageBitmap = got;
+                watchImageRecyclable = canRecycle;
+                playerImage.setImageBitmap(got);
+                playerImage.post(this::applyImageFit);
+                if (old != null && old != got && oldRecyclable) {
+                    try {
+                        old.recycle();
+                    } catch (Throwable ignored) {
+                    }
+                }
+            });
+        }, "vsp-view-image").start();
+    }
+
+    /** 释放当前主图（退出观看、切到视频时调用） */
+    private void releaseWatchImage() {
+        watchImageToken++;
+        if (playerImage != null) playerImage.setImageDrawable(null);
+        if (watchImageBitmap != null) {
+            if (watchImageRecyclable) {
+                try {
+                    watchImageBitmap.recycle();
+                } catch (Throwable ignored) {
+                }
+            }
+            watchImageBitmap = null;
+            watchImageRecyclable = false;
+        }
+    }
+
+    /** content:// 图片按目标尺寸采样解码：先量边界再定 inSampleSize，避免整张大图进内存 */
+    private Bitmap decodeContentImage(String source, int targetPx) {
+        InputStream in = null;
+        try {
+            Uri u = Uri.parse(source);
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            in = getContentResolver().openInputStream(u);
+            if (in == null) return null;
+            BitmapFactory.decodeStream(in, null, bounds);
+            try {
+                in.close();
+            } catch (Throwable ignored) {
+            }
+            int sample = 1;
+            int max = Math.max(bounds.outWidth, bounds.outHeight);
+            while (max > 0 && max / sample > targetPx) sample *= 2;
+            BitmapFactory.Options opt = new BitmapFactory.Options();
+            opt.inSampleSize = Math.max(1, sample);
+            in = getContentResolver().openInputStream(u);
+            if (in == null) return null;
+            return BitmapFactory.decodeStream(in, null, opt);
+        } catch (Throwable t) {
+            return null;
+        } finally {
+            try {
+                if (in != null) in.close();
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
     private void openPlayer(String source, int type, String title, boolean local) {
         openPlayer(source, type, title, local, null, -1);
     }
@@ -1753,6 +1938,8 @@ public class MainActivity extends Activity {
         // 结果看过一次图片之后，之后所有视频的进度条都再也不出现。
         if (playerSeekWrap != null) playerSeekWrap.setVisibility(View.VISIBLE);
         if (playerVolumePop != null) playerVolumePop.setVisibility(View.GONE);
+        // 从图片切到视频 / 音频：先放掉主图占的内存
+        if (type != TYPE_IMAGE) releaseWatchImage();
         playerVideo.setVisibility(type == TYPE_VIDEO ? View.VISIBLE : View.GONE);
         playerAudio.setVisibility(type == TYPE_AUDIO ? View.VISIBLE : View.GONE);
         playerImage.setVisibility(type == TYPE_IMAGE ? View.VISIBLE : View.GONE);
@@ -1815,39 +2002,9 @@ public class MainActivity extends Activity {
             playerAudioTime.setText("音频播放");
             prepareAudio(source, local);
         } else {
-            playerImage.setImageDrawable(null);
-            playerImage.setBackgroundColor(Color.BLACK);
-            if (local || isContent) {
-                Bitmap b;
-                if (isContent) {
-                    try {
-                        InputStream in = getContentResolver().openInputStream(Uri.parse(source));
-                        BitmapFactory.Options opt = new BitmapFactory.Options();
-                        opt.inSampleSize = 2;
-                        b = in == null ? null : BitmapFactory.decodeStream(in, null, opt);
-                        if (in != null) in.close();
-                    } catch (Exception e) {
-                        b = null;
-                    }
-                } else {
-                    // 原图可能有几千万像素，按 2400px 采样既清晰又不 OOM
-                    b = decodeSampled(new File(source), 2400);
-                }
-                if (b != null) {
-                    playerImage.setImageBitmap(b);
-                    playerImage.post(this::applyImageFit);
-                } else Toast.makeText(this, "图片解码失败", Toast.LENGTH_SHORT).show();
-            } else {
-                new Thread(() -> {
-                    Bitmap b = fetchBitmap(source, 1);
-                    ui.post(() -> {
-                        if (b != null) {
-                            playerImage.setImageBitmap(b);
-                            playerImage.post(this::applyImageFit);
-                        } else Toast.makeText(this, "图片加载失败", Toast.LENGTH_SHORT).show();
-                    });
-                }, "vsp-view-image").start();
-            }
+            // 解码统一放后台：以前在主线程 decode 一张几千万像素的原图要几百毫秒到 1 秒，
+            // 表现就是切图卡住、单击唤出操作条也慢半拍。顺带用序号丢弃过期结果。
+            loadWatchImage(source, local, isContent);
         }
         if (!media) {
             // 图片：副标题显示尺寸与体积，底部铺缩略图条
@@ -2044,8 +2201,7 @@ public class MainActivity extends Activity {
 
             cell.setOnClickListener(v -> {
                 if (pos == watchIndex) return;
-                openPlayer(m.source, m.type >= 0 ? m.type : guessType(m.name),
-                        m.name, true, watchSiblings, pos);
+                switchWatchImage(pos);
             });
             playerThumbs.addView(cell);
         }
@@ -2282,9 +2438,64 @@ public class MainActivity extends Activity {
             showTopHint("已经是最后一张");
             return;
         }
-        MediaItem m = watchSiblings.get(next);
-        openPlayer(m.source, m.type >= 0 ? m.type : guessType(m.name), m.name, true,
-                watchSiblings, next);
+        switchWatchImage(next);
+    }
+
+    /**
+     * 在同一批媒体里切到第 pos 项。
+     *
+     * 图片只是换一张图，没必要把整个观看层推倒重建：以前这一步走的是 openPlayer，
+     * 每次都要重新排版缩略图条（几十上百个 ImageView，每个还各开一个解码线程），
+     * 所以切图慢、缓存暴涨，连划几张还会因为内存打满闪退。现在只换主图 + 高亮。
+     */
+    private void switchWatchImage(int pos) {
+        if (watchSiblings == null || pos < 0 || pos >= watchSiblings.size()) return;
+        MediaItem m = watchSiblings.get(pos);
+        int type = m.type >= 0 ? m.type : guessType(m.name);
+        if (type != TYPE_IMAGE) {
+            // 视频 / 音频要换播放器与整块控制条，仍然走完整打开
+            openPlayer(m.source, type, m.name, true, watchSiblings, pos);
+            return;
+        }
+        watchIndex = pos;
+        watchSource = m.source;
+        watchTitle = m.name;
+        watchLocal = true;
+        playerTitle.setText(m.name == null || m.name.trim().isEmpty() ? "未命名" : m.name.trim());
+        playerKind.setText("图片");
+        updateThumbSelection();
+        fillImageMeta(m.source, true);
+        loadWatchImage(m.source, true, m.source != null && m.source.startsWith("content://"));
+        resetImageZoom();
+    }
+
+    /** 只更新缩略图条的高亮与滚动位置，不重建整条 */
+    private void updateThumbSelection() {
+        if (playerThumbs == null || watchSiblings == null) return;
+        int n = Math.min(playerThumbs.getChildCount(), watchSiblings.size());
+        for (int i = 0; i < n; i++) {
+            View child = playerThumbs.getChildAt(i);
+            if (!(child instanceof ViewGroup)) continue;
+            ViewGroup cell = (ViewGroup) child;
+            View inner = cell.getChildAt(0);
+            boolean on = i == watchIndex;
+            if (on) cell.setBackgroundResource(R.drawable.thumb_ring);
+            else cell.setBackgroundColor(0x00000000);
+            if (inner != null) {
+                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT);
+                if (on) lp.setMargins(dp(2), dp(2), dp(2), dp(2));
+                inner.setLayoutParams(lp);
+            }
+        }
+        if (watchIndex >= 0 && watchIndex < playerThumbs.getChildCount()
+                && playerThumbsScroll != null) {
+            View target = playerThumbs.getChildAt(watchIndex);
+            if (target != null) {
+                playerThumbsScroll.smoothScrollTo(Math.max(0, target.getLeft() - dp(60)), 0);
+            }
+        }
     }
 
     /** 铺满可用区域且不裁切的基准缩放 */
@@ -2512,6 +2723,8 @@ public class MainActivity extends Activity {
             playerFull = false;
             setInlineBarVisible(false);
             if (playerVolumePop != null) playerVolumePop.setVisibility(View.GONE);
+            // 退出时把主图位图交还给系统：一张 2400px 的图占十几 MB，留着纯属浪费
+            releaseWatchImage();
             resetImageZoom();
         } catch (Throwable t) {
             Log.w("VSP", "退出观看失败", t);
@@ -4457,14 +4670,17 @@ public class MainActivity extends Activity {
                 long total = t.optLong("total", 0L);
                 long done = t.optLong("downloaded", 0L);
                 String speed = t.optString("speed", "");
-                h.status.setText("paused".equals(status)
-                        ? "已暂停 · " + pct + "%" : pct + "%");
-                // 「已下载 / 总大小 · 速度」：正在下的任务要能看到具体数字
+                // 速度字段有时被当成阶段提示用（「合并音视频…」「已暂停」），这类不算速度
+                boolean realSpeed = speed.endsWith("/s");
+                h.status.setText("paused".equals(status) ? "已暂停 · " + pct + "%"
+                        : (!speed.isEmpty() && !realSpeed) ? speed
+                        : "下载中 · " + pct + "%");
+                // 进度条右边紧跟「已下载 / 总大小 · 速度」，进度与速度在同一行
                 String sizeLine;
-                if (total > 0) sizeLine = humanSize(done) + " / " + humanSize(total);
-                else if (done > 0) sizeLine = "已下载 " + humanSize(done);
-                else sizeLine = "正在连接…";
-                if (!speed.isEmpty() && !"已暂停".equals(speed)) sizeLine += "  ·  " + speed;
+                if (total > 0) sizeLine = humanSize(done) + "/" + humanSize(total);
+                else if (done > 0) sizeLine = humanSize(done);
+                else sizeLine = "连接中…";
+                if (realSpeed) sizeLine += "  " + speed;
                 h.size.setText(sizeLine);
                 h.size.setVisibility(View.VISIBLE);
                 h.progress.setVisibility(View.VISIBLE);

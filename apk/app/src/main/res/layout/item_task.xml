@@ -45,25 +45,35 @@
             android:tag="dim"            android:textSize="11sp"
             android:singleLine="true"
             android:layout_marginTop="2dp" />
-        <TextView
-            android:id="@+id/t_size"
+        <!-- 进度条与「已下载 / 总大小 · 速度」放在同一行，一眼就能对上当前进度 -->
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="1dp"
-            android:textColor="#8b909a"
-            android:tag="dim"
-            android:textSize="11sp"
-            android:singleLine="true"
-            android:ellipsize="end"
-            android:visibility="gone" />
-        <ProgressBar
-            android:id="@+id/t_progress"
-            style="?android:attr/progressBarStyleHorizontal"
-            android:layout_width="match_parent"
-            android:layout_height="4dp"
-            android:layout_marginTop="6dp"
-            android:max="100"
-            android:progress="0" />
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginTop="6dp">
+
+            <ProgressBar
+                android:id="@+id/t_progress"
+                style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="0dp"
+                android:layout_height="4dp"
+                android:layout_weight="1"
+                android:max="100"
+                android:progress="0" />
+
+            <TextView
+                android:id="@+id/t_size"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:textColor="#8b909a"
+                android:tag="dim"
+                android:textSize="10sp"
+                android:singleLine="true"
+                android:ellipsize="end"
+                android:visibility="gone" />
+        </LinearLayout>
     </LinearLayout>
     <TextView
         android:id="@+id/t_open"

@@ -6,9 +6,9 @@
     android:orientation="vertical"
     android:layout_marginBottom="12dp">
 
-    <FrameLayout
+    <com.vsp.app.RatioFrameLayout
         android:layout_width="match_parent"
-        android:layout_height="72dp"
+        android:layout_height="wrap_content"
         android:background="#1f232c"
         android:tag="thumb">
         <ImageView
@@ -40,7 +40,7 @@
             android:padding="6dp"
             android:background="#CC171a21"
             android:contentDescription="提取配乐" />
-    </FrameLayout>
+    </com.vsp.app.RatioFrameLayout>
 
     <TextView
         android:id="@+id/v_name"
