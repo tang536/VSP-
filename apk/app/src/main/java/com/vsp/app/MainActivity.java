@@ -3563,7 +3563,10 @@ public class MainActivity extends Activity {
                     geErr = shortMsg(e2);
                 }
             }
-            UpdateInfo best = pickNewer(gh, ge);
+            // 两个源版本相同时 pickNewer 取第一个参数，因此把 Gitee 放在前面：
+            // Gitee 实测约 1.5 MB/s，GitHub 只有 270 KB/s 左右，同版本优先走快的源。
+            // 若某天 GitHub 版本更高，pickNewer 仍会正确地选中它。
+            UpdateInfo best = pickNewer(ge, gh);
             final String err;
             if (best != null && !best.version.isEmpty()) {
                 latestVersion = best.version;
