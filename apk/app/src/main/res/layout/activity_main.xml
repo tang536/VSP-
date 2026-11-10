@@ -1,0 +1,197 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="#0f1115"
+    android:tag="bg"
+    android:fitsSystemWindows="true">
+
+    <!-- 全局标题栏：仅三个最高级页面（首页 / 本地 / 我的）显示 -->
+    <LinearLayout
+        android:id="@+id/top_bar"
+        android:layout_width="match_parent"
+        android:layout_height="52dp"
+        android:background="#171a21"
+        android:tag="card"
+        android:gravity="center_vertical"
+        android:paddingStart="16dp"
+        android:paddingEnd="12dp"
+        android:orientation="horizontal">
+        <View
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:background="@drawable/brand_mark" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="VSP 解析"
+            android:textColor="#e8eaed"
+            android:tag="text"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:layout_marginStart="10dp" />
+        <View
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1" />
+        <ImageButton
+            android:id="@+id/btn_more"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:src="@drawable/ic_more"
+            android:tag="icon"
+            android:scaleType="fitCenter"
+            android:padding="10dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:visibility="gone"
+            android:contentDescription="更多" />
+        <ImageButton
+            android:id="@+id/btn_history"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:src="@drawable/ic_history"
+            android:tag="icon"
+            android:scaleType="fitCenter"
+            android:padding="9dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="最近解析" />
+    </LinearLayout>
+
+    <!-- 五个页面共用容器：首页 / 我的 / 下载队列 / 本地 / 存储空间 -->
+    <FrameLayout
+        android:id="@+id/content"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+    <!-- 长按后的批量操作条：格式项=批量下载，队列项=批量删除 -->
+    <LinearLayout
+        android:id="@+id/selection_bar"
+        android:layout_width="match_parent"
+        android:layout_height="52dp"
+        android:background="#1f232c"
+        android:tag="card"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="16dp"
+        android:paddingEnd="12dp"
+        android:visibility="gone">
+        <TextView
+            android:id="@+id/sel_count"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="已选择 0 项"
+            android:textColor="#e8eaed"
+            android:tag="text"
+            android:textSize="13sp" />
+        <TextView
+            android:id="@+id/sel_all"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="全选"
+            android:textColor="#f97316"
+            android:tag="accent"
+            android:textSize="13sp"
+            android:padding="8dp" />
+        <TextView
+            android:id="@+id/sel_delete"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="删除"
+            android:textColor="#ef4444"
+            android:tag="danger"
+            android:textSize="13sp"
+            android:padding="8dp" />
+        <TextView
+            android:id="@+id/sel_cancel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="取消"
+            android:textColor="#8b909a"
+            android:tag="dim"
+            android:textSize="13sp"
+            android:padding="8dp" />
+    </LinearLayout>
+
+    <!-- 底部三个标签：仅最高级页面显示 -->
+    <LinearLayout
+        android:id="@+id/bottom_tab"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:background="#171a21"
+        android:tag="card"
+        android:orientation="horizontal">
+        <LinearLayout
+            android:id="@+id/tab_home"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:orientation="vertical">
+            <ImageView
+                android:id="@+id/tab_home_icon"
+                android:layout_width="22dp"
+                android:layout_height="22dp"
+                android:src="@drawable/ic_home"
+                android:tag="tab_home"
+                android:scaleType="fitCenter" />
+            <TextView
+                android:id="@+id/tab_home_text"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="首页"
+                android:textColor="#f97316"
+                android:tag="tab_home"
+                android:textSize="11sp" />
+        </LinearLayout>
+        <LinearLayout
+            android:id="@+id/tab_local"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:orientation="vertical">
+            <ImageView
+                android:id="@+id/tab_local_icon"
+                android:layout_width="22dp"
+                android:layout_height="22dp"
+                android:src="@drawable/ic_local"
+                android:tag="tab_local"
+                android:scaleType="fitCenter" />
+            <TextView
+                android:id="@+id/tab_local_text"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="本地"
+                android:textColor="#8b909a"
+                android:tag="tab_local"
+                android:textSize="11sp" />
+        </LinearLayout>
+        <LinearLayout
+            android:id="@+id/tab_me"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:orientation="vertical">
+            <ImageView
+                android:id="@+id/tab_me_icon"
+                android:layout_width="22dp"
+                android:layout_height="22dp"
+                android:src="@drawable/ic_user"
+                android:tag="tab_me"
+                android:scaleType="fitCenter" />
+            <TextView
+                android:id="@+id/tab_me_text"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="我的"
+                android:textColor="#8b909a"
+                android:tag="tab_me"
+                android:textSize="11sp" />
+        </LinearLayout>
+    </LinearLayout>
+</LinearLayout>

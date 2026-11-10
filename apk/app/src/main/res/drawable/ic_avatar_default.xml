@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 默认头像：火柴人（头 + 身体 + 四肢），由 Java 层按主题着色 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:pathData="M24,15 m-6,0 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0"
+        android:strokeColor="#FF8B909A"
+        android:strokeWidth="2.4"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M24,21 L24,32 M24,25 L16,29 M24,25 L32,29 M24,32 L18,41 M24,32 L30,41"
+        android:strokeColor="#FF8B909A"
+        android:strokeWidth="2.4"
+        android:fillColor="#00000000" />
+</vector>

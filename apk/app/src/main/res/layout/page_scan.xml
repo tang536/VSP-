@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:tag="bg">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="50dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="#171a21"
+        android:tag="card"
+        android:paddingStart="6dp"
+        android:paddingEnd="14dp">
+        <ImageButton
+            android:id="@+id/scan_close"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:src="@drawable/ic_close"
+            android:tag="icon"
+            android:scaleType="fitCenter"
+            android:padding="9dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="关闭" />
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="扫描本地媒体"
+            android:textColor="#e8eaed"
+            android:tag="text"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+    <!-- 主区域：大图标 + 状态 + 转圈 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:paddingStart="28dp"
+        android:paddingEnd="28dp">
+
+        <ImageView
+            android:layout_width="76dp"
+            android:layout_height="76dp"
+            android:src="@drawable/ic_scan"
+            android:tag="accent_icon"
+            android:scaleType="fitCenter" />
+
+        <TextView
+            android:id="@+id/scan_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="准备扫描"
+            android:textColor="#e8eaed"
+            android:tag="text"
+            android:textSize="15sp"
+            android:gravity="center"
+            android:textStyle="bold"
+            android:layout_marginTop="18dp" />
+
+        <TextView
+            android:id="@+id/scan_count"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="默认扫描手机内的全部视频、音频和图片"
+            android:textColor="#8b909a"
+            android:tag="dim"
+            android:textSize="12sp"
+            android:gravity="center"
+            android:layout_marginTop="8dp"
+            android:lineSpacingExtra="3dp" />
+
+        <ProgressBar
+            android:id="@+id/scan_progress"
+            android:layout_width="34dp"
+            android:layout_height="34dp"
+            android:indeterminate="true"
+            android:indeterminateTint="#f97316"
+            android:layout_marginTop="22dp"
+            android:visibility="gone" />
+    </LinearLayout>
+
+    <!-- 底部：重新扫描 + 自定义扫描 / 扫描过滤 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="46dp">
+            <Button
+                android:id="@+id/btn_scan_start"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:text="重新扫描"
+                android:textColor="#ffffff"
+                android:background="#f97316"
+                android:tag="accent_bg"
+                android:textSize="14sp" />
+            <ProgressBar
+                android:id="@+id/scan_btn_progress"
+                android:layout_width="22dp"
+                android:layout_height="22dp"
+                android:layout_gravity="center"
+                android:indeterminate="true"
+                android:indeterminateTint="#ffffff"
+                android:visibility="gone" />
+        </FrameLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:orientation="horizontal"
+            android:layout_marginTop="10dp">
+            <LinearLayout
+                android:id="@+id/btn_scan_custom"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:orientation="horizontal"
+                android:gravity="center"
+                android:background="#1f232c"
+                android:tag="soft"
+                android:clickable="true"
+                android:focusable="true">
+                <ImageView
+                    android:layout_width="16dp"
+                    android:layout_height="16dp"
+                    android:src="@drawable/ic_folder"
+                    android:tag="icon"
+                    android:scaleType="fitCenter" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="自定义扫描"
+                    android:textColor="#e8eaed"
+                    android:tag="text"
+                    android:textSize="13sp"
+                    android:layout_marginStart="8dp" />
+            </LinearLayout>
+            <LinearLayout
+                android:id="@+id/btn_scan_filter"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:layout_marginStart="10dp"
+                android:orientation="horizontal"
+                android:gravity="center"
+                android:background="#1f232c"
+                android:tag="soft"
+                android:clickable="true"
+                android:focusable="true">
+                <ImageView
+                    android:layout_width="16dp"
+                    android:layout_height="16dp"
+                    android:src="@drawable/ic_filter"
+                    android:tag="icon"
+                    android:scaleType="fitCenter" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="扫描过滤"
+                    android:textColor="#e8eaed"
+                    android:tag="text"
+                    android:textSize="13sp"
+                    android:layout_marginStart="8dp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/scan_scope"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="范围：手机全部媒体 · 类型：视频 / 音频 / 图片"
+            android:textColor="#8b909a"
+            android:tag="dim"
+            android:textSize="11sp"
+            android:gravity="center"
+            android:layout_marginTop="10dp" />
+    </LinearLayout>
+</LinearLayout>

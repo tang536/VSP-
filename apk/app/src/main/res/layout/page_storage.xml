@@ -1,0 +1,235 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:tag="bg">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="50dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="#171a21"
+        android:tag="card"
+        android:paddingStart="6dp"
+        android:paddingEnd="14dp">
+        <ImageButton
+            android:id="@+id/storage_back"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:src="@drawable/ic_back"
+            android:tag="icon"
+            android:scaleType="fitCenter"
+            android:padding="9dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="返回" />
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="存储管理"
+            android:textColor="#e8eaed"
+            android:tag="text"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="12dp">
+
+        <!-- 缓存：一行，右侧清空缓存 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="64dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:background="#171a21"
+            android:tag="card"
+            android:paddingStart="14dp"
+            android:paddingEnd="10dp"
+            android:layout_marginBottom="8dp">
+            <ImageView
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:src="@drawable/ic_storage"
+                android:tag="icon"
+                android:scaleType="fitCenter" />
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:layout_marginStart="12dp">
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="缓存"
+                    android:textColor="#e8eaed"
+                    android:tag="text"
+                    android:textSize="14sp" />
+                <TextView
+                    android:id="@+id/st_cache"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="0 B"
+                    android:textColor="#8b909a"
+                    android:tag="dim"
+                    android:textSize="11sp"
+                    android:layout_marginTop="3dp" />
+            </LinearLayout>
+            <FrameLayout
+                android:layout_width="92dp"
+                android:layout_height="34dp">
+                <TextView
+                    android:id="@+id/btn_clear_cache"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:text="清空缓存"
+                    android:textColor="#ffffff"
+                    android:background="#f97316"
+                    android:tag="accent_bg"
+                    android:textSize="12sp"
+                    android:gravity="center" />
+                <ProgressBar
+                    android:id="@+id/clear_cache_progress"
+                    android:layout_width="18dp"
+                    android:layout_height="18dp"
+                    android:layout_gravity="center"
+                    android:indeterminate="true"
+                    android:indeterminateTint="#ffffff"
+                    android:visibility="gone" />
+            </FrameLayout>
+        </LinearLayout>
+
+        <!-- 下载文件：一行，右侧清空全部下载；整行点击看文件列表 -->
+        <LinearLayout
+            android:id="@+id/row_files"
+            android:layout_width="match_parent"
+            android:layout_height="64dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:background="#171a21"
+            android:tag="card"
+            android:paddingStart="14dp"
+            android:paddingEnd="10dp"
+            android:layout_marginBottom="8dp"
+            android:clickable="true"
+            android:focusable="true">
+            <ImageView
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:src="@drawable/ic_download"
+                android:tag="icon"
+                android:scaleType="fitCenter" />
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:layout_marginStart="12dp">
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="下载文件"
+                    android:textColor="#e8eaed"
+                    android:tag="text"
+                    android:textSize="14sp" />
+                <TextView
+                    android:id="@+id/st_count"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="0 个"
+                    android:textColor="#8b909a"
+                    android:tag="dim"
+                    android:textSize="11sp"
+                    android:layout_marginTop="3dp" />
+            </LinearLayout>
+            <FrameLayout
+                android:layout_width="92dp"
+                android:layout_height="34dp">
+                <TextView
+                    android:id="@+id/btn_clear_all"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:text="全部清空"
+                    android:textColor="#ef4444"
+                    android:background="#ef44441a"
+                    android:tag="danger"
+                    android:textSize="12sp"
+                    android:gravity="center" />
+                <ProgressBar
+                    android:id="@+id/clear_all_progress"
+                    android:layout_width="18dp"
+                    android:layout_height="18dp"
+                    android:layout_gravity="center"
+                    android:indeterminate="true"
+                    android:indeterminateTint="#ef4444"
+                    android:visibility="gone" />
+            </FrameLayout>
+        </LinearLayout>
+
+        <!-- 占用空间：一行 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="64dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:background="#171a21"
+            android:tag="card"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:layout_marginBottom="8dp">
+            <ImageView
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:src="@drawable/ic_folder"
+                android:tag="icon"
+                android:scaleType="fitCenter" />
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:layout_marginStart="12dp">
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="占用空间"
+                    android:textColor="#e8eaed"
+                    android:tag="text"
+                    android:textSize="14sp" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="已下载文件占用的存储"
+                    android:textColor="#8b909a"
+                    android:tag="dim"
+                    android:textSize="11sp"
+                    android:layout_marginTop="3dp" />
+            </LinearLayout>
+            <TextView
+                android:id="@+id/st_size"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="0 B"
+                android:textColor="#e8eaed"
+                android:tag="text"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="点「下载文件」可查看具体文件，支持单独播放和删除"
+            android:textColor="#8b909a"
+            android:tag="dim"
+            android:textSize="11sp"
+            android:paddingStart="2dp"
+            android:paddingTop="6dp" />
+    </LinearLayout>
+</LinearLayout>

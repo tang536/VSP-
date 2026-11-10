@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 自适应图标前景：只保留白色 V（透明底），底色交给 ic_launcher_background，
+     图形落在 108 视口的中间安全区（18~90）内，避免被启动器裁掉 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#ffffff"
+        android:pathData="M29,31h15.4l9.6,26.3l9.6,-26.3H79l-17,45.4H46z" />
+</vector>

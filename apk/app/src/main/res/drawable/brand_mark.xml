@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- VSP 品牌 V 字标：橙色底 + 白色 V，与 Web / favicon / 启动图标一致 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="40"
+    android:viewportHeight="40">
+    <path
+        android:fillColor="#F97316"
+        android:pathData="M0,0h40v40h-40z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M10,11h6.4l3.6,10.2l3.6,-10.2h6.4l-6.8,18h-6.4z" />
+</vector>

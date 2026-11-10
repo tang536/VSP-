@@ -1,0 +1,66 @@
+# ---------- 签名与密钥（绝不能提交）----------
+*.keystore
+*.jks
+*.p12
+*.pfx
+*.pem
+*.key
+keystore.properties
+local.properties
+.env
+.env.*
+
+# ---------- Gradle / Android 构建产物 ----------
+.gradle/
+apk/.gradle/
+build/
+apk/build/
+apk/app/build/
+*.apk
+*.aab
+*.ap_
+captures/
+.cxx/
+
+# ---------- 前端 ----------
+node_modules/
+web/front/node_modules/
+dist/
+web/front/dist/
+# Gitee 兜底更新源：版本索引要入库（同一层级的构建产物仍忽略）
+!apk/dist/
+apk/dist/*
+!apk/dist/latest.json
+.vite/
+*.tsbuildinfo
+
+# ---------- .NET ----------
+bin/
+obj/
+web/back/bin/
+web/back/obj/
+*.user
+*.suo
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---------- IDE / 系统 ----------
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- 工具会话数据 ----------
+.workbuddy/
+
+# ---------- 临时文件 ----------
+*.log
+*.tmp
+_*.json

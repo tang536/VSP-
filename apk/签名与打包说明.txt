@@ -1,0 +1,207 @@
+﻿VSP 解析 · 正式签名与打包说明（v1.0.0）
+========================================
+
+一、交付文件
+  项目根目录：VSP解析-v1.0.0.apk
+  构建输出：apk/app/build/outputs/apk/release/app-release.apk
+  SHA256：619801030295842e7d44faad4a690be02b25d50ba10b7427855ea1cc1f74d964
+  大小：29,154,045 字节（约 27.8 MiB）
+  版本：versionCode 9 / versionName 1.0.0，minSdk 24 / targetSdk 36 / arm64-v8a
+  与此前各版本使用同一把正式证书，可直接覆盖安装，升级不清数据。
+  发布地址：
+    GitHub：https://github.com/tang536/VSP-/releases/latest
+    Gitee ：https://gitee.com/tang-rongqiang/VSP/releases/latest
+  app 会同时查这两个源，取版本号更高的那个。
+
+二、签名证书（务必备份！）
+  文件：apk/app/vsp-release.keystore（PKCS12）
+  配置：apk/app/keystore.properties
+  别名：vsp
+  密码：见 apk/app/keystore.properties（该文件与 keystore 一样不入库，请离线备份）
+  主体：CN=VSP Parse, OU=VSP, O=VSP, L=Guangzhou, ST=Guangdong, C=CN
+  算法：RSA 2048，SHA384withRSA，有效期 10950 天
+  证书 SHA-256：271ffaed20e76f1fb573939eec20b9ae6503df16543db66f155f6a419ad17832
+  签名方案：APK Signature Scheme v2
+
+  !! 证书和密码一旦丢失，就无法发布能覆盖安装的升级包，只能换包名重装。
+  !! 请把 vsp-release.keystore 与 keystore.properties 复制到离线安全位置，不要公开。
+
+三、重新打包正式版（Git Bash）
+  cd "C:/Users/32854/Desktop/VSP解析/apk"
+  export PATH="/c/Users/32854/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/python:$PATH"
+  export ANDROID_HOME="C:/Users/32854/AppData/Local/Android/Sdk"
+  export ANDROID_SDK_ROOT="$ANDROID_HOME"
+  export JAVA_HOME="C:/Program Files/Microsoft/jdk-21.0.12.101-hotspot"
+  "/c/Users/32854/.gradle/wrapper/dists/gradle-8.14.3-all/cbf6zifq8xavouihta8md72jo/gradle-8.14.3/bin/gradle" :app:assembleRelease --no-daemon --console=plain -Pchaquopy.buildPython="C:/Users/32854/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/python/python.exe"
+
+  注意：Chaquopy 从 PATH 取 Python 解释器，必须先把 Python 3.12 目录前置，
+        否则会报 Could not find Python 3.12。
+
+四、图标重新生成（改了配色或形状时）
+  cd apk && python tools/make_icons.py
+  生成 mipmap-{mdpi..xxxhdpi}/ic_launcher.png 与 ic_launcher_round.png（满幅橙色渐变
+  圆角方块 + 白色 V，四角透明），并输出 apk/icon-preview-512.png 预览。
+  自适应图标走 res/mipmap-anydpi-v26/ic_launcher.xml：
+  底层 drawable/ic_launcher_background.xml（橙色渐变）、
+  前景 drawable/ic_launcher_foreground.xml（纯白 V，位于 108 视口中间安全区）。
+
+五、发布到 GitHub Release
+  仓库：tang536/VSP-（public，默认分支 main）
+  Token：存在 Windows 凭据管理器里（git credential helper = manager），不落盘。取用：
+          cd "C:/Users/32854/Desktop/university/电动车出租店出租管理系统/本地开发/eRentalSystem"
+          TOKEN=$(printf "protocol=https\nhost=github.com\n\n" | git credential fill | sed -n 's/^password=//p')
+
+  1) 建 release（tag 写成 v1.0.0 这种带 v 的形式，app 会自动去掉前缀比对）
+     curl -X POST -H "Authorization: Bearer $TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          -H "Content-Type: application/json; charset=utf-8" \
+          --data-binary @apk/release-v1.0.0.json \
+          https://api.github.com/repos/tang536/VSP-/releases
+
+  2) 传安装包（release id 从第 1 步返回里取）
+     curl -X POST -H "Authorization: Bearer $TOKEN" \
+          -H "Content-Type: application/vnd.android.package-archive" \
+          --data-binary @"VSP解析-v1.0.0.apk" \
+          "https://uploads.github.com/repos/tang536/VSP-/releases/<id>/assets?name=VSP-Parse-v1.0.0.apk"
+
+  3) 换包时先删旧 asset 再传新的，否则同名会 422
+     curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+          https://api.github.com/repos/tang536/VSP-/releases/assets/<asset_id>
+
+  4) 自检（匿名即可，app 也是匿名请求）
+     curl -s -H "Accept: application/vnd.github+json" \
+          https://api.github.com/repos/tang536/VSP-/releases/latest
+     返回里应能看到 tag_name=v1.0.0，assets[0].digest 的 sha256 与本地包一致。
+
+  注意：本机 curl 走 Windows schannel 做证书吊销检查会失败（CRYPT_E_NO_REVOCATION_CHECK），
+        命令行调试要加 --ssl-no-revoke；安卓端用 HttpURLConnection，不受影响。
+
+六、发布到 Gitee Release
+  仓库：tang-rongqiang/VSP（public，默认分支 main）
+  Token：Gitee → 设置 → 私人令牌 生成，32 位十六进制；不要写进仓库，用环境变量：
+          export GITEE_TOKEN=<你的私人令牌>
+  Gitee 的 OpenAPI 对公开仓库的读接口是匿名的，所以 app 端不需要带 token。
+
+  0) 推代码与 tag（用 token 走 HTTPS，避免交互式登录）
+     git remote add gitee "https://oauth2:$GITEE_TOKEN@gitee.com/tang-rongqiang/VSP.git"
+     git push gitee main && git push gitee v1.0.0
+
+  1) 建 release（201 返回里取 id）
+     curl -X POST "https://gitee.com/api/v5/repos/tang-rongqiang/VSP/releases?access_token=$GITEE_TOKEN" \
+          -H "Content-Type: application/json; charset=utf-8" \
+          --data-binary @apk/_gitee_rel.json
+     _gitee_rel.json 内容形如：
+       {"tag_name":"v1.0.0","name":"VSP 解析 v1.0.0","body":"<release notes>","target_commitish":"main"}
+
+  2) 传安装包（multipart，字段名必须是 file）
+     curl -X POST "https://gitee.com/api/v5/repos/tang-rongqiang/VSP/releases/<id>/attach_files?access_token=$GITEE_TOKEN" \
+          -F "file=@VSP解析-v1.0.0.apk;filename=VSP-Parse-v1.0.0.apk"
+
+  3) 换包时先删旧附件
+     curl -X DELETE "https://gitee.com/api/v5/repos/tang-rongqiang/VSP/releases/<id>/attach_files/<attach_id>?access_token=$GITEE_TOKEN"
+
+  4) 自检（匿名）
+     curl -s https://gitee.com/api/v5/repos/tang-rongqiang/VSP/releases/latest
+     应看到 tag_name=v1.0.0，assets 里含 VSP-Parse-v1.0.0.apk 的 browser_download_url。
+     再 curl -L 该地址下载，与本地包做 cmp 应完全一致。
+
+  5) 兜底索引 apk/dist/latest.json（仓库里没 Release 时 app 会读它）
+     内容：version / versionCode / apk / size / sha256 / date / notes
+     地址：https://gitee.com/tang-rongqiang/VSP/raw/main/apk/dist/latest.json
+     注意该地址会 302 跳到带签名的 CDN，app 里是手动跟随 Location 的。
+
+七、v1.0.0 本轮改动
+  1. 解析（B 站 / 抖音等站点）
+     - 病根：解析请求一直用 Android 移动 UA，B 站移动接口返回的 formats 是空数组，
+       于是 fallback 到 HTML 兜底，兜底抓不到 DASH 直链，最终报「找不到可下载的音视频直链」。
+     - 改为桌面 UA + 按站点补 Referer / Origin（_SITE_REFERERS 覆盖 B 站、抖音、
+       快手、小红书、微博、西瓜、知乎、腾讯视频、爱奇艺、优酷、A 站、虎牙、斗鱼等）。
+     - 实测 B 站：换 UA 后 15 个 formats（12 视频 + 3 音频，含 1080P），
+       视频流 has_v && !has_a 自动标 needsMerge=True。
+     - 下载链路同样要 Referer：实测同一 B 站直链，无 Referer 返回 403，带 Referer 返回 200。
+     - 抖音专用通道 _douyin_parse：抓 iesdouyin 分享页，从 window._ROUTER_DATA 里递归找
+       video/play_addr.url_list，把 playwm 换成 play 得到无水印地址；同时取 cover、music、
+       images（图集）；短链 v.douyin.com 先 _resolve_short 跟随跳转再识别作品 ID。
+     - _js_json 用括号计数截取内联 JSON（能容忍字符串里的花括号和转义）。
+     - 封面下载、直链下载都改走 _headers_for(url)。
+     - yt-dlp 统一 cachedir=False，避免 Android 上默认缓存目录不可写把解析带崩。
+  2. 观看界面（对齐系统相册 / 系统播放器）
+     - player_panel.xml 重写：纯黑底、去掉了原来的 #CC000000 控制条背景。
+     - 播放器：进度条是 rotation=-90 的 SeekBar（竖排贴左），宽度在运行时按屏高 46% 撑开；
+       左列上下两行是当前时间与总时长；底部一行 icon「播放 / 倍速 / 音量 / 全屏」。
+     - 顶栏：细线左箭头（ic_arrow_left）+ 文件名 + 副标题（分辨率 · 体积）+ 类型。
+     - 图片：底部 HorizontalScrollView 缩略图条（46dp 方块，选中项加 thumb_ring 描边），
+       点缩略图直接切图；下面一行「分享 / 信息 / 删除 / 更多」（ic_share / ic_info /
+       ic_delete / ic_more）。
+     - 顶栏与底栏加 scrim_top / scrim_bottom 渐变遮罩，白图标压在亮画面上也看得清。
+     - overlay 改成铺满全屏，点空白处收起控制条（原来点 overlay 只会刷新计时）。
+  3. 检查更新
+     - 已是最新版本：不再弹带仓库地址的对话框，改为 showTopHint 在顶部滑出一条
+       「当前已是最新版本 vX」，2 秒后自动淡出。
+     - 双源：GitHub releases/latest 与 Gitee releases/latest 都查，pickNewer 取版本高的；
+       某一源 404/超时不影响另一源。
+     - Gitee 没有 Release 时退回仓库索引 apk/dist/latest.json（fromGiteeIndex）。
+     - 检查失败对话框去掉长串仓库地址，只留一句原因 + 「重试」。
+  4. 更新下载改前台服务（UpdateService）
+     - 原因：DownloadManager 的通知由系统绘制，只能显示百分比，没法写速度和总量。
+     - 自建 dataSync 前台服务，HttpURLConnection 流式下载（128KB 缓冲），每 400ms 发通知：
+       进度条 + 「已下载 / 总大小」+ 「实时速度」，通知里带「取消下载」动作。
+     - 取消走 AtomicBoolean + disconnect；完成时通知改为「下载完成，点击安装」（FileProvider）。
+     - 应用内弹窗读 UpdateService 的静态状态，同一组数字；下载完成先校验体积再拉安装器。
+     - 下载期间 checkUpdate / downloadAndInstall 都被 updating 与 UpdateService.running 拦住。
+     - Manifest 补 FOREGROUND_SERVICE、FOREGROUND_SERVICE_DATA_SYNC、WAKE_LOCK，
+       注册 <service android:foregroundServiceType="dataSync">。
+     - 删掉了原来的 DownloadReceiver / pendingApkId 那一套。
+  5. 头像
+     - 保存改为原样落盘（流式 copy 原始字节，不裁剪、不缩放、不重新编码），
+       只做一次 decodeSampled(512) 确认不是坏图。
+     - 显示时 decodeSampled(avatarFile, 512)，ImageView CENTER_CROP 裁成方形，不占内存。
+     - 点头像直接 openPlayer 进全屏观看（可双指缩放），watchingAvatar=true 时底部只留
+       「更多」，里面是「更换头像 / 恢复默认头像」。
+     - 删掉 dialog_avatar 那套 AlertDialog 看图与 makeSquare 裁剪逻辑。
+  6. 缓存
+     - 病根：缩略图只在内存 LinkedHashMap（上限 80）里，退出就没了；而「缓存」统计只看
+       getCacheDir()，那个目录此前根本没写入过，所以永远显示 0 B。
+     - 新增磁盘缓存 cacheDir/thumbs/<md5前8字节>.img：loadThumb 与 loadMediaThumb 都是
+       内存 -> 磁盘 -> 网络，网络取到后写盘（JPEG 86）。
+     - 统计改为 getCacheDir() + getExternalCacheDir()；清空时两个目录都清，并清内存 Map，
+       随后重绘本地页让缩略图重新生成。
+  7. 版本号 versionCode 9 / versionName 1.0.0。
+
+八、验证结果
+  BUILD SUCCESSFUL（56 tasks，含 lintVitalRelease）
+  apksigner verify：v2 通过，证书 SHA-256 与 v1.0 起一致（271ffaed…7832）
+  zipalign -c 4 通过
+  aapt badging：versionCode 9 / versionName 1.0.0，非 debuggable，
+     application-icon 仍是自适应图标 res/BW.xml
+  Manifest：POST_NOTIFICATIONS、FOREGROUND_SERVICE、FOREGROUND_SERVICE_DATA_SYNC、
+     REQUEST_INSTALL_PACKAGES 齐全；com.vsp.app.UpdateService 已注册且 exported=false
+  dex 核对：decodeSampled / fillImageMeta / renderWatchThumbs / shareCurrentMedia /
+     showTopHint / thumbDiskFile / fetchGiteeRelease / UpdateService 均已入包，
+     User-Agent 字符串 "VSP-Parse-Updater/1.6 (Android)" 在包内
+  Python 字节码（assets/chaquopy/app.imy -> vsp.pyc）：_douyin_parse / _headers_for /
+     _resolve_short / _js_json / _ROUTER_DATA / playwm 全部存在
+  静态核对：MISSING_LAYOUTS / MISSING_DRAWABLE 为空（MISSING_IDS 仅 thumb_url，
+     它在 res/values/ids.xml 里以 type="id" 声明，属误报），24 个 XML 全部合法，
+     player_panel 新增的 10 个 id 全部存在
+  发布核对：
+     GitHub asset digest = sha256:619801030295842e7d44faad4a690be02b25d50ba10b7427855ea1cc1f74d964
+     Gitee 附件 curl -L 下载后与本地 cmp 完全一致，sha256 同为 6198…d964
+     Gitee releases/latest 匿名访问 200，tag_name=v1.0.0
+  解析实测：
+     https://www.bilibili.com/video/BV1GJ411x7h7 -> 12 视频流 + 3 音频流，1080P 在列
+     该视频直链：无 Referer 403、带 Referer 200（证明下载链路必须补站点头）
+
+九、仍存限制
+  本机无连接设备、无 AVD 与系统镜像，界面与点击流程仍未在真机验证
+     （构建、签名、资源、代码路径均为产物级/静态核对）。
+  抖音：本机到 iesdouyin.com 的 TLS 握手被网络策略打断，无法实测真实作品链接；
+     解析按分享页 _ROUTER_DATA 结构实现，若抖音改版需要按新结构调 _douyin_parse。
+     私有作品、需要登录的作品仍然解析不了（无 cookie）。
+  B 站 1080P 以上（大会员档）需要登录 cookie，当前只取游客可得的清晰度。
+  Android 上访问 api.github.com 需要网络能到 GitHub；Gitee 源可作替代。
+  首次更新需要在系统弹窗里允许「安装未知应用」；Android 13+ 看通知栏进度需允许通知。
+  MediaMuxer 只支持系统已支持编码的 MP4/M4A 组合，AV1/Opus 等异常组合
+     可能合并失败，此时保留原始分轨文件。
+  倍速依赖 MediaPlayer.setPlaybackParams（API 23+），个别机型或流格式不支持时会忽略。

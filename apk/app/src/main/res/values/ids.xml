@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 缩略图 ImageView 用来校验异步回调是否仍属于当前 URL，
+         与 XML 里的 android:tag（主题标记）分开存储，避免互相覆盖 -->
+    <item name="thumb_url" type="id" />
+</resources>

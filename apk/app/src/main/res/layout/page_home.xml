@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:tag="bg"
+    android:padding="12dp">
+
+    <!-- 解析入口 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginBottom="12dp">
+        <EditText
+            android:id="@+id/url_input"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_weight="1"
+            android:hint="粘贴链接，回车解析"
+            android:textColorHint="#8b909a"
+            android:textColor="#e8eaed"
+            android:background="#171a21"
+            android:tag="input"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:singleLine="true"
+            android:inputType="textUri" />
+
+        <FrameLayout
+            android:layout_width="72dp"
+            android:layout_height="48dp"
+            android:layout_marginStart="8dp">
+            <Button
+                android:id="@+id/btn_parse"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:text="解析"
+                android:textColor="#ffffff"
+                android:background="#f97316"
+                android:tag="accent_bg"
+                android:textSize="14sp" />
+            <ProgressBar
+                android:id="@+id/parse_progress"
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:layout_gravity="center"
+                android:indeterminate="true"
+                android:indeterminateTint="#ffffff"
+                android:visibility="gone" />
+        </FrameLayout>
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/error_text"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="#fca5a5"
+        android:textSize="13sp"
+        android:padding="10dp"
+        android:visibility="gone"
+        android:background="#ef44441a"
+        android:tag="error"
+        android:layout_marginBottom="8dp" />
+
+    <!-- 播放器：位于解析入口下方、解析结果上方，仅在预览时展开 -->
+    <FrameLayout
+        android:id="@+id/player_slot"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+
+    <!-- 解析结果：左侧封面预览 + 右侧标题 / 作者 -->
+    <LinearLayout
+        android:id="@+id/result_meta"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:background="#171a21"
+        android:tag="card"
+        android:gravity="center_vertical"
+        android:padding="10dp"
+        android:visibility="gone"
+        android:layout_marginBottom="8dp">
+        <ImageView
+            android:id="@+id/result_thumb"
+            android:layout_width="104dp"
+            android:layout_height="70dp"
+            android:scaleType="centerCrop"
+            android:background="#1f232c"
+            android:tag="thumb"
+            android:contentDescription="封面预览" />
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:paddingStart="12dp">
+            <TextView
+                android:id="@+id/result_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="#e8eaed"
+                android:tag="text"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:maxLines="2"
+                android:ellipsize="end" />
+            <TextView
+                android:id="@+id/result_uploader"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="#8b909a"
+                android:tag="dim"
+                android:textSize="12sp"
+                android:singleLine="true"
+                android:ellipsize="end"
+                android:layout_marginTop="6dp" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/tabs"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:visibility="gone"
+        android:layout_marginBottom="2dp">
+        <TextView
+            android:id="@+id/tab_videos"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="视频"
+            android:textColor="#f97316"
+            android:tag="fmt_tab"
+            android:textSize="13sp"
+            android:padding="10dp" />
+        <TextView
+            android:id="@+id/tab_audios"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="音频"
+            android:textColor="#8b909a"
+            android:tag="fmt_tab"
+            android:textSize="13sp"
+            android:padding="10dp" />
+        <TextView
+            android:id="@+id/tab_images"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="图片"
+            android:textColor="#8b909a"
+            android:tag="fmt_tab"
+            android:textSize="13sp"
+            android:padding="10dp" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/format_hint"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="点击条目在上方预览区播放 · 长按可批量下载"
+        android:textColor="#8b909a"
+        android:tag="dim"
+        android:textSize="11sp"
+        android:paddingStart="10dp"
+        android:paddingBottom="8dp"
+        android:visibility="gone" />
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/format_list"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:scrollbars="none" />
+</LinearLayout>

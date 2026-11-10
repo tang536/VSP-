@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 选中态缩略图的外圈 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#00000000" />
+    <stroke
+        android:width="2dp"
+        android:color="#F97316" />
+    <corners android:radius="5dp" />
+</shape>

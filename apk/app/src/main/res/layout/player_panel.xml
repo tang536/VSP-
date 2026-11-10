@@ -1,0 +1,413 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 全 app 唯一的观看层，对齐系统相册 / 系统播放器：
+     纯黑底、细线白图标；顶部返回 + 文件名；底部横向进度条 + 控制行；
+     图片模式下方是缩略图条与分享 / 信息 / 删除（头像的更多走长按，不占按钮位）。
+     顶部 / 底部的安全区内边距由 Java 按系统栏与刘海动态叠加，避免压到状态栏时间。 -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/player_panel"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000"
+    android:tag="card"
+    android:visibility="gone">
+
+    <FrameLayout
+        android:id="@+id/player_stage"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#000000">
+
+        <VideoView
+            android:id="@+id/player_video"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_gravity="center" />
+
+        <LinearLayout
+            android:id="@+id/player_audio"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:padding="24dp"
+            android:visibility="gone">
+
+            <ImageView
+                android:id="@+id/player_audio_cover"
+                android:layout_width="132dp"
+                android:layout_height="132dp"
+                android:src="@drawable/ic_music"
+                android:tag="overlay_icon"
+                android:scaleType="fitCenter"
+                android:padding="30dp"
+                android:background="#141414" />
+
+            <TextView
+                android:id="@+id/player_audio_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="#F2F2F2"
+                android:tag="overlay_text"
+                android:textSize="15sp"
+                android:gravity="center"
+                android:layout_marginTop="20dp"
+                android:maxLines="2"
+                android:ellipsize="end" />
+
+            <TextView
+                android:id="@+id/player_audio_time"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="#8A8A8A"
+                android:tag="dim"
+                android:textSize="12sp"
+                android:gravity="center"
+                android:layout_marginTop="8dp" />
+        </LinearLayout>
+
+        <ImageView
+            android:id="@+id/player_image"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:scaleType="matrix"
+            android:background="#000000"
+            android:visibility="gone"
+            android:contentDescription="图片查看" />
+    </FrameLayout>
+
+    <!-- 视频 / 音频控制层：无背景条，直接叠在画面上（系统播放器风格） -->
+    <FrameLayout
+        android:id="@+id/player_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:id="@+id/player_bottom"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:orientation="vertical"
+            android:background="@drawable/scrim_bottom"
+            android:paddingTop="26dp">
+
+            <!-- 横向进度：当前时间 / 滑杆 / 总时长（系统播放器就是这一行） -->
+            <LinearLayout
+                android:id="@+id/player_seek_wrap"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp">
+
+                <TextView
+                    android:id="@+id/player_time"
+                    android:layout_width="44dp"
+                    android:layout_height="wrap_content"
+                    android:text="00:00"
+                    android:textColor="#FFFFFF"
+                    android:tag="overlay_text"
+                    android:textSize="11sp"
+                    android:gravity="center_vertical|start" />
+
+                <SeekBar
+                    android:id="@+id/player_audio_seek"
+                    android:layout_width="0dp"
+                    android:layout_height="34dp"
+                    android:layout_weight="1"
+                    android:layout_marginStart="6dp"
+                    android:layout_marginEnd="6dp"
+                    android:maxHeight="2dp"
+                    android:minHeight="2dp"
+                    android:paddingTop="14dp"
+                    android:paddingBottom="14dp"
+                    android:progressDrawable="@drawable/seek_line"
+                    android:thumb="@drawable/seek_thumb" />
+
+                <TextView
+                    android:id="@+id/player_duration"
+                    android:layout_width="44dp"
+                    android:layout_height="wrap_content"
+                    android:text="00:00"
+                    android:textColor="#A8A8A8"
+                    android:tag="dim"
+                    android:textSize="11sp"
+                    android:gravity="center_vertical|end" />
+            </LinearLayout>
+
+            <!-- 控制行：播放 / 倍速 / 音量 / 横竖屏 -->
+            <LinearLayout
+                android:id="@+id/player_ctrl_row"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp"
+                android:paddingTop="4dp"
+                android:paddingBottom="14dp">
+
+                <ImageButton
+                    android:id="@+id/player_audio_toggle"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
+                    android:src="@drawable/ic_play"
+                    android:tag="overlay_icon"
+                    android:scaleType="fitCenter"
+                    android:padding="9dp"
+                    android:background="?android:attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="播放或暂停" />
+
+                <TextView
+                    android:id="@+id/btn_speed"
+                    android:layout_width="wrap_content"
+                    android:layout_height="44dp"
+                    android:gravity="center"
+                    android:text="1.0x"
+                    android:textColor="#FFFFFF"
+                    android:tag="overlay_text"
+                    android:textSize="12sp"
+                    android:layout_marginStart="6dp"
+                    android:paddingStart="8dp"
+                    android:paddingEnd="8dp" />
+
+                <View
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+
+                <!-- 音量：默认只显示图标，点一下才展开滑杆与百分比 -->
+                <ImageView
+                    android:id="@+id/player_volume_icon"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
+                    android:src="@drawable/ic_volume"
+                    android:tag="overlay_icon"
+                    android:scaleType="fitCenter"
+                    android:padding="11dp"
+                    android:background="?android:attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="音量" />
+
+                <SeekBar
+                    android:id="@+id/player_volume"
+                    android:layout_width="92dp"
+                    android:layout_height="wrap_content"
+                    android:max="100"
+                    android:progress="100"
+                    android:maxHeight="2dp"
+                    android:minHeight="2dp"
+                    android:paddingTop="10dp"
+                    android:paddingBottom="10dp"
+                    android:visibility="gone"
+                    android:progressDrawable="@drawable/seek_line"
+                    android:thumb="@drawable/seek_thumb" />
+
+                <TextView
+                    android:id="@+id/player_volume_val"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:minWidth="34dp"
+                    android:text="100%"
+                    android:textColor="#FFFFFF"
+                    android:tag="overlay_text"
+                    android:textSize="10sp"
+                    android:gravity="end"
+                    android:visibility="gone" />
+
+                <!-- 横竖屏切换：点一下在横屏播放 / 竖屏播放之间切换 -->
+                <ImageView
+                    android:id="@+id/player_orient"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
+                    android:src="@drawable/ic_rotate"
+                    android:tag="overlay_icon"
+                    android:scaleType="fitCenter"
+                    android:padding="11dp"
+                    android:background="?android:attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="横屏播放" />
+            </LinearLayout>
+        </LinearLayout>
+    </FrameLayout>
+
+    <!-- 顶部：细线返回 + 文件名（系统相册顶部栏的写法） -->
+    <LinearLayout
+        android:id="@+id/player_header"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="4dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="12dp"
+        android:paddingBottom="10dp">
+
+        <ImageButton
+            android:id="@+id/player_close"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:src="@drawable/ic_arrow_left"
+            android:tag="overlay_icon"
+            android:scaleType="fitCenter"
+            android:padding="10dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="退出观看" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="6dp"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/player_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="#FFFFFF"
+                android:tag="overlay_text"
+                android:textSize="14sp"
+                android:singleLine="true"
+                android:ellipsize="middle" />
+
+            <TextView
+                android:id="@+id/player_sub"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:textColor="#A8A8A8"
+                android:tag="dim"
+                android:textSize="11sp"
+                android:singleLine="true"
+                android:ellipsize="end" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/player_kind"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:textColor="#FFFFFF"
+            android:tag="overlay_text"
+            android:textSize="11sp"
+            android:text="视频" />
+    </LinearLayout>
+
+    <!-- 图片模式：底部缩略图条 + 操作行（对照系统相册看图界面） -->
+    <LinearLayout
+        android:id="@+id/player_img_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:orientation="vertical"
+        android:background="@drawable/scrim_bottom"
+        android:visibility="gone">
+
+        <HorizontalScrollView
+            android:id="@+id/player_thumbs_scroll"
+            android:layout_width="match_parent"
+            android:layout_height="60dp"
+            android:scrollbars="none"
+            android:paddingStart="10dp"
+            android:paddingEnd="10dp"
+            android:clipToPadding="false">
+
+            <LinearLayout
+                android:id="@+id/player_thumbs"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:orientation="horizontal"
+                android:gravity="center_vertical" />
+        </HorizontalScrollView>
+
+        <!-- 头像观看时整行隐藏，更换 / 恢复默认改由长按头像触发 -->
+        <LinearLayout
+            android:id="@+id/player_img_actions"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingTop="8dp"
+            android:paddingBottom="14dp">
+
+            <LinearLayout
+                android:id="@+id/player_img_share"
+                android:layout_width="0dp"
+                android:layout_height="56dp"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:gravity="center"
+                android:background="?android:attr/selectableItemBackgroundBorderless">
+
+                <ImageView
+                    android:layout_width="22dp"
+                    android:layout_height="22dp"
+                    android:src="@drawable/ic_share"
+                    android:tag="overlay_icon"
+                    android:scaleType="fitCenter" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="分享"
+                    android:textColor="#E6E6E6"
+                    android:tag="overlay_text"
+                    android:textSize="10sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/player_img_info"
+                android:layout_width="0dp"
+                android:layout_height="56dp"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:gravity="center"
+                android:background="?android:attr/selectableItemBackgroundBorderless">
+
+                <ImageView
+                    android:layout_width="22dp"
+                    android:layout_height="22dp"
+                    android:src="@drawable/ic_info"
+                    android:tag="overlay_icon"
+                    android:scaleType="fitCenter" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="信息"
+                    android:textColor="#E6E6E6"
+                    android:tag="overlay_text"
+                    android:textSize="10sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/player_img_delete"
+                android:layout_width="0dp"
+                android:layout_height="56dp"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:gravity="center"
+                android:background="?android:attr/selectableItemBackgroundBorderless">
+
+                <ImageView
+                    android:layout_width="22dp"
+                    android:layout_height="22dp"
+                    android:src="@drawable/ic_delete"
+                    android:tag="overlay_icon"
+                    android:scaleType="fitCenter" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="删除"
+                    android:textColor="#E6E6E6"
+                    android:tag="overlay_text"
+                    android:textSize="10sp" />
+            </LinearLayout>
+        </LinearLayout>
+    </LinearLayout>
+</FrameLayout>

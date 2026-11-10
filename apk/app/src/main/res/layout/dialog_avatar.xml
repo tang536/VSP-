@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 点击头像后展示的大图；长按大图弹出更换 / 恢复默认头像 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:gravity="center_horizontal"
+    android:background="#171a21"
+    android:tag="card"
+    android:padding="16dp">
+
+    <ImageView
+        android:id="@+id/avatar_large"
+        android:layout_width="260dp"
+        android:layout_height="260dp"
+        android:scaleType="fitCenter"
+        android:background="#1f232c"
+        android:contentDescription="头像大图" />
+
+    <TextView
+        android:id="@+id/avatar_hint"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="长按图片可更换 / 恢复默认头像"
+        android:textColor="#8b909a"
+        android:tag="dim"
+        android:textSize="12sp"
+        android:layout_marginTop="12dp" />
+</LinearLayout>

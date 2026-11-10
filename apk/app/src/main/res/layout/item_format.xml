@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:padding="12dp"
+    android:background="#171a21"
+    android:tag="card"
+    android:layout_marginBottom="1px">
+    <CheckBox
+        android:id="@+id/f_check"
+        android:layout_width="32dp"
+        android:layout_height="32dp"
+        android:buttonTint="#f97316"
+        android:visibility="gone" />
+    <ImageView
+        android:id="@+id/f_icon"
+        android:layout_width="24dp"
+        android:layout_height="24dp"
+        android:src="@drawable/ic_video"
+        android:tag="icon"
+        android:scaleType="fitCenter"
+        android:contentDescription="媒体类型" />
+    <TextView
+        android:id="@+id/f_quality"
+        android:layout_width="70dp"
+        android:layout_height="wrap_content"
+        android:textColor="#e8eaed"
+        android:tag="text"
+        android:textSize="13sp"
+        android:textStyle="bold"
+        android:singleLine="true"
+        android:layout_marginStart="10dp" />
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:orientation="vertical">
+        <TextView
+            android:id="@+id/f_meta"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#8b909a"
+            android:tag="dim"
+            android:textSize="11sp"
+            android:singleLine="true" />
+        <TextView
+            android:id="@+id/f_size"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#8b909a"
+            android:tag="dim"
+            android:textSize="11sp"
+            android:layout_marginTop="2dp" />
+    </LinearLayout>
+    <ImageButton
+        android:id="@+id/btn_download"
+        android:layout_width="36dp"
+        android:layout_height="36dp"
+        android:src="@drawable/ic_download"
+        android:tag="accent_icon"
+        android:scaleType="fitCenter"
+        android:padding="7dp"
+        android:background="?android:attr/selectableItemBackgroundBorderless"
+        android:contentDescription="下载" />
+</LinearLayout>
