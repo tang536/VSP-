@@ -5592,11 +5592,15 @@ public class MainActivity extends Activity {
     }
 
     private void showUpdateProgress() {
+        // 服务刚被拉起时持久化状态可能还是上一次的 failed，不能因此把正在重试的下载
+        // 又显示成「下载中断」；只有服务确实不在跑时才认持久化的失败状态。
+        boolean active = UpdateService.running
+                || UpdateStore.STATE_DOWNLOADING.equals(UpdateService.state);
         int mode;
         if (UpdateStore.hasCompleted(this) || UpdateStore.STATE_DONE.equals(UpdateService.state)) {
             mode = UPDATE_MODE_DONE;
-        } else if (UpdateStore.STATE_FAILED.equals(UpdateService.state)
-                || UpdateStore.STATE_FAILED.equals(UpdateStore.state(this))) {
+        } else if (!active && (UpdateStore.STATE_FAILED.equals(UpdateService.state)
+                || UpdateStore.STATE_FAILED.equals(UpdateStore.state(this)))) {
             mode = UPDATE_MODE_FAILED;
         } else {
             mode = UPDATE_MODE_PROGRESS;
