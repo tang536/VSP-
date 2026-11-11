@@ -56,6 +56,22 @@ import android.widget.VideoView;
 
 import androidx.core.content.FileProvider;
 import androidx.core.graphics.Insets;
+import androidx.media3.common.AudioAttributes;
+import androidx.media3.common.C;
+import androidx.media3.common.PlaybackException;
+import androidx.media3.common.PlaybackParameters;
+import androidx.media3.common.Player;
+import androidx.media3.common.VideoSize;
+import androidx.media3.datasource.DataSource;
+import androidx.media3.datasource.DefaultDataSource;
+import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.dash.DashMediaSource;
+import androidx.media3.exoplayer.hls.HlsMediaSource;
+import androidx.media3.exoplayer.source.MediaSource;
+import androidx.media3.exoplayer.source.MergingMediaSource;
+import androidx.media3.exoplayer.source.ProgressiveMediaSource;
+import androidx.media3.ui.PlayerView;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
@@ -138,6 +154,13 @@ public class MainActivity extends Activity {
     private static final String UA =
             "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
                     + "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36";
+    /** 下载链路用的桌面 UA；网络视频预览也用它，保证和「下载能成」那条路一致 */
+    private static final String DESKTOP_UA =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    + "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+    private static final String KIND_HLS = "hls";
+    private static final String KIND_DASH = "dash";
+    private static final String KIND_PROGRESSIVE = "progressive";
 
     private Python py;
     private volatile boolean pyReady = false;
@@ -205,6 +228,13 @@ public class MainActivity extends Activity {
 
     // 观看层（视频 / 音频 / 图片共用：全屏、进度、倍速、音量）
     private VideoView playerVideo;
+    /** 网络视频：ExoPlayer + PlayerView；本地 / content 视频仍走 VideoView */
+    private PlayerView playerExo;
+    private ExoPlayer exoPlayer;
+    private boolean exoActive = false, exoPrepared = false;
+    private String exoSource = "", exoKind = KIND_PROGRESSIVE, exoAudioUrl = "";
+    private String previewPageUrl = "", previewFormatId = "";
+    private boolean exoTriedDropAudio = false, exoTriedRefresh = false;
     private View playerAudio, playerHeader, playerStage, playerOverlay;
     private int playerType = TYPE_IMAGE;
     private ImageView playerImage, playerAudioCover, playerAudioToggle;
@@ -312,11 +342,18 @@ public class MainActivity extends Activity {
     private final Runnable progressTick = new Runnable() {
         @Override
         public void run() {
-            MediaPlayer mp = currentMp;
-            if (mp == null) return;
+            int pos = 0, dur = 0;
             try {
-                int pos = mp.getCurrentPosition();
-                int dur = mp.getDuration();
+                if (playerType == TYPE_VIDEO && exoActive && exoPlayer != null) {
+                    pos = (int) Math.max(0, exoPlayer.getCurrentPosition());
+                    long d = exoPlayer.getDuration();
+                    dur = (d == C.TIME_UNSET || d < 0) ? 0 : (int) d;
+                } else {
+                    MediaPlayer mp = currentMp;
+                    if (mp == null) return;
+                    pos = mp.getCurrentPosition();
+                    dur = mp.getDuration();
+                }
                 if (dur > 0) {
                     playerAudioSeek.setMax(dur);
                     playerAudioSeek.setProgress(pos);
@@ -326,6 +363,55 @@ public class MainActivity extends Activity {
             } catch (Throwable ignored) {
             }
             ui.postDelayed(this, 500);
+        }
+    };
+
+    /** ExoPlayer 18 秒还没 READY 就当失败：部分 CDN 会一直连但不出数据 */
+    private final Runnable exoLoadTimeout = () -> {
+        if (exoActive && !exoPrepared) {
+            handleExoFailure("加载超时（18 秒）");
+        }
+    };
+
+    private final Player.Listener exoListener = new Player.Listener() {
+        @Override
+        public void onPlaybackStateChanged(int state) {
+            if (!exoActive || playerExo == null) return;
+            if (state == Player.STATE_READY) {
+                exoPrepared = true;
+                ui.removeCallbacks(exoLoadTimeout);
+                applyPlaybackSettings(null);
+                playerAudioToggle.setImageResource(R.drawable.ic_pause);
+                updateVideoInlineMeta(null, exoSource, false);
+                ui.removeCallbacks(progressTick);
+                ui.post(progressTick);
+            } else if (state == Player.STATE_ENDED) {
+                playerAudioToggle.setImageResource(R.drawable.ic_resume);
+                ui.removeCallbacks(progressTick);
+            }
+        }
+
+        @Override
+        public void onIsPlayingChanged(boolean isPlaying) {
+            if (!exoActive) return;
+            playerAudioToggle.setImageResource(isPlaying
+                    ? R.drawable.ic_pause : R.drawable.ic_resume);
+        }
+
+        @Override
+        public void onVideoSizeChanged(VideoSize videoSize) {
+            if (exoActive && exoPrepared) updateVideoInlineMeta(null, exoSource, false);
+        }
+
+        @Override
+        public void onPlayerError(PlaybackException error) {
+            if (!exoActive) return;
+            String code = error == null ? "未知错误"
+                    : "ExoPlayer 错误 " + error.errorCode;
+            String msg = error == null || error.getMessage() == null
+                    ? "" : error.getMessage();
+            if (msg.length() > 180) msg = msg.substring(0, 180) + "…";
+            handleExoFailure(code + (msg.isEmpty() ? "" : " · " + msg));
         }
     };
 
@@ -613,6 +699,12 @@ public class MainActivity extends Activity {
 
     private void bindPlayer() {
         playerVideo = playerPanel.findViewById(R.id.player_video);
+        playerExo = playerPanel.findViewById(R.id.player_exo);
+        try {
+            playerExo.setUseController(false);
+            playerExo.setResizeMode(androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT);
+        } catch (Throwable ignored) {
+        }
         playerAudio = playerPanel.findViewById(R.id.player_audio);
         playerImage = playerPanel.findViewById(R.id.player_image);
         playerAudioCover = playerPanel.findViewById(R.id.player_audio_cover);
@@ -657,6 +749,10 @@ public class MainActivity extends Activity {
         };
         playerStage.setOnClickListener(toggle);
         playerVideo.setOnClickListener(toggle);
+        if (playerExo != null) {
+            playerExo.setOnClickListener(toggle);
+            playerExo.setKeepScreenOn(true);
+        }
         playerAudio.setOnClickListener(toggle);
         playerImage.setOnClickListener(toggle);
         // 长按画面 = 更多（头像在这里改头像 / 恢复默认）
@@ -668,6 +764,12 @@ public class MainActivity extends Activity {
             showWatchMoreMenu();
             return true;
         });
+        if (playerExo != null) {
+            playerExo.setOnLongClickListener(v -> {
+                showWatchMoreMenu();
+                return true;
+            });
+        }
         playerAudio.setOnLongClickListener(v -> {
             showWatchMoreMenu();
             return true;
@@ -732,11 +834,18 @@ public class MainActivity extends Activity {
             public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
                 if (fromUser) {
                     showPlayerOverlay();
-                    MediaPlayer mp = currentMp;
-                    if (mp != null) {
+                    if (exoActive && exoPlayer != null) {
                         try {
-                            mp.seekTo(progress);
+                            exoPlayer.seekTo(progress);
                         } catch (Throwable ignored) {
+                        }
+                    } else {
+                        MediaPlayer mp = currentMp;
+                        if (mp != null) {
+                            try {
+                                mp.seekTo(progress);
+                            } catch (Throwable ignored) {
+                            }
                         }
                     }
                 }
@@ -759,7 +868,12 @@ public class MainActivity extends Activity {
                 showPlayerOverlay();
                 playVolume = progress / 100f;
                 playerVolumeVal.setText(progress + "%");
-                if (currentMp != null) {
+                if (exoActive && exoPlayer != null) {
+                    try {
+                        exoPlayer.setVolume(playVolume);
+                    } catch (Throwable ignored) {
+                    }
+                } else if (currentMp != null) {
                     try {
                         currentMp.setVolume(playVolume, playVolume);
                     } catch (Throwable ignored) {
@@ -1761,6 +1875,8 @@ public class MainActivity extends Activity {
         final boolean image = "thumb".equals(formatId) || "images".equals(currentTab);
         final int type = image ? TYPE_IMAGE : ("audios".equals(currentTab) ? TYPE_AUDIO : TYPE_VIDEO);
         final String title = resultTitle.getText().toString();
+        previewPageUrl = currentUrl;
+        previewFormatId = formatId;
 
         if (type == TYPE_IMAGE) {
             String url = currentThumb.isEmpty() ? fmt.optString("url", "") : currentThumb;
@@ -1771,26 +1887,64 @@ public class MainActivity extends Activity {
             openPlayer(url, TYPE_IMAGE, title, false);
             return;
         }
+
+        // 解析结果里已经带了直链（yt-dlp 的 format 也带 url）。直接用它：
+        // 以前所有预览都重新跑一次 get_preview_url，部分站点的 format_id 两次解析
+        // 并不稳定，链接也会在这期间过期，表现就是「同一个视频有时能预览、有时不能」。
+        String direct = fmt.optString("url", "").trim();
+        if (direct.startsWith("http://") || direct.startsWith("https://")) {
+            openPlayer(direct, type, title, false, null, -1, fmt);
+            return;
+        }
+
         if (!pyReady) {
             Toast.makeText(this, "正在初始化，请稍候…", Toast.LENGTH_SHORT).show();
             return;
         }
         Toast.makeText(this, "正在准备预览…", Toast.LENGTH_SHORT).show();
         new Thread(() -> {
+            String out = "";
+            String fail = "";
             try {
-                String previewUrl = py.getModule("vsp").callAttr("get_preview_url", currentUrl, formatId).toString();
-                ui.post(() -> {
-                    if (previewUrl == null || previewUrl.isEmpty()) {
-                        // 解析层根本没给出直链，也把原因摊出来（别只丢一句「无法获取预览」）
-                        showPreviewDiagnosis(null, -1, -1,
-                                "解析没有返回可播放的直链（该条目可能只有分离的音视频轨）");
-                    } else {
-                        openPlayer(previewUrl, type, title, false);
-                    }
-                });
+                out = py.getModule("vsp")
+                        .callAttr("get_preview_info", currentUrl, formatId, "", false)
+                        .toString();
             } catch (Exception e) {
-                ui.post(() -> Toast.makeText(this, "预览失败: " + friendlyError(e), Toast.LENGTH_SHORT).show());
+                fail = friendlyError(e);
             }
+            final String json = out == null ? "" : out;
+            final String error = fail;
+            ui.post(() -> {
+                JSONObject info = null;
+                try {
+                    info = new JSONObject(json);
+                } catch (Throwable ignored) {
+                }
+                String previewUrl = info == null ? "" : info.optString("url", "");
+                if (previewUrl.isEmpty()) {
+                    // 解析层没给出直链，也把原因摊出来（别只丢一句「无法获取预览」）
+                    String why = info == null ? "" : info.optString("error", "");
+                    if (why.isEmpty()) why = error;
+                    showPreviewDiagnosis(null, -1, -1,
+                            why.isEmpty()
+                                    ? "解析没有返回可播放的直链（该条目可能只有分离的音视频轨）"
+                                    : "解析没有返回可播放的直链：" + why);
+                } else {
+                    // 把这一轮的容器类型 / 音轨一起交给播放层，避免只凭 URL 后缀猜
+                    JSONObject built = new JSONObject();
+                    String audio = info.optString("audioUrl", "");
+                    try {
+                        built.put("formatId", formatId);
+                        built.put("url", previewUrl);
+                        built.put("kind", info.optString("kind", ""));
+                        built.put("audioUrl", audio);
+                        built.put("needsMerge", !audio.isEmpty());
+                        built.put("ext", info.optString("ext", ""));
+                    } catch (Throwable ignored) {
+                    }
+                    openPlayer(previewUrl, type, title, false, null, -1, built);
+                }
+            });
         }).start();
     }
 
@@ -1926,11 +2080,16 @@ public class MainActivity extends Activity {
     }
 
     private void openPlayer(String source, int type, String title, boolean local) {
-        openPlayer(source, type, title, local, null, -1);
+        openPlayer(source, type, title, local, null, -1, null);
     }
 
     private void openPlayer(String source, int type, String title, boolean local,
                             List<MediaItem> siblings, int index) {
+        openPlayer(source, type, title, local, siblings, index, null);
+    }
+
+    private void openPlayer(String source, int type, String title, boolean local,
+                            List<MediaItem> siblings, int index, JSONObject fmt) {
         // 解析输入框还带着焦点时直接进观看层，软键盘会把窗口顶起来：
         // 观看层被压扁、底部进度条跑到屏幕外，只能退出 app 重进才恢复。先进来先收键盘。
         dismissKeyboard();
@@ -1948,6 +2107,15 @@ public class MainActivity extends Activity {
         watchLocal = local;
         watchSiblings = siblings;
         watchIndex = index;
+        final boolean isContent = source != null && source.startsWith("content://");
+        // 网络视频统一交给 ExoPlayer：HLS 相对分片、DASH、FLV / MKV、
+        // 以及 yt-dlp 常见的「画面流 + 独立音轨」都能正确播。
+        final boolean isNetworkVideo = type == TYPE_VIDEO && !local && !isContent
+                && source != null && source.startsWith("http");
+        exoActive = isNetworkVideo;
+        if (fmt != null) {
+            previewFormatId = fmt.optString("formatId", previewFormatId);
+        }
         // 视频沿用上一次是否全屏；图片 / 音频不进全屏播放态
         playerFull = keepFull && type == TYPE_VIDEO;
         // 切换文件时不触发顶部标题的淡出动画，末尾统一按类型亮一次
@@ -1963,7 +2131,10 @@ public class MainActivity extends Activity {
         if (playerVolumePop != null) playerVolumePop.setVisibility(View.GONE);
         // 从图片切到视频 / 音频：先放掉主图占的内存
         if (type != TYPE_IMAGE) releaseWatchImage();
-        playerVideo.setVisibility(type == TYPE_VIDEO ? View.VISIBLE : View.GONE);
+        playerVideo.setVisibility(type == TYPE_VIDEO && !isNetworkVideo ? View.VISIBLE : View.GONE);
+        if (playerExo != null) {
+            playerExo.setVisibility(isNetworkVideo ? View.VISIBLE : View.GONE);
+        }
         playerAudio.setVisibility(type == TYPE_AUDIO ? View.VISIBLE : View.GONE);
         playerImage.setVisibility(type == TYPE_IMAGE ? View.VISIBLE : View.GONE);
         playerAudioSeek.setProgress(0);
@@ -1984,56 +2155,35 @@ public class MainActivity extends Activity {
         applyImmersive(true);
         resetImageZoom();
 
-        final boolean isContent = source != null && source.startsWith("content://");
         if (type == TYPE_VIDEO) {
-            Map<String, String> headers = new HashMap<>();
-            headers.put("User-Agent", UA);
-            String ref = refererFor(source);
-            if (ref != null) headers.put("Referer", ref);
-            // 网络源首次就走 127.0.0.1 的转发代理。
-            // 以前是直链播失败后才重试代理，但很多直链在 MediaPlayer 里根本不报错，
-            // 只是一直缓冲 = 用户看到的「预览不了」。下载那条路（Python 带齐请求头拉流）
-            // 既然能成，预览就让它走同一条路。
-            final String playSrc = playUrlFor(source, local, isContent);
-            final boolean viaProxy = playSrc != null && playSrc.contains("127.0.0.1");
-            if (local && !isContent) playerVideo.setVideoPath(source);
-            else if (viaProxy) playerVideo.setVideoURI(Uri.parse(playSrc));
-            else playerVideo.setVideoURI(Uri.parse(source), headers);
-            playerVideo.setOnPreparedListener(mp -> {
-                currentMp = mp;
-                applyPlaybackSettings(mp);
-                playerAudioToggle.setImageResource(R.drawable.ic_pause);
-                updateVideoInlineMeta(mp, source, local);
-                ui.removeCallbacks(progressTick);
-                ui.post(progressTick);
-            });
-            final boolean[] retriedPlain = {false};
-            playerVideo.setOnErrorListener((mp, what, extra) -> {
-                // 代理播不了就退回直链裸播（个别 CDN 反而对自定义请求头敏感）
-                if (!retriedPlain[0] && !local && !isContent && viaProxy) {
-                    retriedPlain[0] = true;
-                    try {
-                        playerVideo.setVideoURI(Uri.parse(source));
-                        playerVideo.start();
-                        return true;
-                    } catch (Throwable ignored) {
-                    }
-                }
-                // 本地 / content 文件播不了就是格式问题，探测也没意义，保持原来的提示
-                if (local || isContent) {
+            if (isNetworkVideo) {
+                startExoVideo(source, fmt);
+            } else {
+                Map<String, String> headers = new HashMap<>();
+                headers.put("User-Agent", UA);
+                String ref = refererFor(source);
+                if (ref != null) headers.put("Referer", ref);
+                if (local && !isContent) playerVideo.setVideoPath(source);
+                else playerVideo.setVideoURI(Uri.parse(source), headers);
+                playerVideo.setOnPreparedListener(mp -> {
+                    currentMp = mp;
+                    applyPlaybackSettings(mp);
+                    playerAudioToggle.setImageResource(R.drawable.ic_pause);
+                    updateVideoInlineMeta(mp, source, local);
+                    ui.removeCallbacks(progressTick);
+                    ui.post(progressTick);
+                });
+                playerVideo.setOnErrorListener((mp, what, extra) -> {
                     Toast.makeText(this, "无法播放该视频（格式可能不受支持）",
                             Toast.LENGTH_SHORT).show();
                     return true;
-                }
-                // 网络直链两条路都断了：别只给一句「无法播放」，把能查的都摊出来
-                showPreviewDiagnosis(source, what, extra, null);
-                return true;
-            });
-            playerVideo.setOnCompletionListener(mp -> {
-                playerAudioToggle.setImageResource(R.drawable.ic_resume);
-                ui.removeCallbacks(progressTick);
-            });
-            playerVideo.start();
+                });
+                playerVideo.setOnCompletionListener(mp -> {
+                    playerAudioToggle.setImageResource(R.drawable.ic_resume);
+                    ui.removeCallbacks(progressTick);
+                });
+                playerVideo.start();
+            }
         } else if (type == TYPE_AUDIO) {
             playerAudioTitle.setText(title);
             playerAudioTime.setText("音频播放");
@@ -2066,6 +2216,258 @@ public class MainActivity extends Activity {
         }
     }
 
+    // ---------------- 网络视频预览（ExoPlayer） ----------------
+
+    /**
+     * 为什么网络视频不再用系统 MediaPlayer / VideoView：
+     * 下载走 yt-dlp 或 urllib，能处理 HLS 分片、重定向、独立音轨；
+     * 系统播放器遇到 m3u8 相对分片（经本机代理后相对地址全失效）、
+     * FLV / MKV、DASH 分离流时就会「能下载但播不了」。
+     * ExoPlayer 原生支持这些容器，MergingMediaSource 还能把画面流和音轨合起来播。
+     */
+    private void startExoVideo(String source, JSONObject fmt) {
+        exoSource = source;
+        exoKind = previewKindOf(source, fmt);
+        // 优先用本轮预览信息自带的音轨；解析结果里没有时才回退到全局音频列表。
+        // （重新解析拿直链时，音频和画面必须来自同一次提取，时长才对得上）
+        String ownAudio = fmt == null ? "" : fmt.optString("audioUrl", "");
+        exoAudioUrl = !ownAudio.isEmpty()
+                ? ownAudio
+                : (formatNeedsAudio(fmt) ? bestAudioUrl() : "");
+        exoTriedDropAudio = false;
+        exoTriedRefresh = false;
+        exoPrepared = false;
+        if (playerInlineMeta != null) {
+            playerInlineMeta.setText("正在加载…");
+            playerInlineMeta.setVisibility(View.VISIBLE);
+        }
+        buildExoPlayer(source, exoKind, exoAudioUrl);
+    }
+
+    private void buildExoPlayer(String videoUrl, String kind, String audioUrl) {
+        releaseExoPlayer();
+        if (playerExo == null || videoUrl == null || videoUrl.isEmpty()) return;
+        try {
+            exoPlayer = new ExoPlayer.Builder(this).build();
+            playerExo.setPlayer(exoPlayer);
+            playerExo.setVisibility(View.VISIBLE);
+            playerVideo.setVisibility(View.GONE);
+            try {
+                exoPlayer.setAudioAttributes(new AudioAttributes.Builder()
+                        .setUsage(C.USAGE_MEDIA)
+                        .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                        .build(), true);
+            } catch (Throwable ignored) {
+            }
+            MediaSource video = buildMediaSource(
+                    Uri.parse(videoUrl), kind, previewHeaders(videoUrl));
+            MediaSource playSource = video;
+            if (audioUrl != null && !audioUrl.isEmpty()) {
+                MediaSource audio = buildMediaSource(
+                        Uri.parse(audioUrl), previewKindOf(audioUrl, null),
+                        previewHeaders(audioUrl));
+                playSource = new MergingMediaSource(video, audio);
+            }
+            exoPrepared = false;
+            exoPlayer.addListener(exoListener);
+            exoPlayer.setMediaSource(playSource);
+            exoPlayer.setPlayWhenReady(true);
+            exoPlayer.setVolume(playVolume);
+            try {
+                exoPlayer.setPlaybackParameters(new PlaybackParameters(SPEEDS[speedIndex]));
+            } catch (Throwable ignored) {
+            }
+            exoPlayer.prepare();
+            ui.removeCallbacks(exoLoadTimeout);
+            ui.postDelayed(exoLoadTimeout, 18000);
+        } catch (Throwable t) {
+            Log.w("VSP", "ExoPlayer 启动失败", t);
+            handleExoFailure("播放器初始化失败：" + shortMsg(new Exception(t)));
+        }
+    }
+
+    private MediaSource buildMediaSource(Uri uri, String kind, Map<String, String> headers) {
+        DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
+                .setUserAgent(DESKTOP_UA)
+                .setDefaultRequestProperties(headers == null ? new HashMap<>() : headers)
+                // 手动跟随 302，每一跳都重新带上 UA / Referer；
+                // 这正是以前 MediaPlayer 跳 CDN 后丢 Referer、403 的病根
+                .setAllowCrossProtocolRedirects(true)
+                .setConnectTimeoutMs(20000)
+                .setReadTimeoutMs(20000);
+        DataSource.Factory ds = new DefaultDataSource.Factory(this, http);
+        androidx.media3.common.MediaItem item =
+                androidx.media3.common.MediaItem.fromUri(uri);
+        if (KIND_HLS.equals(kind)) {
+            return new HlsMediaSource.Factory(ds).createMediaSource(item);
+        }
+        if (KIND_DASH.equals(kind)) {
+            return new DashMediaSource.Factory(ds).createMediaSource(item);
+        }
+        return new ProgressiveMediaSource.Factory(ds).createMediaSource(item);
+    }
+
+    private String previewKindOf(String url, JSONObject fmt) {
+        String kind = fmt == null ? "" : fmt.optString("kind", "");
+        if ("hls".equalsIgnoreCase(kind)) return KIND_HLS;
+        if ("dash".equalsIgnoreCase(kind)) return KIND_DASH;
+        String proto = fmt == null ? "" : fmt.optString("protocol", "");
+        String ext = fmt == null ? "" : fmt.optString("ext", "");
+        String quality = fmt == null ? "" : fmt.optString("quality", "");
+        String low = (url == null ? "" : url) + " " + proto + " " + ext + " " + quality;
+        low = low.toLowerCase(Locale.ROOT);
+        String path = "";
+        try {
+            path = Uri.parse(url == null ? "" : url).getPath();
+            if (path == null) path = "";
+        } catch (Throwable ignored) {
+        }
+        path = path.toLowerCase(Locale.ROOT);
+        if (path.endsWith(".m3u8") || low.contains(".m3u8") || low.contains("m3u8")
+                || low.contains("hls")) {
+            return KIND_HLS;
+        }
+        if (path.endsWith(".mpd") || low.contains(".mpd") || proto.toLowerCase(Locale.ROOT).contains("dash")) {
+            return KIND_DASH;
+        }
+        return KIND_PROGRESSIVE;
+    }
+
+    /** 只有画面没有音轨的格式：预览时补一条音轨，和下载时的合并逻辑对齐 */
+    private boolean formatNeedsAudio(JSONObject fmt) {
+        if (fmt == null) return false;
+        if (fmt.optBoolean("needsMerge", false)) return true;
+        String ac = fmt.optString("acodec", "");
+        return ac.isEmpty() || "none".equalsIgnoreCase(ac) || "null".equalsIgnoreCase(ac);
+    }
+
+    /** 解析结果里码率最高的音频轨（音频列表已在 Python 侧按 bitrate 排好） */
+    private String bestAudioUrl() {
+        if (parsedData == null) return "";
+        JSONArray arr = parsedData.optJSONArray("audios");
+        if (arr == null) return "";
+        for (int i = 0; i < arr.length(); i++) {
+            JSONObject a = arr.optJSONObject(i);
+            if (a == null) continue;
+            String u = a.optString("url", "");
+            if (u.startsWith("http://") || u.startsWith("https://")) return u;
+        }
+        return "";
+    }
+
+    /** 预览请求头：和下载链路一致，桌面 UA + 原页面 Referer */
+    private Map<String, String> previewHeaders(String mediaUrl) {
+        Map<String, String> headers = new HashMap<>();
+        headers.put("User-Agent", DESKTOP_UA);
+        String ref = previewRefererFor(mediaUrl);
+        if (ref != null && !ref.isEmpty()) headers.put("Referer", ref);
+        headers.put("Accept", "*/*");
+        return headers;
+    }
+
+    private void handleExoFailure(String note) {
+        if (!exoActive) return;
+        ui.removeCallbacks(exoLoadTimeout);
+        ui.removeCallbacks(progressTick);
+        Log.w("VSP", "网络视频预览失败：" + note);
+        if (exoPlayer != null) {
+            try {
+                exoPlayer.stop();
+            } catch (Throwable ignored) {
+            }
+        }
+        // 1) 先去掉音轨：部分站点的音轨地址与画面流时长对不上，合并会直接失败
+        if (exoAudioUrl != null && !exoAudioUrl.isEmpty() && !exoTriedDropAudio) {
+            exoTriedDropAudio = true;
+            exoAudioUrl = "";
+            Toast.makeText(this, "音轨加载失败，先播放画面", Toast.LENGTH_SHORT).show();
+            buildExoPlayer(exoSource, exoKind, "");
+            return;
+        }
+        // 2) 再重新解析一次：签名直链可能已过期，或原格式是 DASH 单独一段
+        if (!exoTriedRefresh) {
+            exoTriedRefresh = true;
+            refreshPreviewAndRetry(note);
+            return;
+        }
+        // 3) 都失败，弹诊断
+        showPreviewDiagnosis(exoSource, -1, 0, "播放器：" + note);
+    }
+
+    private void refreshPreviewAndRetry(final String note) {
+        final String page = previewPageUrl == null || previewPageUrl.isEmpty()
+                ? currentUrl : previewPageUrl;
+        final String fid = previewFormatId == null ? "" : previewFormatId;
+        if (!pyReady || page == null || page.isEmpty()) {
+            showPreviewDiagnosis(exoSource, -1, 0,
+                    "播放器：" + note + "\n重新解析：解析引擎未就绪");
+            return;
+        }
+        if (playerInlineMeta != null) {
+            playerInlineMeta.setText("正在重新获取直链…");
+            playerInlineMeta.setVisibility(View.VISIBLE);
+        }
+        new Thread(() -> {
+            String json = "";
+            String err = "";
+            try {
+                json = py.getModule("vsp")
+                        .callAttr("get_preview_info", page, fid, "", true)
+                        .toString();
+            } catch (Throwable t) {
+                err = shortMsg(new Exception(t));
+            }
+            final String out = json == null ? "" : json;
+            final String failure = err;
+            ui.post(() -> {
+                if (!exoActive) return;
+                JSONObject o = null;
+                try {
+                    o = new JSONObject(out);
+                } catch (Throwable ignored) {
+                }
+                String url = o == null ? "" : o.optString("url", "");
+                String infoErr = o == null ? "" : o.optString("error", "");
+                if (!url.isEmpty() && !url.equals(exoSource)) {
+                    exoSource = url;
+                    exoKind = o.optString("kind", previewKindOf(url, null));
+                    exoAudioUrl = o.optString("audioUrl", "");
+                    exoTriedDropAudio = false;
+                    buildExoPlayer(exoSource, exoKind, exoAudioUrl);
+                    return;
+                }
+                String why = note;
+                if (!failure.isEmpty()) why += "；" + failure;
+                if (!infoErr.isEmpty()) why += "；" + infoErr;
+                showPreviewDiagnosis(exoSource, -1, 0, "播放器：" + why);
+            });
+        }, "vsp-preview-refresh").start();
+    }
+
+    private void releaseExoPlayer() {
+        ui.removeCallbacks(exoLoadTimeout);
+        ExoPlayer p = exoPlayer;
+        exoPlayer = null;
+        if (p != null) {
+            try {
+                p.removeListener(exoListener);
+            } catch (Throwable ignored) {
+            }
+            try {
+                p.release();
+            } catch (Throwable ignored) {
+            }
+        }
+        if (playerExo != null) {
+            try {
+                playerExo.setPlayer(null);
+            } catch (Throwable ignored) {
+            }
+            playerExo.setVisibility(View.GONE);
+        }
+        exoPrepared = false;
+    }
+
     /** 收起软键盘并把焦点从输入框上摘掉（否则进观看层时窗口会被键盘压缩） */
     private void dismissKeyboard() {
         try {
@@ -2089,27 +2491,42 @@ public class MainActivity extends Activity {
 
     private void updateVideoInlineMeta(MediaPlayer mp, String source, boolean local) {
         if (playerInlineMeta == null) return;
+        if (exoActive && !exoPrepared) {
+            playerInlineMeta.setText("正在加载…");
+            playerInlineMeta.setVisibility(View.VISIBLE);
+            return;
+        }
         StringBuilder sb = new StringBuilder();
-        int dur = 0;
-        if (mp != null) {
+        int dur = 0, vw = 0, vh = 0;
+        if (exoActive && exoPlayer != null) {
+            try {
+                long d = exoPlayer.getDuration();
+                if (d != C.TIME_UNSET && d > 0) dur = (int) d;
+            } catch (Throwable ignored) {
+            }
+            try {
+                VideoSize vs = exoPlayer.getVideoSize();
+                vw = vs.width;
+                vh = vs.height;
+            } catch (Throwable ignored) {
+            }
+        } else if (mp != null) {
             try {
                 dur = mp.getDuration();
+            } catch (Throwable ignored) {
+            }
+            try {
+                vw = mp.getVideoWidth();
+                vh = mp.getVideoHeight();
             } catch (Throwable ignored) {
             }
         }
         MediaItem m = currentWatchItem();
         if (dur <= 0 && m != null && m.duration > 0) dur = (int) m.duration;
         if (dur > 0) sb.append(fmtTime(dur));
-        if (mp != null) {
-            try {
-                int w = mp.getVideoWidth();
-                int h = mp.getVideoHeight();
-                if (w > 0 && h > 0) {
-                    if (sb.length() > 0) sb.append(" · ");
-                    sb.append(w).append("×").append(h);
-                }
-            } catch (Throwable ignored) {
-            }
+        if (vw > 0 && vh > 0) {
+            if (sb.length() > 0) sb.append(" · ");
+            sb.append(vw).append("×").append(vh);
         }
         long bytes = 0;
         if (m != null) bytes = m.size;
@@ -3073,8 +3490,8 @@ public class MainActivity extends Activity {
                     mp.setDataSource(playSrc);
                 } else {
                     Map<String, String> headers = new HashMap<>();
-                    headers.put("User-Agent", UA);
-                    String ref = refererFor(source);
+                    headers.put("User-Agent", DESKTOP_UA);
+                    String ref = previewRefererFor(source);
                     if (ref != null) headers.put("Referer", ref);
                     mp.setDataSource(this, Uri.parse(source), headers);
                 }
@@ -3113,6 +3530,29 @@ public class MainActivity extends Activity {
 
     /** 播放 / 暂停：视频与音频都作用于同一个 MediaPlayer 引用。 */
     private void togglePlay() {
+        if (playerType == TYPE_VIDEO && exoActive && exoPlayer != null) {
+            try {
+                if (exoPlayer.isPlaying()) {
+                    exoPlayer.pause();
+                    audioPlaying = false;
+                    playerAudioToggle.setImageResource(R.drawable.ic_resume);
+                    ui.removeCallbacks(progressTick);
+                } else {
+                    if (exoPlayer.getPlaybackState() == Player.STATE_ENDED) {
+                        exoPlayer.seekTo(0);
+                    }
+                    exoPlayer.play();
+                    audioPlaying = true;
+                    applyPlaybackSettings(null);
+                    playerAudioToggle.setImageResource(R.drawable.ic_pause);
+                    ui.removeCallbacks(progressTick);
+                    ui.post(progressTick);
+                }
+            } catch (Throwable t) {
+                Toast.makeText(this, "播放控制失败", Toast.LENGTH_SHORT).show();
+            }
+            return;
+        }
         MediaPlayer mp = currentMp;
         if (mp == null) {
             Toast.makeText(this, "尚未开始播放", Toast.LENGTH_SHORT).show();
@@ -3156,7 +3596,7 @@ public class MainActivity extends Activity {
         if (source.contains("127.0.0.1")) return source;
         if (!pyReady) return source;
         try {
-            String ref = refererFor(source);
+            String ref = previewRefererFor(source);
             String got = py.getModule("vsp")
                     .callAttr("preview_proxy_url", source, ref == null ? "" : ref)
                     .toString();
@@ -3177,7 +3617,7 @@ public class MainActivity extends Activity {
             String probe = "";
             if (pyReady) {
                 try {
-                    String ref = refererFor(src);
+                    String ref = previewRefererFor(src);
                     probe = py.getModule("vsp")
                             .callAttr("preview_probe", src, ref == null ? "" : ref)
                             .toString();
@@ -3269,7 +3709,8 @@ public class MainActivity extends Activity {
         return "未识别的容器";
     }
 
-    private String refererFor(String url) {
+    /** 已知站点返回固定 Referer；普通 CDN 返回 null（不拿 CDN 域名冒充站点） */
+    private String siteRefererFor(String url) {
         try {
             Uri u = Uri.parse(url);
             String host = u.getHost();
@@ -3297,13 +3738,51 @@ public class MainActivity extends Activity {
                 return "https://v.youku.com/";
             if (h.contains("acfun") || h.contains("aixifan"))
                 return "https://www.acfun.cn/";
-            return u.getScheme() + "://" + host + "/";
+            return null;
         } catch (Throwable t) {
             return null;
         }
     }
 
+    private String refererFor(String url) {
+        String site = siteRefererFor(url);
+        if (site != null) return site;
+        try {
+            Uri u = Uri.parse(url);
+            String host = u.getHost();
+            if (host == null) return null;
+            int port = u.getPort();
+            return u.getScheme() + "://" + host + (port > 0 ? ":" + port : "") + "/";
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * 预览 / 下载共用的 Referer。
+     * 普通站点的直链常落在另一个 CDN 域名上，CDN 会校验「原页面」Referer；
+     * 以前拿直链域名拼 Referer，下载（按原页面取）能成、预览却 403。
+     */
+    private String previewRefererFor(String mediaUrl) {
+        String site = siteRefererFor(mediaUrl);
+        if (site != null) return site;
+        if (previewPageUrl != null && previewPageUrl.startsWith("http")) return previewPageUrl;
+        return refererFor(mediaUrl);
+    }
+
     private void applyPlaybackSettings(MediaPlayer mp) {
+        float speed = SPEEDS[speedIndex];
+        if (exoActive && exoPlayer != null) {
+            try {
+                exoPlayer.setVolume(playVolume);
+            } catch (Throwable ignored) {
+            }
+            try {
+                exoPlayer.setPlaybackParameters(new PlaybackParameters(speed));
+            } catch (Throwable ignored) {
+            }
+            return;
+        }
         if (mp == null) return;
         try {
             mp.setVolume(playVolume, playVolume);
@@ -3311,7 +3790,6 @@ public class MainActivity extends Activity {
         }
         // 1.0x 时不要碰 PlaybackParams：部分机型只要调过一次
         // 就会把音频输出切走，表现正好是「有画面、没声音」。
-        float speed = SPEEDS[speedIndex];
         if (Build.VERSION.SDK_INT >= 23 && Math.abs(speed - 1f) > 0.001f) {
             applySpeed(mp);
         }
@@ -3332,12 +3810,19 @@ public class MainActivity extends Activity {
     private void cycleSpeed() {
         speedIndex = (speedIndex + 1) % SPEEDS.length;
         btnSpeed.setText(speedLabel());
-        MediaPlayer mp = currentMp;
-        if (mp != null) {
+        if (exoActive && exoPlayer != null) {
             try {
-                // 切回 1.0x 也要设一次，把之前调过的倍速恢复掉
-                applySpeed(mp);
+                exoPlayer.setPlaybackParameters(new PlaybackParameters(SPEEDS[speedIndex]));
             } catch (Throwable ignored) {
+            }
+        } else {
+            MediaPlayer mp = currentMp;
+            if (mp != null) {
+                try {
+                    // 切回 1.0x 也要设一次，把之前调过的倍速恢复掉
+                    applySpeed(mp);
+                } catch (Throwable ignored) {
+                }
             }
         }
         Toast.makeText(this, "倍速 " + speedLabel(), Toast.LENGTH_SHORT).show();
@@ -3352,6 +3837,12 @@ public class MainActivity extends Activity {
     }
 
     private void stopPlayer() {
+        releaseExoPlayer();
+        exoActive = false;
+        exoSource = "";
+        exoAudioUrl = "";
+        exoTriedDropAudio = false;
+        exoTriedRefresh = false;
         try {
             if (playerVideo != null) playerVideo.stopPlayback();
         } catch (Throwable ignored) {

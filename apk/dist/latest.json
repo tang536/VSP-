@@ -1,9 +1,9 @@
 {
-  "version": "1.0.6",
-  "versionCode": 10600,
-  "apk": "dist/VSP-Parse-v1.0.6.apk",
-  "size": 29190086,
-  "sha256": "1ad0cf50dc404c9d3b1eedc811efce117456f26ff31eecb24d66acdbe6f57eb7",
-  "date": "2026-11-10T20:50:00+08:00",
-  "notes": "## v1.0.6\n\n- 预览改走本机转发（和下载同一条取流路径），网络视频 / 音频点开就能播\n- 预览仍失败会弹诊断：状态码、类型、文件头、播放器错误码，可一键复制\n- 下载队列：速度单独显示在「已下载 / 总大小」右边\n"
+  "version": "1.0.7",
+  "versionCode": 10700,
+  "apk": "dist/VSP-Parse-v1.0.7.apk",
+  "size": 31784757,
+  "sha256": "4564d9770ede1fcda40993a4e4a20cd0cb15a2a64bb891c89b51f47ed7371a38",
+  "date": "2026-11-11T20:30:00+08:00",
+  "notes": "## v1.0.7\n\n- 网络视频预览改用 ExoPlayer：HLS / DASH / FLV / MKV 与分离音轨都能播\n- 预览直接复用解析结果直链，不再二次解析；失败自动重解析并补音轨\n- 请求头改为桌面 UA + 原页面 Referer，修复部分直链 403\n"
 }

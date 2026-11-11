@@ -24,6 +24,15 @@
             android:layout_height="match_parent"
             android:layout_gravity="center" />
 
+        <!-- 网络视频统一走 ExoPlayer（HLS / DASH / FLV / MKV / 分离音轨都能处理），
+             本地文件仍用上面的 VideoView，互不影响。控制器由 App 自己画。 -->
+        <androidx.media3.ui.PlayerView
+            android:id="@+id/player_exo"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_gravity="center"
+            android:visibility="gone" />
+
         <LinearLayout
             android:id="@+id/player_audio"
             android:layout_width="match_parent"

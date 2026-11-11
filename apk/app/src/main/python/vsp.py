@@ -286,8 +286,10 @@ def _direct_format(url, index):
     is_hls = ext == "m3u8"
     return {
         "formatId": DIRECT_PREFIX + url,
-        "ext": "mp4" if is_hls else ext,
-        "container": "mp4" if is_hls else ext,
+        # 以前把 m3u8 写成 mp4，预览层据此当普通 mp4 交给 MediaPlayer，
+        # 播不了还查不出原因；保留真实容器，播放器才能按 HLS 处理。
+        "ext": ext,
+        "container": ext,
         "quality": "HLS 在线流" if is_hls else "页面直链 " + ext.upper(),
         "width": None,
         "height": None,
@@ -697,6 +699,8 @@ def normalize(info):
             "bitrate": f.get("tbr") or 0,
             "size": human_size(f.get("filesize") or f.get("filesize_approx")),
             "url": f.get("url", ""),
+            # yt-dlp 的 protocol 决定预览器该按 HLS / DASH / 普通文件来播
+            "protocol": f.get("protocol", ""),
             "vcodec": vcodec if has_v else None,
             "acodec": acodec if has_a else None,
             # 只有画面没有声音的流，下载后需要本地合并一条音轨
@@ -1049,6 +1053,158 @@ def get_preview_url(url, format_id):
         if f.get("vcodec", "none") != "none" and f.get("acodec", "none") != "none":
             return f.get("url", "")
     return ""
+
+
+def _preview_kind_of_url(url):
+    try:
+        path = (urllib.parse.urlparse(url).path or "").lower()
+    except Exception:
+        return "progressive"
+    if path.endswith(".m3u8"):
+        return "hls"
+    if path.endswith(".mpd"):
+        return "dash"
+    return "progressive"
+
+
+def _preview_kind_of_format(f):
+    proto = (f.get("protocol") or "").lower()
+    ext = (f.get("ext") or "").lower()
+    if "m3u8" in proto or ext == "m3u8":
+        return "hls"
+    if "dash" in proto or ext == "mpd":
+        return "dash"
+    return _preview_kind_of_url(f.get("url") or "")
+
+
+def _preview_score(f):
+    """预览格式的偏好：普通文件 > HLS > DASH；mp4 / H.264 / AAC 优先。"""
+    proto = (f.get("protocol") or "").lower()
+    ext = (f.get("ext") or "").lower()
+    vc = (f.get("vcodec") or "").lower()
+    ac = (f.get("acodec") or "").lower()
+    return (
+        0 if "dash" in proto else 1,
+        1 if ext == "mp4" else 0,
+        1 if vc.startswith(("avc", "h264")) else 0,
+        1 if ac.startswith(("mp4a", "aac")) else 0,
+        f.get("height") or 0,
+        f.get("tbr") or 0,
+    )
+
+
+def _is_video_format(f):
+    v = (f.get("vcodec") or "none").lower()
+    return v not in ("none", "") and bool(f.get("url"))
+
+
+def _has_audio(f):
+    a = (f.get("acodec") or "none").lower()
+    return a not in ("none", "")
+
+
+def _best_muxed_format(formats):
+    cands = [f for f in formats if _is_video_format(f) and _has_audio(f)]
+    return max(cands, key=_preview_score) if cands else None
+
+
+def _best_video_format(formats):
+    cands = [f for f in formats if _is_video_format(f)]
+    return max(cands, key=_preview_score) if cands else None
+
+
+def _best_audio_format(formats):
+    cands = [f for f in formats
+             if _has_audio(f) and not _is_video_format(f)]
+    def score(f):
+        ext = (f.get("ext") or "").lower()
+        ac = (f.get("acodec") or "").lower()
+        return (1 if ext in ("m4a", "mp4", "aac") else 0,
+                1 if ac.startswith(("mp4a", "aac")) else 0,
+                f.get("abr") or f.get("tbr") or 0)
+    return max(cands, key=score) if cands else None
+
+
+def _preview_payload(url, kind=None, audio="", fmt=None, error=""):
+    fmt = fmt or {}
+    return json.dumps({
+        "url": url or "",
+        "audioUrl": audio or "",
+        "kind": kind or _preview_kind_of_url(url or ""),
+        "ext": fmt.get("ext", ""),
+        "quality": fmt.get("format", ""),
+        "error": error,
+    }, ensure_ascii=False)
+
+
+def get_preview_info(url, format_id, hint_url="", fallback=False):
+    """给预览层一份「能直接播」的地址：容器类型 + 可选音轨 + 错误原因。
+
+    hint_url 是解析结果里现成的直链，有它就不再重新解析（快且不会串格式）；
+    播放失败时 App 会传空 hint + fallback=True 再来一次：
+    - 直链过期 → 重新跑一遍页面解析拿新地址；
+    - yt-dlp 的 DASH 单独视频段播不了 → 优先换成带音轨的普通文件/HLS，
+      实在没有就保留视频轨并把最佳音轨一起返回，由 ExoPlayer 合并播放。
+    """
+    page = (url or "").strip()
+    hint = (hint_url or "").strip()
+    if hint.lower().startswith(("http://", "https://")):
+        return _preview_payload(hint)
+
+    try:
+        if format_id == "thumb":
+            with yt_dlp.YoutubeDL(_ydl_opts(page)) as ydl:
+                info = ydl.extract_info(page, download=False)
+            return _preview_payload(info.get("thumbnail", ""))
+
+        if format_id.startswith(DIRECT_PREFIX):
+            direct = format_id[len(DIRECT_PREFIX):].strip()
+            if direct.lower().startswith(("http://", "https://")):
+                return _preview_payload(direct)
+            # 通用兜底的直链过期：重新解析页面，取第一条视频
+            data = json.loads(parse(page))
+            vids = data.get("videos") or []
+            if not vids:
+                return _preview_payload("", error="重新解析后没有视频直链")
+            v = vids[0]
+            return _preview_payload(v.get("url", ""),
+                                    _preview_kind_of_url(v.get("url", "")), "", v)
+
+        with yt_dlp.YoutubeDL(_ydl_opts(page)) as ydl:
+            info = ydl.extract_info(page, download=False)
+        entries = info.get("entries")
+        if entries:
+            info = next((e for e in entries if e), info)
+        formats = info.get("formats") or []
+        exact = None
+        for f in formats:
+            if format_id and f.get("format_id") == format_id:
+                exact = f
+                break
+
+        if fallback:
+            selected = _best_muxed_format(formats) or exact or _best_video_format(formats)
+        else:
+            selected = exact or _best_muxed_format(formats) or _best_video_format(formats)
+
+        if selected is None and info.get("url"):
+            selected = {"url": info.get("url", ""),
+                        "protocol": info.get("protocol", ""),
+                        "ext": info.get("ext", ""),
+                        "vcodec": info.get("vcodec", ""),
+                        "acodec": info.get("acodec", "")}
+        if selected is None:
+            return _preview_payload("", error="该页面没有可直接播放的视频地址")
+
+        audio = ""
+        if not _has_audio(selected):
+            a = _best_audio_format(formats)
+            if a:
+                audio = a.get("url", "")
+        return _preview_payload(selected.get("url", ""),
+                                _preview_kind_of_format(selected), audio, selected)
+    except Exception as e:
+        return _preview_payload("", error=str(e)[:200])
 
 
 # ---------------------------------------------------------------- 预览代理
