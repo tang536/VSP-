@@ -3,6 +3,7 @@ package com.vsp.app;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.Dialog;
 import android.app.DownloadManager;
 import android.content.ContentUris;
 import android.content.Context;
@@ -20,6 +21,7 @@ import android.graphics.Typeface;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
+import android.graphics.drawable.GradientDrawable;
 import android.media.MediaPlayer;
 import android.media.ThumbnailUtils;
 import android.net.Uri;
@@ -37,6 +39,8 @@ import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Window;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
@@ -331,10 +335,22 @@ public class MainActivity extends Activity {
 
     // 更新下载
     // 正在下载 / 安装更新：期间不允许重复触发检查更新与下载
-    private volatile boolean updating = false;
-    private AlertDialog updateDialog;
+    private Dialog updateDialog;
+    private int updateDialogMode = -1;
+    private TextView updateDialogTitle, updateDialogSubtitle, updateDialogNotes,
+            updateDialogPercent, updateDialogLine, updateDialogError, updateDialogBrowser;
+    private View updateDialogNotesWrap, updateDialogProgressWrap;
+    private LinearLayout updateDialogActionsAvailable, updateDialogActionsProgress,
+            updateDialogActionsDone, updateDialogActionsFailed;
     private ProgressBar updateDialogBar;
-    private TextView updateDialogText, updateDialogPct, updateDialogSpeed;
+    private boolean updatePolling = false;
+    private boolean updateResumeTried = false;
+    private final Runnable updatePollTick = new Runnable() {
+        @Override
+        public void run() {
+            pollUpdateProgress();
+        }
+    };
 
     /** 控制条 3 秒无操作自动收起（顶部标题栏与返回键一起收，不挡画面） */
     private final Runnable hideOverlay = () -> hidePlayerOverlay();
@@ -4657,12 +4673,20 @@ public class MainActivity extends Activity {
     }
 
     private void checkUpdate() {
-        // 已经在下载更新时，不重复检查、也不允许再触发一次下载
-        if (updating || UpdateService.running) {
-            showUpdateProgress();
-            showTopHint("正在更新中，请等当前下载结束");
+        cleanupStaleUpdateState();
+
+        // 已有下载在进行 / 上次中断但安装包还在：直接接回原来的进度，绝不重新下载
+        if (UpdateService.running || UpdateStore.hasResumable(this)) {
+            resumePendingDownload(true);
+            showTopHint(UpdateService.running ? "正在更新中，请等当前下载结束" : "正在继续上次的下载");
             return;
         }
+        // 已经下完但还没安装：继续提供安装入口，不重新检查 / 下载
+        if (UpdateStore.hasCompleted(this)) {
+            showUpdateProgress();
+            return;
+        }
+
         if (checkingUpdate) return;
         checkingUpdate = true;
         latestApkUrl = "";
@@ -4697,6 +4721,11 @@ public class MainActivity extends Activity {
             // Gitee 实测约 1.5 MB/s，GitHub 只有 270 KB/s 左右，同版本优先走快的源。
             // 若某天 GitHub 版本更高，pickNewer 仍会正确地选中它。
             UpdateInfo best = pickNewer(ge, gh);
+            // Gitee 的 release 附件接口不返回 size，同版本时借 GitHub 的大小把「版本 · 大小」补全
+            if (best != null && best.size <= 0 && gh != null
+                    && best.version.equals(gh.version) && gh.size > 0) {
+                best.size = gh.size;
+            }
             final String err;
             if (best != null && !best.version.isEmpty()) {
                 latestVersion = best.version;
@@ -4909,6 +4938,11 @@ public class MainActivity extends Activity {
         return out.toString("UTF-8");
     }
 
+    private static final int UPDATE_MODE_AVAILABLE = 0;
+    private static final int UPDATE_MODE_PROGRESS = 1;
+    private static final int UPDATE_MODE_DONE = 2;
+    private static final int UPDATE_MODE_FAILED = 3;
+
     private void showUpdateResult() {
         String cur = versionName();
         boolean newer = compareVersion(latestVersion, cur) > 0;
@@ -4917,30 +4951,518 @@ public class MainActivity extends Activity {
             showTopHint("当前已是最新版本 v" + cur);
             return;
         }
-        StringBuilder sb = new StringBuilder();
-        sb.append("当前版本 v").append(cur).append(" → 最新版本 v").append(latestVersion).append("\n");
-        if (latestSize > 0) sb.append("安装包大小：").append(humanSize(latestSize)).append("\n");
-        if (!latestDate.isEmpty()) sb.append("发布时间：").append(shortDate(latestDate)).append("\n");
-        sb.append('\n');
-        if (!latestNotes.isEmpty()) {
-            String notes = latestNotes.length() > 1400 ? latestNotes.substring(0, 1400) + "…" : latestNotes;
-            sb.append("更新内容：\n").append(notes);
+        showUpdateDialog(UPDATE_MODE_AVAILABLE);
+    }
+
+    /**
+     * 与 App 主题一致的更新弹窗：圆角卡片、橙色描边主按钮。
+     * 同一个 Dialog 内切换「有新版 / 下载中 / 下载完成 / 下载中断」四种状态，
+     * 点「后台继续」或按返回只会关掉弹窗，下载服务仍在后台跑。
+     */
+    private void ensureUpdateDialog() {
+        if (updateDialog != null && updateDialog.isShowing()) return;
+
+        Dialog d = new Dialog(this);
+        d.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        d.setCancelable(true);
+        d.setCanceledOnTouchOutside(false);
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(updateRoundRect(P.card, dp(18), 0, 0));
+        card.setPadding(dp(22), dp(20), dp(22), dp(18));
+
+        updateDialogTitle = new TextView(this);
+        updateDialogTitle.setTextColor(P.text);
+        updateDialogTitle.setTextSize(18);
+        updateDialogTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        updateDialogTitle.setGravity(android.view.Gravity.CENTER);
+        card.addView(updateDialogTitle);
+
+        updateDialogSubtitle = new TextView(this);
+        updateDialogSubtitle.setTextColor(P.dim);
+        updateDialogSubtitle.setTextSize(12);
+        updateDialogSubtitle.setGravity(android.view.Gravity.CENTER);
+        LinearLayout.LayoutParams subtitleLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        subtitleLp.topMargin = dp(6);
+        card.addView(updateDialogSubtitle, subtitleLp);
+
+        // 更新内容
+        LinearLayout notesWrap = new LinearLayout(this);
+        notesWrap.setOrientation(LinearLayout.VERTICAL);
+        TextView notesLabel = new TextView(this);
+        notesLabel.setText("更新内容：");
+        notesLabel.setTextColor(P.text);
+        notesLabel.setTextSize(13);
+        notesLabel.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        notesWrap.addView(notesLabel);
+
+        ScrollView notesScroll = new ScrollView(this) {
+            @Override
+            protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+                // 更新说明再长也不让弹窗顶出屏幕，内容在框内滚动
+                super.onMeasure(widthMeasureSpec,
+                        MeasureSpec.makeMeasureSpec(dp(210), MeasureSpec.AT_MOST));
+            }
+        };
+        notesScroll.setVerticalScrollBarEnabled(true);
+        notesScroll.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
+        updateDialogNotes = new TextView(this);
+        updateDialogNotes.setTextColor(P.text);
+        updateDialogNotes.setTextSize(13);
+        updateDialogNotes.setLineSpacing(dp(3), 1f);
+        notesScroll.addView(updateDialogNotes);
+        LinearLayout.LayoutParams notesLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        notesLp.topMargin = dp(8);
+        notesWrap.addView(notesScroll, notesLp);
+        updateDialogNotesWrap = notesWrap;
+        LinearLayout.LayoutParams notesWrapLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        notesWrapLp.topMargin = dp(18);
+        card.addView(notesWrap, notesWrapLp);
+
+        // 下载进度
+        LinearLayout progressWrap = new LinearLayout(this);
+        progressWrap.setOrientation(LinearLayout.VERTICAL);
+        updateDialogPercent = new TextView(this);
+        updateDialogPercent.setTextColor(P.accent);
+        updateDialogPercent.setTextSize(22);
+        updateDialogPercent.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        updateDialogPercent.setGravity(android.view.Gravity.END);
+        progressWrap.addView(updateDialogPercent);
+
+        updateDialogBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        updateDialogBar.setMax(100);
+        try {
+            updateDialogBar.setProgressTintList(ColorStateList.valueOf(P.accent));
+            updateDialogBar.setProgressBackgroundTintList(ColorStateList.valueOf(P.divider));
+        } catch (Throwable ignored) {
+        }
+        LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(8));
+        barLp.topMargin = dp(10);
+        progressWrap.addView(updateDialogBar, barLp);
+
+        updateDialogLine = new TextView(this);
+        updateDialogLine.setTextColor(P.dim);
+        updateDialogLine.setTextSize(12);
+        updateDialogLine.setSingleLine(true);
+        updateDialogLine.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams lineLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        lineLp.topMargin = dp(10);
+        progressWrap.addView(updateDialogLine, lineLp);
+
+        updateDialogError = new TextView(this);
+        updateDialogError.setTextColor(P.errorText);
+        updateDialogError.setTextSize(12);
+        updateDialogError.setLineSpacing(dp(2), 1f);
+        LinearLayout.LayoutParams errLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        errLp.topMargin = dp(8);
+        progressWrap.addView(updateDialogError, errLp);
+        updateDialogProgressWrap = progressWrap;
+        LinearLayout.LayoutParams progressWrapLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        progressWrapLp.topMargin = dp(18);
+        card.addView(progressWrap, progressWrapLp);
+
+        // 有新版：取消 / 下载并安装
+        updateDialogActionsAvailable = updateDialogActionRow();
+        TextView availableCancel = updateDialogButton("取消", 0);
+        TextView availableDownload = updateDialogButton(
+                latestApkUrl.isEmpty() ? "打开下载页" : "下载并安装", 1);
+        updateDialogActionsAvailable.addView(availableCancel,
+                new LinearLayout.LayoutParams(0, dp(44), 1f));
+        LinearLayout.LayoutParams dlLp =
+                new LinearLayout.LayoutParams(0, dp(44), 1.55f);
+        dlLp.leftMargin = dp(10);
+        updateDialogActionsAvailable.addView(availableDownload, dlLp);
+        availableCancel.setOnClickListener(v -> dismissUpdateDialog());
+        availableDownload.setOnClickListener(v -> {
+            if (latestApkUrl.isEmpty()) {
+                openUrl("gitee".equals(latestSource) ? GITEE_PAGE : UPDATE_PAGE);
+                dismissUpdateDialog();
+            } else {
+                downloadAndInstall(latestApkUrl, latestVersion);
+            }
+        });
+        card.addView(updateDialogActionsAvailable, updateActionRowLp());
+
+        // 下载中：取消下载 / 后台继续
+        updateDialogActionsProgress = updateDialogActionRow();
+        TextView progressCancel = updateDialogButton("取消下载", 2);
+        TextView progressBackground = updateDialogButton("后台继续", 1);
+        updateDialogActionsProgress.addView(progressCancel,
+                new LinearLayout.LayoutParams(0, dp(44), 1f));
+        LinearLayout.LayoutParams bgLp =
+                new LinearLayout.LayoutParams(0, dp(44), 1.55f);
+        bgLp.leftMargin = dp(10);
+        updateDialogActionsProgress.addView(progressBackground, bgLp);
+        progressCancel.setOnClickListener(v -> cancelUpdateDownload());
+        progressBackground.setOnClickListener(v -> {
+            dismissUpdateDialog();
+            showTopHint("下载会在后台继续，可从通知栏查看进度");
+        });
+        card.addView(updateDialogActionsProgress, updateActionRowLp());
+
+        // 下载完成：稍后 / 立即安装
+        updateDialogActionsDone = updateDialogActionRow();
+        TextView doneLater = updateDialogButton("稍后", 0);
+        TextView doneInstall = updateDialogButton("立即安装", 1);
+        updateDialogActionsDone.addView(doneLater,
+                new LinearLayout.LayoutParams(0, dp(44), 1f));
+        LinearLayout.LayoutParams installLp =
+                new LinearLayout.LayoutParams(0, dp(44), 1.55f);
+        installLp.leftMargin = dp(10);
+        updateDialogActionsDone.addView(doneInstall, installLp);
+        doneLater.setOnClickListener(v -> dismissUpdateDialog());
+        doneInstall.setOnClickListener(v -> installDownloadedUpdate());
+        card.addView(updateDialogActionsDone, updateActionRowLp());
+
+        // 下载中断：取消 / 继续下载
+        updateDialogActionsFailed = updateDialogActionRow();
+        TextView failedCancel = updateDialogButton("取消", 2);
+        TextView failedRetry = updateDialogButton("继续下载", 1);
+        updateDialogActionsFailed.addView(failedCancel,
+                new LinearLayout.LayoutParams(0, dp(44), 1f));
+        LinearLayout.LayoutParams retryLp =
+                new LinearLayout.LayoutParams(0, dp(44), 1.55f);
+        retryLp.leftMargin = dp(10);
+        updateDialogActionsFailed.addView(failedRetry, retryLp);
+        failedCancel.setOnClickListener(v -> cancelUpdateDownload());
+        failedRetry.setOnClickListener(v -> retryUpdateDownload());
+        card.addView(updateDialogActionsFailed, updateActionRowLp());
+
+        updateDialogBrowser = new TextView(this);
+        updateDialogBrowser.setText("改用浏览器下载");
+        updateDialogBrowser.setTextColor(P.accent);
+        updateDialogBrowser.setTextSize(12);
+        updateDialogBrowser.setGravity(android.view.Gravity.CENTER);
+        updateDialogBrowser.setPadding(0, dp(10), 0, dp(2));
+        updateDialogBrowser.setOnClickListener(v -> {
+            openUrl("gitee".equals(latestSource) ? GITEE_PAGE : UPDATE_PAGE);
+        });
+        card.addView(updateDialogBrowser);
+
+        d.setContentView(card);
+        d.setOnDismissListener(x -> {
+            updatePolling = false;
+            ui.removeCallbacks(updatePollTick);
+            updateDialog = null;
+            updateDialogMode = -1;
+        });
+
+        Window w = d.getWindow();
+        if (w != null) {
+            w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            w.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            WindowManager.LayoutParams lp = w.getAttributes();
+            lp.dimAmount = 0.62f;
+            w.setAttributes(lp);
+        }
+        updateDialog = d;
+        try {
+            d.show();
+        } catch (Throwable t) {
+            updateDialog = null;
+            return;
+        }
+        if (w != null) {
+            int width = (int) (getResources().getDisplayMetrics().widthPixels * 0.90f);
+            w.setLayout(Math.min(width, dp(440)), WindowManager.LayoutParams.WRAP_CONTENT);
+        }
+    }
+
+    private LinearLayout updateDialogActionRow() {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        return row;
+    }
+
+    private LinearLayout.LayoutParams updateActionRowLp() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(20);
+        return lp;
+    }
+
+    /** type: 0 = 次要文字按钮，1 = 橙色描边主按钮，2 = 危险文字按钮 */
+    private TextView updateDialogButton(String text, int type) {
+        TextView b = new TextView(this);
+        b.setText(text);
+        b.setTextSize(14);
+        b.setGravity(android.view.Gravity.CENTER);
+        b.setClickable(true);
+        b.setFocusable(true);
+        b.setPadding(dp(10), 0, dp(10), 0);
+        if (type == 1) {
+            b.setTextColor(P.accent);
+            b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+            b.setBackground(updateRoundRect(Color.TRANSPARENT, dp(11),
+                    Math.max(2, dp(1)), P.accent));
+        } else if (type == 2) {
+            b.setTextColor(P.danger);
         } else {
-            sb.append("该版本没有填写更新说明。");
+            b.setTextColor(P.dim);
         }
-        String page = "gitee".equals(latestSource) ? GITEE_PAGE : UPDATE_PAGE;
-        AlertDialog.Builder b = new AlertDialog.Builder(this)
-                .setTitle("发现新版本 v" + latestVersion)
-                .setMessage(sb.toString())
-                .setPositiveButton(latestApkUrl.isEmpty() ? "打开下载页" : "立即更新", (d, w) -> {
-                    if (latestApkUrl.isEmpty()) openUrl(page);
-                    else downloadAndInstall(latestApkUrl, latestVersion);
-                })
-                .setNegativeButton("稍后", null);
-        if (latestApkUrl.isEmpty()) {
-            b.setNeutralButton("打开仓库", (d, w) -> openUrl(page));
+        return b;
+    }
+
+    private GradientDrawable updateRoundRect(int fill, float radius, int strokeWidth, int strokeColor) {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setShape(GradientDrawable.RECTANGLE);
+        bg.setCornerRadius(radius);
+        bg.setColor(fill);
+        if (strokeWidth > 0) bg.setStroke(strokeWidth, strokeColor);
+        return bg;
+    }
+
+    private void showUpdateDialog(int mode) {
+        ensureUpdateDialog();
+        if (updateDialog == null) return;
+        applyUpdateDialogMode(mode);
+        if (mode == UPDATE_MODE_PROGRESS) startUpdatePolling();
+    }
+
+    private void applyUpdateDialogMode(int mode) {
+        if (updateDialog == null) return;
+        updateDialogMode = mode;
+
+        updateDialogNotesWrap.setVisibility(
+                mode == UPDATE_MODE_AVAILABLE ? View.VISIBLE : View.GONE);
+        updateDialogProgressWrap.setVisibility(
+                mode == UPDATE_MODE_AVAILABLE ? View.GONE : View.VISIBLE);
+        updateDialogActionsAvailable.setVisibility(
+                mode == UPDATE_MODE_AVAILABLE ? View.VISIBLE : View.GONE);
+        updateDialogActionsProgress.setVisibility(
+                mode == UPDATE_MODE_PROGRESS ? View.VISIBLE : View.GONE);
+        updateDialogActionsDone.setVisibility(
+                mode == UPDATE_MODE_DONE ? View.VISIBLE : View.GONE);
+        updateDialogActionsFailed.setVisibility(
+                mode == UPDATE_MODE_FAILED ? View.VISIBLE : View.GONE);
+        updateDialogBrowser.setVisibility(
+                mode == UPDATE_MODE_FAILED ? View.VISIBLE : View.GONE);
+
+        String ver = updateVersionForUi();
+        long total = updateTotalForUi();
+        if (mode == UPDATE_MODE_AVAILABLE) {
+            updateDialogTitle.setText("发现新版本");
+            updateDialogSubtitle.setText("v" + latestVersion
+                    + (latestSize > 0 ? " · " + humanSize(latestSize) : ""));
+            String notes = latestNotes == null ? "" : latestNotes.trim();
+            if (notes.length() > 4000) notes = notes.substring(0, 4000) + "…";
+            updateDialogNotes.setText(notes.isEmpty() ? "该版本没有填写更新说明。" : notes);
+            updateDialogNotes.setTextColor(notes.isEmpty() ? P.dim : P.text);
+        } else if (mode == UPDATE_MODE_PROGRESS) {
+            updateDialogTitle.setText("正在下载新版本");
+            updateDialogSubtitle.setText("v" + ver + (total > 0 ? " · " + humanSize(total) : ""));
+            updateDialogError.setVisibility(View.GONE);
+            updateProgressUi();
+        } else if (mode == UPDATE_MODE_DONE) {
+            updateDialogTitle.setText("下载完成");
+            updateDialogSubtitle.setText("v" + ver + (total > 0 ? " · " + humanSize(total) : ""));
+            updateDialogPercent.setText("100%");
+            updateDialogBar.setProgress(100);
+            updateDialogLine.setText("安装包已下载完成，点击「立即安装」完成更新");
+            updateDialogError.setVisibility(View.GONE);
+        } else {
+            updateDialogTitle.setText("下载中断");
+            updateDialogSubtitle.setText("v" + ver + (total > 0 ? " · " + humanSize(total) : ""));
+            updateProgressUi();
+            String err = UpdateService.errorText;
+            if (err == null || err.isEmpty()) err = UpdateStore.error(this);
+            updateDialogError.setText(err == null || err.isEmpty()
+                    ? "网络连接中断，可稍后继续下载。" : err);
+            updateDialogError.setVisibility(View.VISIBLE);
         }
-        b.show();
+    }
+
+    private String updateVersionForUi() {
+        String v = UpdateService.version;
+        if (v == null || v.isEmpty()) v = UpdateStore.version(this);
+        return v == null ? "" : v;
+    }
+
+    private long updateTotalForUi() {
+        long t = UpdateService.totalSize;
+        if (t <= 0) t = UpdateStore.size(this);
+        return Math.max(0L, t);
+    }
+
+    private void updateProgressUi() {
+        if (updateDialogPercent == null || updateDialogBar == null || updateDialogLine == null) {
+            return;
+        }
+        int pct;
+        long got;
+        long total;
+        String speed;
+        if (!UpdateStore.STATE_IDLE.equals(UpdateService.state)) {
+            pct = UpdateService.percent;
+            got = UpdateService.downloaded;
+            total = UpdateService.totalSize;
+            speed = UpdateService.speedText;
+        } else {
+            got = UpdateStore.downloaded(this);
+            total = UpdateStore.size(this);
+            pct = total > 0 ? (int) Math.min(100L, got * 100L / total) : 0;
+            speed = "";
+        }
+        if (total > 0) pct = (int) Math.min(100L, Math.max(0L, got) * 100L / total);
+        pct = Math.max(0, Math.min(100, pct));
+        updateDialogPercent.setText(pct + "%");
+        updateDialogBar.setProgress(pct);
+        String line = total > 0
+                ? humanSize(got) + " / " + humanSize(total)
+                : "已下载 " + humanSize(got);
+        if (speed != null && !speed.isEmpty()) line += " · " + speed;
+        updateDialogLine.setText(line);
+    }
+
+    private void startUpdatePolling() {
+        if (updatePolling) return;
+        updatePolling = true;
+        ui.postDelayed(updatePollTick, 400);
+    }
+
+    private void stopUpdatePolling() {
+        updatePolling = false;
+        ui.removeCallbacks(updatePollTick);
+    }
+
+    /** 轮询前台服务的下载状态，弹窗跟着刷新；弹窗关掉后自动停止轮询 */
+    private void pollUpdateProgress() {
+        if (!updatePolling) return;
+        if (updateDialog == null || !updateDialog.isShowing()) {
+            updatePolling = false;
+            return;
+        }
+
+        if (UpdateStore.hasCompleted(this)) {
+            if (updateDialogMode != UPDATE_MODE_DONE) {
+                applyUpdateDialogMode(UPDATE_MODE_DONE);
+            } else {
+                updateProgressUi();
+            }
+            updatePolling = false;
+            return;
+        }
+
+        String st = UpdateService.state;
+        if (UpdateStore.STATE_FAILED.equals(st)) {
+            applyUpdateDialogMode(UPDATE_MODE_FAILED);
+            updatePolling = false;
+            return;
+        }
+
+        if (!UpdateService.running && UpdateStore.STATE_DOWNLOADING.equals(UpdateStore.state(this))) {
+            // 服务被系统回收过：启动一次续传，成功后继续轮询
+            if (!updateResumeTried) {
+                updateResumeTried = true;
+                UpdateService.resume(this);
+            }
+        }
+
+        if (UpdateStore.STATE_IDLE.equals(st) && !UpdateStore.hasResumable(this)) {
+            updatePolling = false;
+            dismissUpdateDialog();
+            return;
+        }
+
+        if (updateDialogMode != UPDATE_MODE_PROGRESS) {
+            applyUpdateDialogMode(UPDATE_MODE_PROGRESS);
+        } else {
+            updateProgressUi();
+        }
+        ui.postDelayed(updatePollTick, 400);
+    }
+
+    private void dismissUpdateDialog() {
+        stopUpdatePolling();
+        Dialog d = updateDialog;
+        updateDialog = null;
+        updateDialogMode = -1;
+        if (d != null) {
+            try {
+                d.dismiss();
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private void installDownloadedUpdate() {
+        String path = UpdateStore.path(this);
+        if (path == null || path.isEmpty()) path = UpdateService.savedPath;
+        File f = new File(path == null ? "" : path);
+        if (!f.isFile() || f.length() < 200L * 1024L) {
+            Toast.makeText(this, "更新包不完整，请重新下载", Toast.LENGTH_LONG).show();
+            UpdateStore.clear(this);
+            UpdateService.state = UpdateStore.STATE_IDLE;
+            dismissUpdateDialog();
+            return;
+        }
+        dismissUpdateDialog();
+        installApk(f);
+    }
+
+    private void retryUpdateDownload() {
+        if (UpdateService.running) {
+            showUpdateProgress();
+            return;
+        }
+        String url = UpdateStore.url(this);
+        String ver = UpdateStore.version(this);
+        if (url.isEmpty() || ver.isEmpty()) {
+            dismissUpdateDialog();
+            checkUpdate();
+            return;
+        }
+        updateResumeTried = false;
+        UpdateService.start(this, url, ver, UpdateStore.size(this));
+        showUpdateProgress();
+        startUpdatePolling();
+    }
+
+    /** 清掉已经装上、文件丢失或版本已追平的旧下载状态 */
+    private void cleanupStaleUpdateState() {
+        String st = UpdateStore.state(this);
+        if (UpdateStore.STATE_DONE.equals(st)) {
+            String ver = UpdateStore.version(this);
+            File f = new File(UpdateStore.path(this));
+            if (!f.isFile() || f.length() < 200L * 1024L
+                    || compareVersion(ver, versionName()) <= 0) {
+                UpdateStore.clear(this);
+                if (UpdateStore.STATE_DONE.equals(UpdateService.state)) {
+                    UpdateService.state = UpdateStore.STATE_IDLE;
+                }
+            }
+        } else if (UpdateStore.STATE_DOWNLOADING.equals(st)
+                || UpdateStore.STATE_FAILED.equals(st)) {
+            String ver = UpdateStore.version(this);
+            // 地址 / 版本缺失，或下载的是已经装上的旧版本：都没有继续的意义
+            if (UpdateStore.url(this).isEmpty() || ver.isEmpty()
+                    || compareVersion(ver, versionName()) <= 0) {
+                UpdateStore.clear(this);
+            }
+        }
+    }
+
+    /** 有未完成的下载时接回服务（不重复下载），show = true 时同时把弹窗换成进度态 */
+    private void resumePendingDownload(boolean show) {
+        if (UpdateStore.hasCompleted(this)) {
+            if (show) showUpdateProgress();
+            return;
+        }
+        if (!UpdateStore.hasResumable(this)) return;
+        if (!UpdateService.running) {
+            updateResumeTried = true;
+            UpdateService.resume(this);
+        }
+        if (show) showUpdateProgress();
     }
 
     /** 顶部滑入的轻提示：只用于「已是最新版」这类不需要用户决策的反馈 */
@@ -5041,9 +5563,11 @@ public class MainActivity extends Activity {
 
     /** 开始下载新版本：交给前台服务下载，通知栏与弹窗同步显示进度 / 大小 / 速度 */
     private void downloadAndInstall(String apkUrl, String ver) {
-        if (updating || UpdateService.running) {
+        // 已有同一版本的下载（包括上次中断的 .part）就接着来，不要再开一份
+        if (UpdateService.running || UpdateStore.hasResumable(this)) {
+            resumePendingDownload(false);
             showUpdateProgress();
-            Toast.makeText(this, "正在更新中，请等下载结束", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "正在继续上次的下载", Toast.LENGTH_SHORT).show();
             return;
         }
         if (apkUrl == null || apkUrl.isEmpty()) {
@@ -5051,10 +5575,9 @@ public class MainActivity extends Activity {
             return;
         }
         ensureNotificationPermission();
-        updating = true;
+        updateResumeTried = false;
         UpdateService.start(this, apkUrl, ver, latestSize);
         showUpdateProgress();
-        pollUpdateProgress();
     }
 
     /** Android 13+ 不授权通知权限时，通知栏看不到下载进度 */
@@ -5069,141 +5592,40 @@ public class MainActivity extends Activity {
     }
 
     private void showUpdateProgress() {
-        if (updateDialog != null && updateDialog.isShowing()) return;
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(20), dp(16), dp(20), dp(4));
-
-        updateDialogPct = new TextView(this);
-        updateDialogPct.setText(UpdateService.percent + "%");
-        updateDialogPct.setTextColor(P.text);
-        updateDialogPct.setTextSize(24);
-        updateDialogPct.setTypeface(Typeface.DEFAULT_BOLD);
-        box.addView(updateDialogPct);
-
-        updateDialogBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        updateDialogBar.setMax(100);
-        updateDialogBar.setProgress(UpdateService.percent);
-        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(8));
-        blp.topMargin = dp(12);
-        box.addView(updateDialogBar, blp);
-
-        updateDialogText = new TextView(this);
-        updateDialogText.setText("正在连接…");
-        updateDialogText.setTextColor(P.dim);
-        updateDialogText.setTextSize(12);
-        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        tlp.topMargin = dp(10);
-        box.addView(updateDialogText, tlp);
-
-        // 速度单独一行：通知栏与弹窗都能看到「已下载 / 总大小」和实时速度
-        updateDialogSpeed = new TextView(this);
-        updateDialogSpeed.setText("—");
-        updateDialogSpeed.setTextColor(P.accent);
-        updateDialogSpeed.setTextSize(12);
-        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        slp.topMargin = dp(4);
-        box.addView(updateDialogSpeed, slp);
-
-        updateDialog = new AlertDialog.Builder(this)
-                .setTitle("正在下载新版本")
-                .setView(box)
-                .setPositiveButton("取消下载", (d, w) -> cancelUpdateDownload())
-                .setNegativeButton("后台继续", null)
-                .setCancelable(false)
-                .create();
-        updateDialog.show();
-    }
-
-    private void dismissUpdateDialog() {
-        try {
-            if (updateDialog != null && updateDialog.isShowing()) updateDialog.dismiss();
-        } catch (Throwable ignored) {
+        int mode;
+        if (UpdateStore.hasCompleted(this) || UpdateStore.STATE_DONE.equals(UpdateService.state)) {
+            mode = UPDATE_MODE_DONE;
+        } else if (UpdateStore.STATE_FAILED.equals(UpdateService.state)
+                || UpdateStore.STATE_FAILED.equals(UpdateStore.state(this))) {
+            mode = UPDATE_MODE_FAILED;
+        } else {
+            mode = UPDATE_MODE_PROGRESS;
         }
-        updateDialog = null;
-        updateDialogPct = null;
-        updateDialogBar = null;
-        updateDialogText = null;
-        updateDialogSpeed = null;
-    }
-
-    private void updateProgressUi(int pct, long got, long total, String speed) {
-        if (updateDialogPct != null) updateDialogPct.setText(pct + "%");
-        if (updateDialogBar != null) updateDialogBar.setProgress(pct);
-        if (updateDialogText != null) {
-            updateDialogText.setText(total > 0
-                    ? humanSize(got) + " / " + humanSize(total)
-                    : "已下载 " + humanSize(got));
-        }
-        if (updateDialogSpeed != null) {
-            updateDialogSpeed.setText(speed == null || speed.isEmpty() ? "—" : speed);
-        }
-    }
-
-    /** 轮询前台服务的下载状态，弹窗跟着刷新 */
-    private void pollUpdateProgress() {
-        if (updateDialog == null) return;
-        updateProgressUi(UpdateService.percent, UpdateService.downloaded,
-                UpdateService.totalSize, UpdateService.speedText);
-        String st = UpdateService.state;
-        if ("done".equals(st)) {
-            finishUpdate(true);
-            return;
-        }
-        if ("failed".equals(st)) {
-            finishUpdate(false);
-            return;
-        }
-        if (!UpdateService.running) {
-            updating = false;
-            dismissUpdateDialog();
-            return;
-        }
-        ui.postDelayed(this::pollUpdateProgress, 400);
-    }
-
-    private void finishUpdate(boolean ok) {
-        updating = false;
-        String path = UpdateService.savedPath;
-        String err = UpdateService.errorText;
-        UpdateService.state = "idle";
-        dismissUpdateDialog();
-        if (!ok) {
-            // 自动下载失败别只弹一句提示：给一个浏览器下载页，用户还能手动装上
-            String msg = err == null || err.isEmpty() ? "更新包下载失败，请稍后重试" : err;
-            String page = "gitee".equals(latestSource) ? GITEE_PAGE : UPDATE_PAGE;
-            new AlertDialog.Builder(this)
-                    .setTitle("下载失败")
-                    .setMessage(msg + "\n\n可以改用浏览器打开下载页，手动下载安装包。")
-                    .setPositiveButton("打开下载页", (d, w) -> openUrl(page))
-                    .setNegativeButton("关闭", null)
-                    .show();
-            return;
-        }
-        File f = new File(path == null ? "" : path);
-        if (!f.exists() || f.length() < 1024 * 200) {
-            Toast.makeText(this, "更新包不完整，请重新下载", Toast.LENGTH_LONG).show();
-            return;
-        }
-        installApk(f);
+        showUpdateDialog(mode);
+        if (mode == UPDATE_MODE_PROGRESS) startUpdatePolling();
     }
 
     private void cancelUpdateDownload() {
         UpdateService.cancel(this);
-        updating = false;
+        UpdateStore.clear(this);
+        UpdateService.state = UpdateStore.STATE_IDLE;
+        UpdateService.running = false;
         dismissUpdateDialog();
         Toast.makeText(this, "已取消下载更新", Toast.LENGTH_SHORT).show();
     }
 
-    /** 退出重进时如果后台还在下载，直接把进度弹窗接回来 */
+    /** 退出重进时如果后台还在下载，直接把进度弹窗接回来；下载完成的不自动弹窗 */
     private void resumePendingUpdate() {
-        if (!UpdateService.running) return;
-        updating = true;
-        showUpdateProgress();
-        pollUpdateProgress();
+        cleanupStaleUpdateState();
+        if (UpdateService.running) {
+            showUpdateProgress();
+            return;
+        }
+        if (UpdateStore.STATE_DOWNLOADING.equals(UpdateStore.state(this))
+                && UpdateStore.hasResumable(this)) {
+            UpdateService.resume(this);
+            showUpdateProgress();
+        }
     }
 
     private void installApk(File f) {
@@ -5835,6 +6257,11 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        try {
+            if (updateDialog != null) updateDialog.dismiss();
+        } catch (Throwable ignored) {
+        }
+        updateDialog = null;
         if (taskPoller != null) taskPoller.shutdownNow();
         if (swipePool != null) swipePool.shutdownNow();
         ui.removeCallbacksAndMessages(null);
