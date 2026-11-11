@@ -98,16 +98,20 @@
         android:paddingStart="10dp"
         android:paddingEnd="10dp"
         android:visibility="gone" />
-    <ImageButton
+    <TextView
         android:id="@+id/t_pause"
-        android:layout_width="36dp"
-        android:layout_height="36dp"
-        android:src="@drawable/ic_pause"
-        android:tag="accent_icon"
-        android:scaleType="fitCenter"
-        android:padding="7dp"
+        android:layout_width="wrap_content"
+        android:layout_height="30dp"
+        android:gravity="center"
+        android:minWidth="48dp"
+        android:text="暂停"
+        android:textColor="#f97316"
+        android:tag="accent"
+        android:textSize="12sp"
+        android:paddingStart="10dp"
+        android:paddingEnd="10dp"
         android:background="?android:attr/selectableItemBackgroundBorderless"
-        android:contentDescription="暂停或继续"
+        android:contentDescription="暂停、继续或重试"
         android:visibility="gone"
         android:layout_marginStart="4dp" />
 </LinearLayout>

@@ -244,6 +244,8 @@ public class MainActivity extends Activity {
     private ImageView playerImage, playerAudioCover, playerAudioToggle;
     private TextView playerAudioTitle, playerAudioTime, playerTime, playerDuration, btnSpeed,
             playerVolumeVal, playerTitle, playerKind, playerSub;
+    /** 覆盖在标题省略号上的点击层（不是文字，避免出现两个「…」） */
+    private View playerTitleMore;
     private SeekBar playerAudioSeek, playerVolume;
     // 图片模式的缩略图条与底部操作
     private View playerImgBar, playerSeekWrap, playerImgActions;
@@ -255,6 +257,8 @@ public class MainActivity extends Activity {
     /** 视频是否已进入「全屏播放」。false = 竖屏预览态（画面照常播，底部给全屏按钮） */
     private boolean playerFull = false;
     private LinearLayout playerThumbs;
+    /** 缩略图条当前对应的媒体列表：同一批图片/视频来回切换时直接复用，避免重建几十个 View */
+    private List<MediaItem> watchThumbsFor;
     private HorizontalScrollView playerThumbsScroll;
     private View playerImgShare, playerImgInfo, playerImgDelete;
     /** 顶部标题栏（返回 + 文件名）当前是否可见，视频播放时跟随控制条一起自动隐藏 */
@@ -290,6 +294,8 @@ public class MainActivity extends Activity {
     private Bitmap watchSwipeBitmap;
     private int watchSwipeIndex = -1;
     private int watchSwipeToken = 0;
+    /** 前后邻图预解码缓存：打开/落定后提前解好，拖动时直接贴图，避免等解码造成卡顿与黑闪 */
+    private final android.util.SparseArray<Bitmap> swipeCache = new android.util.SparseArray<>();
     /**
      * 相邻图解码线程池。以前每次滑动都 new Thread：连划十下就是十个线程同时解 1600px 大图，
      * 峰值内存直接顶穿堆，这就是「划一会儿就闪退」的另一半原因。单线程串行最稳。
@@ -744,6 +750,13 @@ public class MainActivity extends Activity {
         playerInlineMeta = playerPanel.findViewById(R.id.player_inline_meta);
         playerFullBtn = playerPanel.findViewById(R.id.player_full_btn);
         playerTitle = playerPanel.findViewById(R.id.player_title);
+        playerTitleMore = playerPanel.findViewById(R.id.player_title_more);
+        playerTitleMore.setOnClickListener(v -> showFullPlayerTitle());
+        // 标题栏显隐、横竖屏切换、字体变化都会改变可用宽度，布局完成后重新判断省略号
+        playerTitle.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            if (r - l != or - ol) updateTitleMoreVisibility();
+        });
+        playerTitle.post(this::updateTitleMoreVisibility);
         playerKind = playerPanel.findViewById(R.id.player_kind);
         try {
             playerHeader.setBackgroundResource(R.drawable.scrim_top);
@@ -758,11 +771,7 @@ public class MainActivity extends Activity {
         });
 
         // 点击画面唤出 / 收起浮层控制条
-        View.OnClickListener toggle = v -> {
-            if (playerType == TYPE_IMAGE) return;
-            if (playerOverlay.getVisibility() == View.VISIBLE) hidePlayerOverlay();
-            else showPlayerOverlay();
-        };
+        View.OnClickListener toggle = v -> toggleWatchChrome();
         playerStage.setOnClickListener(toggle);
         playerVideo.setOnClickListener(toggle);
         if (playerExo != null) {
@@ -795,10 +804,7 @@ public class MainActivity extends Activity {
             return true;
         });
         // overlay 铺满全屏，点空白处相当于点画面：显示中则收起，隐藏时无法点击（GONE）
-        playerOverlay.setOnClickListener(v -> {
-            if (playerOverlay.getVisibility() == View.VISIBLE) hidePlayerOverlay();
-            else showPlayerOverlay();
-        });
+        playerOverlay.setOnClickListener(v -> toggleWatchChrome());
 
         // 左上角 backspace：退出观看
         playerPanel.findViewById(R.id.player_close).setOnClickListener(v -> exitWatch());
@@ -1243,13 +1249,20 @@ public class MainActivity extends Activity {
 
     private void pickAvatar() {
         try {
-            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-            i.addCategory(Intent.CATEGORY_OPENABLE);
-            i.setType("image/*");
+            Intent i;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                // Android 13+ 系统照片选择器：由系统相册提供图片，不经过文件管理
+                i = new Intent(MediaStore.ACTION_PICK_IMAGES);
+                i.setType("image/*");
+            } else {
+                // 旧系统走相册自己的 ACTION_PICK，同样是图片 App 的选择界面
+                i = new Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI);
+                i.setType("image/*");
+            }
             i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             startActivityForResult(i, REQ_AVATAR);
         } catch (Exception e) {
-            Toast.makeText(this, "无法打开图片选择器", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "无法打开相册选择器", Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -1859,7 +1872,7 @@ public class MainActivity extends Activity {
         formatList.setAdapter(new FormatAdapter(items));
         formatHint.setText(items.isEmpty()
                 ? "这个分类下没有可用格式，换个分类看看"
-                : "点击条目在上方预览 · 长按可批量下载");
+                : "点击预览 · 长按批量下载 · 同清晰度可能有多条线路/编码，右侧为文件大小");
     }
 
     private void startDownload(JSONObject fmt, boolean quiet) {
@@ -2123,6 +2136,9 @@ public class MainActivity extends Activity {
         watchLocal = local;
         watchSiblings = siblings;
         watchIndex = index;
+        // 从本地媒体列表进入：图片 / 视频 / 音频都保持同一套「相册式」底栏，
+        // 避免从图片划到视频时缩略图、信息、分享、删除突然消失。
+        final boolean gallery = !watchingAvatar && local && siblings != null && !siblings.isEmpty();
         final boolean isContent = source != null && source.startsWith("content://");
         // 网络视频统一交给 ExoPlayer：HLS 相对分片、DASH、FLV / MKV、
         // 以及 yt-dlp 常见的「画面流 + 独立音轨」都能正确播。
@@ -2139,7 +2155,7 @@ public class MainActivity extends Activity {
         ui.removeCallbacks(hideImageChrome);
         if (playerOverlay != null) playerOverlay.setVisibility(View.GONE);
         if (playerImgBar != null) {
-            playerImgBar.setVisibility(media ? View.GONE : View.VISIBLE);
+            playerImgBar.setVisibility(media && !gallery ? View.GONE : View.VISIBLE);
         }
         // 进度条必须在这里显式恢复：曾经只写了「非媒体就 GONE」，
         // 结果看过一次图片之后，之后所有视频的进度条都再也不出现。
@@ -2158,9 +2174,13 @@ public class MainActivity extends Activity {
         playerDuration.setText("00:00");
         playerAudioToggle.setImageResource(R.drawable.ic_resume);
         btnSpeed.setText(speedLabel());
-        // 顶部：文件名 + 类型
-        playerTitle.setText(title == null || title.trim().isEmpty() ? "未命名" : title.trim());
+        // 顶部：文件名 + 类型；分辨率和体积只在「信息」里展示
+        setPlayerTitleText(title);
         playerKind.setText(type == TYPE_VIDEO ? "视频" : type == TYPE_AUDIO ? "音频" : "图片");
+        if (playerSub != null) {
+            playerSub.setText("");
+            playerSub.setVisibility(View.GONE);
+        }
         // 视频默认竖屏「预览态」（和图片一样先看内容），点全屏播放按钮才转横屏
         try {
             setRequestedOrientation(type == TYPE_VIDEO && playerFull
@@ -2208,17 +2228,23 @@ public class MainActivity extends Activity {
             // 解码统一放后台：以前在主线程 decode 一张几千万像素的原图要几百毫秒到 1 秒，
             // 表现就是切图卡住、单击唤出操作条也慢半拍。顺带用序号丢弃过期结果。
             loadWatchImage(source, local, isContent);
+            preloadSwipeNeighbors();
         }
         if (!media) {
-            // 图片：副标题显示尺寸与体积，底部铺缩略图条
+            // 图片：底部铺同批缩略图条；尺寸/体积仍写入 playerSub，但顶部不再显示
             renderWatchThumbs();
             fillImageMeta(source, local);
         } else {
             updateVideoInlineMeta(null, source, local);
+            // 视频 / 音频从本地列表进入时也保留同一套底栏
+            if (gallery) renderWatchThumbs();
         }
-        // 视频预览态只亮顶部标题（下方常驻「全屏播放」按钮）；
-        // 全屏播放与音频照旧唤出完整控制条，图片走相册式 chrome
-        if (type == TYPE_VIDEO && !playerFull) {
+        // 本地相册模式（图片 / 视频 / 音频）统一走顶部 + 缩略图 + 操作栏；
+        // 网络视频、单个音频等仍用原来的播放器控制条。
+        if (gallery) {
+            setInlineBarVisible(false);
+            showImageChrome();
+        } else if (type == TYPE_VIDEO && !playerFull) {
             setInlineBarVisible(true);
             setHeaderVisible(true);
             ui.removeCallbacks(hideOverlay);
@@ -2558,6 +2584,11 @@ public class MainActivity extends Activity {
         }
         playerInlineMeta.setText(sb.toString());
         playerInlineMeta.setVisibility(sb.length() == 0 ? View.GONE : View.VISIBLE);
+        // 顶部不显示，但「信息」弹窗需要读到时长 / 分辨率 / 体积
+        if (playerSub != null) {
+            playerSub.setText(sb.toString());
+            playerSub.setVisibility(View.GONE);
+        }
     }
 
     /** 预览态 → 全屏播放：转横屏、收掉按钮、展开完整控制条 */
@@ -2579,6 +2610,7 @@ public class MainActivity extends Activity {
     private void fillImageMeta(String source, boolean local) {
         if (playerSub == null) return;
         playerSub.setText("");
+        final int token = watchImageToken;
         new Thread(() -> {
             String meta = "";
             try {
@@ -2607,6 +2639,9 @@ public class MainActivity extends Activity {
             }
             final String text = meta;
             ui.post(() -> {
+                // 连续切图时旧图的解码结果晚回来，不能把新图的尺寸 / 体积覆盖掉；
+                // 切到视频后 releaseWatchImage 会递增 token，这一条也会自动作废。
+                if (token != watchImageToken || playerType != TYPE_IMAGE) return;
                 if (playerSub != null) playerSub.setText(text.isEmpty() ? "图片" : text);
             });
         }, "vsp-img-meta").start();
@@ -2615,14 +2650,28 @@ public class MainActivity extends Activity {
     /** 底部缩略图条：同一批图片里点哪张就切哪张 */
     private void renderWatchThumbs() {
         if (playerThumbs == null || playerImgBar == null) return;
-        playerThumbs.removeAllViews();
         if (watchingAvatar) {
             // 头像只有一张，底部整块收起；更换 / 恢复默认改由长按触发
+            watchThumbsFor = null;
+            playerThumbs.removeAllViews();
             playerImgBar.setVisibility(View.GONE);
             playerThumbsScroll.setVisibility(View.GONE);
             if (playerImgActions != null) playerImgActions.setVisibility(View.GONE);
             return;
         }
+        // 图片 ↔ 视频互相切换时复用已经铺好的缩略图，只更新选中框：
+        // 重建整条缩略图会让一次切换变成几十次解码，正是之前卡顿的来源。
+        // 注意：复用判断必须放在 removeAllViews 之前，否则子 View 已清空，永远走不到这里。
+        if (watchThumbsFor == watchSiblings && watchSiblings != null
+                && !watchSiblings.isEmpty()
+                && playerThumbs.getChildCount() == watchSiblings.size()) {
+            playerThumbsScroll.setVisibility(View.VISIBLE);
+            if (playerImgActions != null) playerImgActions.setVisibility(View.VISIBLE);
+            updateThumbSelection();
+            return;
+        }
+        watchThumbsFor = watchSiblings;
+        playerThumbs.removeAllViews();
         playerThumbsScroll.setVisibility(View.VISIBLE);
         if (playerImgActions != null) playerImgActions.setVisibility(View.VISIBLE);
         if (watchSiblings == null || watchSiblings.isEmpty()) {
@@ -2707,9 +2756,13 @@ public class MainActivity extends Activity {
                 send.putExtra(Intent.EXTRA_STREAM, Uri.parse(src));
                 send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             } else if (watchLocal && new File(src).exists()) {
+                // Android 7+ 不允许把 file:// 放进 Intent，否则接收方一打开就崩。
+                // 下载目录已在 file_paths.xml 的 external-files-path 里，走 FileProvider。
+                Uri shareUri = FileProvider.getUriForFile(this,
+                        getPackageName() + ".fileprovider", new File(src));
                 send.setType(playerType == TYPE_VIDEO ? "video/*"
                         : playerType == TYPE_AUDIO ? "audio/*" : "image/*");
-                send.putExtra(Intent.EXTRA_STREAM, Uri.fromFile(new File(src)));
+                send.putExtra(Intent.EXTRA_STREAM, shareUri);
                 send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             } else {
                 send.setType("text/plain");
@@ -2732,9 +2785,9 @@ public class MainActivity extends Activity {
         String src = watchSource == null ? "" : watchSource;
         sb.append(watchLocal || src.startsWith("content://") ? "位置：" : "链接：");
         sb.append(src.startsWith("content://") ? "手机媒体库" : src);
-        if (playerSub != null && playerSub.getText().length() > 0
-                && !playerSub.getText().toString().contains("×") == false) {
-            sb.append("\n尺寸：").append(playerSub.getText());
+        // playerSub 顶部虽然隐藏，仍保存着「时长 · 分辨率 · 体积」，信息弹窗在这里复用
+        if (playerSub != null && playerSub.getText().length() > 0) {
+            sb.append("\n详情：").append(playerSub.getText());
         }
         new AlertDialog.Builder(this)
                 .setTitle("信息")
@@ -2798,11 +2851,17 @@ public class MainActivity extends Activity {
                             MediaItem m = currentWatchItem();
                             Intent i = new Intent(Intent.ACTION_VIEW);
                             String src = watchSource == null ? "" : watchSource;
+                            int type = m != null && m.type >= 0 ? m.type : playerType;
+                            String mime = type == TYPE_VIDEO ? "video/*"
+                                    : type == TYPE_AUDIO ? "audio/*" : "image/*";
                             if (src.startsWith("content://")) {
-                                i.setDataAndType(Uri.parse(src), m != null && m.type == TYPE_VIDEO
-                                        ? "video/*" : m != null && m.type == TYPE_AUDIO ? "audio/*" : "image/*");
+                                i.setDataAndType(Uri.parse(src), mime);
+                            } else if (src.startsWith("http://") || src.startsWith("https://")) {
+                                i.setDataAndType(Uri.parse(src), mime);
                             } else {
-                                i.setDataAndType(Uri.fromFile(new File(src)), "*/*");
+                                // 本地下载文件同样不能暴露 file://，否则接收方打开即崩
+                                i.setDataAndType(FileProvider.getUriForFile(this,
+                                        getPackageName() + ".fileprovider", new File(src)), mime);
                             }
                             i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
                             startActivity(i);
@@ -2949,6 +3008,56 @@ public class MainActivity extends Activity {
         return next >= 0 && next < watchSiblings.size();
     }
 
+    /** 打开图片或落定后，提前解好前后两张 1600px 邻图 */
+    private void preloadSwipeNeighbors() {
+        if (watchSiblings == null || watchIndex < 0) return;
+        int prev = watchIndex - 1;
+        int next = watchIndex + 1;
+        clearSwipeCacheExcept(prev, next);
+        if (prev >= 0) preloadSwipeBitmap(prev);
+        if (next < watchSiblings.size()) preloadSwipeBitmap(next);
+    }
+
+    private void clearSwipeCacheExcept(int keepA, int keepB) {
+        for (int i = swipeCache.size() - 1; i >= 0; i--) {
+            int key = swipeCache.keyAt(i);
+            if (key == keepA || key == keepB) continue;
+            Bitmap bmp = swipeCache.valueAt(i);
+            swipeCache.removeAt(i);
+            if (bmp != null && bmp != watchSwipeBitmap && bmp != watchImageBitmap) {
+                recycleQuiet(bmp);
+            }
+        }
+    }
+
+    private void preloadSwipeBitmap(final int pos) {
+        if (watchSiblings == null || pos < 0 || pos >= watchSiblings.size()) return;
+        if (swipeCache.get(pos) != null) return;
+        MediaItem m = watchSiblings.get(pos);
+        if (m == null) return;
+        int type = m.type >= 0 ? m.type : guessType(m.name);
+        if (type != TYPE_IMAGE) return;   // 视频/音频不预解码成图片，切换时交给完整播放器
+        final String src = m.source;
+        if (src == null || src.isEmpty()) return;
+        final boolean isContent = src.startsWith("content://");
+        swipePool.execute(() -> {
+            Bitmap b = isContent ? decodeContentImage(src, 1600) : decodeSampled(new File(src), 1600);
+            if (b == null) return;
+            ui.post(() -> {
+                if (playerType != TYPE_IMAGE || watchSiblings == null || watchIndex < 0
+                        || Math.abs(pos - watchIndex) > 1) {
+                    recycleQuiet(b);
+                    return;
+                }
+                if (swipeCache.get(pos) != null) {
+                    recycleQuiet(b);
+                    return;
+                }
+                swipeCache.put(pos, b);
+            });
+        });
+    }
+
     /** 相邻图的那一层：加在主图下面，拖动时两张图并排出现 */
     private ImageView ensureSwipeView() {
         if (watchSwipeImage != null) return watchSwipeImage;
@@ -2992,6 +3101,18 @@ public class MainActivity extends Activity {
             edge.setVisibility(View.VISIBLE);
             return;
         }
+        Bitmap cached = swipeCache.get(target);
+        if (cached != null && !cached.isRecycled()) {
+            // 预解码命中：拖动一开始就能看到邻图，不用等磁盘解码
+            swipeCache.remove(target);
+            Bitmap old = watchSwipeBitmap;
+            watchSwipeBitmap = cached;
+            watchSwipeIndex = target;
+            edge.setImageBitmap(cached);
+            edge.setVisibility(View.VISIBLE);
+            if (old != null && old != cached) recycleQuiet(old);
+            return;
+        }
         // 还没解码：先别显形（黑底闪一下也是「闪烁」），等位图回来自动滑进来
         edge.setVisibility(View.INVISIBLE);
         loadSwipeImage(target);
@@ -3002,6 +3123,12 @@ public class MainActivity extends Activity {
         final int token = ++watchSwipeToken;
         watchSwipeIndex = pos;
         MediaItem m = watchSiblings.get(pos);
+        int type = m.type >= 0 ? m.type : guessType(m.name);
+        if (type != TYPE_IMAGE) {
+            // 视频/音频不按图片解码，落定后由 openPlayer 切换播放器
+            watchSwipeIndex = -1;
+            return;
+        }
         final String src = m.source;
         final boolean isContent = src != null && src.startsWith("content://");
         swipePool.execute(() -> {
@@ -3097,6 +3224,10 @@ public class MainActivity extends Activity {
         }
         Bitmap edge = watchSwipeBitmap;
         watchSwipeBitmap = null;
+        // 同一位置可能还有预取副本，避免和主图重复持有同一张图
+        Bitmap cached = swipeCache.get(target);
+        swipeCache.remove(target);
+        if (cached != null && cached != edge) recycleQuiet(cached);
         playerImage.animate().cancel();
         if (edge != null && !edge.isRecycled()) {
             // 顺序很要紧：先换图、再同步重算矩阵、最后才把相邻层藏掉。
@@ -3137,6 +3268,11 @@ public class MainActivity extends Activity {
             recycleQuiet(watchSwipeBitmap);
             watchSwipeBitmap = null;
         }
+        for (int i = 0; i < swipeCache.size(); i++) {
+            Bitmap b = swipeCache.valueAt(i);
+            if (b != null && b != watchSwipeBitmap && b != watchImageBitmap) recycleQuiet(b);
+        }
+        swipeCache.clear();
         watchSwipeIndex = -1;
         swipeLocked = false;
         swipeDirection = 0;
@@ -3168,8 +3304,9 @@ public class MainActivity extends Activity {
         if (watchSiblings == null || pos < 0 || pos >= watchSiblings.size()) return;
         MediaItem m = watchSiblings.get(pos);
         int type = m.type >= 0 ? m.type : guessType(m.name);
-        if (type != TYPE_IMAGE) {
-            // 视频 / 音频要换播放器与整块控制条，仍然走完整打开
+        if (type != TYPE_IMAGE || playerType != TYPE_IMAGE) {
+            // 视频 / 音频，或当前正停在视频上点图片缩略图：都要走完整切换，
+            // 否则 playerType 还是视频，图片只会加载到隐藏的 ImageView 里。
             openPlayer(m.source, type, m.name, true, watchSiblings, pos);
             return;
         }
@@ -3177,11 +3314,14 @@ public class MainActivity extends Activity {
         watchSource = m.source;
         watchTitle = m.name;
         watchLocal = true;
-        playerTitle.setText(m.name == null || m.name.trim().isEmpty() ? "未命名" : m.name.trim());
+        setPlayerTitleText(m.name);
         playerKind.setText("图片");
         updateThumbSelection();
-        fillImageMeta(m.source, true);
+        // 先发起主图加载（会递增 token），再取图片尺寸：
+        // 反过来会让 fillImageMeta 捕获到旧 token，结果被当成过期数据丢弃。
         loadWatchImage(m.source, true, m.source != null && m.source.startsWith("content://"), true);
+        fillImageMeta(m.source, true);
+        preloadSwipeNeighbors();
         resetImageZoom();
     }
 
@@ -3286,11 +3426,34 @@ public class MainActivity extends Activity {
     /** 图片模式：顶部标题与底部缩略图条一起显示，3.5 秒后自动收起，点画面可再次唤出 */
     private final Runnable hideImageChrome = () -> hideImageChrome();
 
+    /** 是否处于「本地相册」观看：从本地媒体列表进入，底部保留缩略图 + 分享/信息/删除 */
+    private boolean isGalleryWatch() {
+        return !watchingAvatar && watchLocal
+                && watchSiblings != null && !watchSiblings.isEmpty();
+    }
+
+    /** 点画面：图片切换相册 chrome；本地视频在「视频控制条」和「相册底栏」之间切换。 */
+    private void toggleWatchChrome() {
+        if (playerType == TYPE_IMAGE) return;
+        if (playerOverlay != null && playerOverlay.getVisibility() == View.VISIBLE) {
+            hidePlayerOverlay();
+            if (isGalleryWatch()) showImageChrome();
+        } else {
+            if (isGalleryWatch()) hideImageChrome();
+            showPlayerOverlay();
+        }
+    }
+
     private void showPlayerOverlay() {
         if (playerOverlay == null) return;
         if (playerType == TYPE_IMAGE) {
             showImageChrome();
             return;
+        }
+        if (isGalleryWatch()) {
+            // 视频控制条和相册底栏二选一显示，避免叠在一起
+            ui.removeCallbacks(hideImageChrome);
+            if (playerImgBar != null) playerImgBar.setVisibility(View.GONE);
         }
         playerOverlay.setVisibility(View.VISIBLE);
         setHeaderVisible(true);
@@ -3304,9 +3467,15 @@ public class MainActivity extends Activity {
         ui.removeCallbacks(hideOverlay);
         if (playerOverlay != null) playerOverlay.setVisibility(View.GONE);
         if (playerVolumePop != null) playerVolumePop.setVisibility(View.GONE);
+        // 本地相册里的视频：控制条收起后回到缩略图 / 信息 / 分享 / 删除这一排，
+        // 这样从图片划到视频时底栏不会「消失」。
+        if (isGalleryWatch() && playerType != TYPE_IMAGE) {
+            showImageChrome();
+            return;
+        }
         setHeaderVisible(false);
-        // 预览态收起控制条后，把全屏播放按钮放回来
-        setInlineBarVisible(playerType == TYPE_VIDEO && !playerFull);
+        // 预览态收起控制条后，把全屏播放按钮放回来；相册模式下不显示，避免压住缩略图
+        setInlineBarVisible(playerType == TYPE_VIDEO && !playerFull && !isGalleryWatch());
     }
 
     /** 顶部返回键 + 文件名：淡入淡出，收起后不占点击区域 */
@@ -3324,16 +3493,58 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** 顶部只留一行文件名；显示不全时出现的「…」可以点开看全名 */
+    private void setPlayerTitleText(String title) {
+        if (playerTitle == null) return;
+        String text = title == null || title.trim().isEmpty() ? "未命名" : title.trim();
+        playerTitle.setText(text);
+        updateTitleMoreVisibility();
+    }
+
+    /**
+     * 文件名是否超过一行。这里用画笔宽度判断而不是等布局完成后的
+     * getEllipsisCount：切换文件时标题宽度不变，布局不一定会再回调，
+     * 用旧 layout 判断会导致省略号点击层时有时无。
+     */
+    private void updateTitleMoreVisibility() {
+        if (playerTitle == null || playerTitleMore == null) return;
+        int width = playerTitle.getWidth()
+                - playerTitle.getPaddingLeft() - playerTitle.getPaddingRight();
+        CharSequence text = playerTitle.getText();
+        boolean cut = width > 0 && text != null && text.length() > 0
+                && playerTitle.getPaint().measureText(text, 0, text.length()) > width + 0.5f;
+        playerTitleMore.setVisibility(cut ? View.VISIBLE : View.GONE);
+    }
+
+    private void showFullPlayerTitle() {
+        String title = playerTitle == null ? "" : playerTitle.getText().toString();
+        new AlertDialog.Builder(this)
+                .setTitle("完整文件名")
+                .setMessage(title)
+                .setPositiveButton("好", null)
+                .show();
+    }
+
     private void showImageChrome() {
-        if (playerType != TYPE_IMAGE) return;
+        if (playerType != TYPE_IMAGE && !isGalleryWatch()) return;
+        if (playerType != TYPE_IMAGE) {
+            // 本地相册里的视频：显示底栏时收起视频控制条
+            ui.removeCallbacks(hideOverlay);
+            if (playerOverlay != null) playerOverlay.setVisibility(View.GONE);
+            setInlineBarVisible(false);
+        }
         setHeaderVisible(true);
         if (playerImgBar != null && !watchingAvatar) playerImgBar.setVisibility(View.VISIBLE);
         ui.removeCallbacks(hideImageChrome);
-        ui.postDelayed(hideImageChrome, 3500);
+        // 图片照旧 3.5 秒后收起；本地相册里的视频把底栏当默认态常驻，
+        // 点画面切到视频控制条，控制条自动收起后再回到这排缩略图/操作。
+        if (playerType == TYPE_IMAGE) {
+            ui.postDelayed(hideImageChrome, 3500);
+        }
     }
 
     private void hideImageChrome() {
-        if (playerType != TYPE_IMAGE) return;
+        if (playerType != TYPE_IMAGE && !isGalleryWatch()) return;
         ui.removeCallbacks(hideImageChrome);
         setHeaderVisible(false);
         if (playerImgBar != null) playerImgBar.setVisibility(View.GONE);
@@ -3441,6 +3652,8 @@ public class MainActivity extends Activity {
             playerType = TYPE_IMAGE;
             watchingAvatar = false;
             watchSiblings = null;
+            // 同一批列表下次可能已经增删过文件，退出时让缩略图条下次重建
+            watchThumbsFor = null;
             watchIndex = -1;
             playerFull = false;
             setInlineBarVisible(false);
@@ -4280,9 +4493,22 @@ public class MainActivity extends Activity {
 
     private void playLocal(MediaItem m) {
         int type = m.type >= 0 ? m.type : guessType(m.name);
-        // 同一批里点谁就打开谁，图片模式下底部会铺出这批的缩略图
-        List<MediaItem> scope = localFiles.contains(m) ? localFiles : videoFiles;
-        int idx = scope.indexOf(m);
+        // 同一批里点谁就打开谁，图片模式下底部会铺出这批的缩略图。
+        // 队列里「打开」的已下载文件不在扫描结果里，此时用只含它自己的列表，
+        // 否则 index 会变成 -1，底栏和左右滑动都会指向无关文件。
+        List<MediaItem> scope;
+        int idx;
+        if (localFiles.contains(m)) {
+            scope = localFiles;
+            idx = scope.indexOf(m);
+        } else if (videoFiles.contains(m)) {
+            scope = videoFiles;
+            idx = scope.indexOf(m);
+        } else {
+            scope = new ArrayList<>();
+            scope.add(m);
+            idx = 0;
+        }
         openPlayer(m.source, type, m.name, true, scope, idx);
     }
 
@@ -4516,16 +4742,16 @@ public class MainActivity extends Activity {
             final List<File> files = listDownloadFiles();
             long total = 0;
             for (File f : files) total += f.length();
-            final long size = total;
             // 缓存 = 内部缓存目录（缩略图）+ 外部缓存目录，之前只算前者所以永远接近 0
             long cacheBytes = dirSize(getCacheDir());
             File extCache = getExternalCacheDir();
             if (extCache != null) cacheBytes += dirSize(extCache);
             final long cache = cacheBytes;
+            final long used = total + cacheBytes;
             ui.post(() -> {
                 storageFiles = files;
                 stCount.setText(files.size() + " 个");
-                stSize.setText(humanSize(size));
+                stSize.setText(humanSize(used));
                 stCache.setText(humanSize(cache));
                 if (currentPage == PAGE_FILES) renderFilesPage(files);
             });
@@ -5759,7 +5985,12 @@ public class MainActivity extends Activity {
                 JSONObject o = arr.optJSONObject(i);
                 if (o == null) continue;
                 String st = o.optString("status", "running");
-                if ("running".equals(st) || "paused".equals(st)) active.add(o);
+                String err = o.optString("error", "");
+                // 网络/保存失败留在「下载中」，方便直接点重试；
+                // 用户主动取消的任务没有重试意义，仍归到已完成列表。
+                boolean canceled = "error".equals(st) && "已取消".equals(err);
+                if ("running".equals(st) || "paused".equals(st)
+                        || ("error".equals(st) && !canceled)) active.add(o);
                 else finished.add(o);
             }
             Collections.reverse(active);
@@ -5795,6 +6026,18 @@ public class MainActivity extends Activity {
                 refreshTasks();
             } catch (Exception e) {
                 ui.post(() -> Toast.makeText(this, "操作失败: " + e.getMessage(), Toast.LENGTH_SHORT).show());
+            }
+        }).start();
+    }
+
+    private void retryTask(String tid) {
+        new Thread(() -> {
+            try {
+                py.getModule("vsp").callAttr("retry_task", tid);
+                lastTasksJson = "";
+                refreshTasks();
+            } catch (Exception e) {
+                ui.post(() -> Toast.makeText(this, "重试失败: " + e.getMessage(), Toast.LENGTH_SHORT).show());
             }
         }).start();
     }
@@ -5911,6 +6154,19 @@ public class MainActivity extends Activity {
 
     // ---------------- Adapter ----------------
 
+    /** 把 ffmpeg 编码名收成用户看得懂的短标签 */
+    private static String codecLabel(String codec) {
+        String c = codec == null ? "" : codec.trim().toLowerCase(Locale.ROOT);
+        if (c.isEmpty() || "none".equals(c) || "null".equals(c)) return "";
+        if (c.startsWith("avc") || c.startsWith("h264")) return "H.264";
+        if (c.startsWith("hev") || c.startsWith("h265")) return "H.265";
+        if (c.startsWith("av01")) return "AV1";
+        if (c.startsWith("vp09") || c.startsWith("vp9")) return "VP9";
+        if (c.startsWith("mp4a") || c.startsWith("aac")) return "AAC";
+        if (c.startsWith("opus")) return "Opus";
+        return c.split("\\.")[0];
+    }
+
     class FormatAdapter extends RecyclerView.Adapter<FormatAdapter.VH> {
         final List<JSONObject> data;
 
@@ -5927,17 +6183,55 @@ public class MainActivity extends Activity {
         public void onBindViewHolder(VH h, int i) {
             JSONObject f = data.get(i);
             final String fid = f.optString("formatId", "");
-            h.quality.setText(f.optString("quality", ""));
+            String quality = f.optString("quality", "").trim();
+            if (quality.isEmpty() || "null".equalsIgnoreCase(quality)) {
+                // 直链格式的 formatId 是一整条 URL，不能拿来当标题
+                String fidText = f.optString("formatId", "");
+                quality = fidText.startsWith("url:") || fidText.startsWith("http") ? "" : fidText.trim();
+            }
+            h.quality.setText(quality.isEmpty() ? "未知格式" : quality);
             h.icon.setImageResource("videos".equals(currentTab) ? R.drawable.ic_video
                     : "audios".equals(currentTab) ? R.drawable.ic_audio : R.drawable.ic_image);
+
+            // 实际分辨率、帧率、码率比一句「720p」更能说明这一条到底是什么，
+            // 同一清晰度有多条线路时也能看出差异。
             StringBuilder meta = new StringBuilder();
-            String vcodec = f.optString("vcodec", "");
-            String acodec = f.optString("acodec", "");
-            if (!vcodec.isEmpty() && !"null".equals(vcodec)) meta.append(vcodec.split("\\.")[0]).append(" ");
-            if (!acodec.isEmpty() && !"null".equals(acodec)) meta.append(acodec.split("\\.")[0]);
-            if (f.optBoolean("needsMerge", false)) meta.append(" · 下载后自动补音轨");
-            h.meta.setText(meta.toString().trim());
-            h.size.setText(f.optString("size", ""));
+            int width = f.optInt("width", 0);
+            int height = f.optInt("height", 0);
+            if (width > 0 && height > 0) meta.append(width).append("×").append(height);
+            else if (height > 0) meta.append(height).append("P");
+            else {
+                String ext = f.optString("ext", "").trim();
+                if (!ext.isEmpty()) meta.append(ext.toUpperCase(Locale.ROOT));
+            }
+            double fps = f.optDouble("fps", 0);
+            if (fps > 1) {
+                if (meta.length() > 0) meta.append(" · ");
+                meta.append(Math.round(fps)).append("fps");
+            }
+            double bitrate = f.optDouble("bitrate", 0);
+            if (bitrate > 0) {
+                if (meta.length() > 0) meta.append(" · ");
+                meta.append(Math.round(bitrate)).append(" kbps");
+            }
+            String vcodec = codecLabel(f.optString("vcodec", ""));
+            String acodec = codecLabel(f.optString("acodec", ""));
+            if (!vcodec.isEmpty() || !acodec.isEmpty()) {
+                if (meta.length() > 0) meta.append(" · ");
+                meta.append(vcodec);
+                if (!vcodec.isEmpty() && !acodec.isEmpty()) meta.append("/");
+                meta.append(acodec);
+            }
+            if (f.optBoolean("needsMerge", false)) {
+                if (meta.length() > 0) meta.append(" · ");
+                meta.append("下载时自动补音轨");
+            }
+            h.meta.setText(meta.toString());
+            h.meta.setVisibility(meta.length() == 0 ? View.GONE : View.VISIBLE);
+
+            String size = f.optString("size", "").trim();
+            if (size.isEmpty() || "-".equals(size)) size = "大小未知";
+            h.size.setText(size);
 
             boolean choosing = selectionMode && selectionOwner == PAGE_HOME;
             h.check.setVisibility(choosing ? View.VISIBLE : View.GONE);
@@ -6026,11 +6320,18 @@ public class MainActivity extends Activity {
                 long total = t.optLong("total", 0L);
                 long done = t.optLong("downloaded", 0L);
                 String speed = t.optString("speed", "");
+                boolean paused = "paused".equals(status);
+                boolean failed = "error".equals(status);
                 // 速度字段有时被当成阶段提示用（「合并音视频…」「已暂停」），这类不算速度
                 boolean realSpeed = speed.endsWith("/s");
-                h.status.setText("paused".equals(status) ? "已暂停 · " + pct + "%"
-                        : (!speed.isEmpty() && !realSpeed) ? speed
-                        : "下载中 · " + pct + "%");
+                if (failed) {
+                    String err = t.optString("error", "");
+                    h.status.setText(err.isEmpty() ? "下载失败" : "下载失败：" + err);
+                } else if (paused) {
+                    h.status.setText("已暂停 · " + pct + "%");
+                } else {
+                    h.status.setText(!speed.isEmpty() && !realSpeed ? speed : "下载中 · " + pct + "%");
+                }
                 // 进度条右边紧跟「已下载 / 总大小 · 速度」，进度与速度在同一行
                 // 进度条右边是「已下载 / 总大小」，速度再单独占一格贴在它右边
                 String sizeLine;
@@ -6039,7 +6340,7 @@ public class MainActivity extends Activity {
                 else sizeLine = "连接中…";
                 h.size.setText(sizeLine);
                 h.size.setVisibility(View.VISIBLE);
-                if (realSpeed) {
+                if (realSpeed && !failed) {
                     h.speed.setText(speed);
                     h.speed.setVisibility(View.VISIBLE);
                 } else {
@@ -6049,10 +6350,10 @@ public class MainActivity extends Activity {
                 h.progress.setProgress(pct);
                 h.open.setVisibility(View.GONE);
                 h.pause.setVisibility(View.VISIBLE);
-                h.pause.setImageResource("paused".equals(status)
-                        ? R.drawable.ic_resume : R.drawable.ic_pause);
+                h.pause.setText(failed ? "重试" : paused ? "继续" : "暂停");
                 h.pause.setOnClickListener(v -> {
                     if (choosing) toggleSelect(tid);
+                    else if (failed) retryTask(tid);
                     else togglePause(tid, status);
                 });
             } else {
@@ -6088,8 +6389,8 @@ public class MainActivity extends Activity {
         }
 
         class VH extends RecyclerView.ViewHolder {
-            TextView title, status, open, size, speed;
-            ImageView thumb, pause;
+            TextView title, status, open, size, speed, pause;
+            ImageView thumb;
             CheckBox check;
             ProgressBar progress;
 

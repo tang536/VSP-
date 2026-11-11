@@ -50,7 +50,7 @@
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="长按任务可多选删除 · 右侧按钮可暂停 / 继续"
+        android:text="长按任务可多选删除 · 下载中可暂停，暂停后可继续，失败可重试"
         android:textColor="#8b909a"
         android:tag="dim"
         android:textSize="11sp"

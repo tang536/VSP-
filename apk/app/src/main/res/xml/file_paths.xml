@@ -1,8 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
+    <!-- 正常下载目录：Android/data/<包名>/files/Download/VSP解析 -->
     <external-files-path
         name="vsp_downloads"
         path="Download/" />
+    <!-- 极端情况下外部存储不可用，下载目录会退到应用内部 files/ -->
+    <files-path
+        name="vsp_internal"
+        path="." />
+    <!-- Python 兜底写公共 Download 时的目录（仅限本应用下载的文件） -->
+    <external-path
+        name="vsp_public_downloads"
+        path="Download/VSP解析/" />
     <cache-path
         name="vsp_cache"
         path="." />

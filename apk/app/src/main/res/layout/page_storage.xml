@@ -41,6 +41,56 @@
         android:orientation="vertical"
         android:padding="12dp">
 
+        <!-- 占用空间：缓存 + 已下载文件合计，放在最上面先看总量 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="64dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:background="#171a21"
+            android:tag="card"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:layout_marginBottom="8dp">
+            <ImageView
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:src="@drawable/ic_folder"
+                android:tag="icon"
+                android:scaleType="fitCenter" />
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:layout_marginStart="12dp">
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="占用空间"
+                    android:textColor="#e8eaed"
+                    android:tag="text"
+                    android:textSize="14sp" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="缓存与已下载文件合计占用"
+                    android:textColor="#8b909a"
+                    android:tag="dim"
+                    android:textSize="11sp"
+                    android:layout_marginTop="3dp" />
+            </LinearLayout>
+            <TextView
+                android:id="@+id/st_size"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="0 B"
+                android:textColor="#e8eaed"
+                android:tag="text"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
         <!-- 缓存：一行，右侧清空缓存 -->
         <LinearLayout
             android:layout_width="match_parent"
@@ -170,56 +220,6 @@
                     android:indeterminateTint="#ef4444"
                     android:visibility="gone" />
             </FrameLayout>
-        </LinearLayout>
-
-        <!-- 占用空间：一行 -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="64dp"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:background="#171a21"
-            android:tag="card"
-            android:paddingStart="14dp"
-            android:paddingEnd="14dp"
-            android:layout_marginBottom="8dp">
-            <ImageView
-                android:layout_width="20dp"
-                android:layout_height="20dp"
-                android:src="@drawable/ic_folder"
-                android:tag="icon"
-                android:scaleType="fitCenter" />
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical"
-                android:layout_marginStart="12dp">
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="占用空间"
-                    android:textColor="#e8eaed"
-                    android:tag="text"
-                    android:textSize="14sp" />
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="已下载文件占用的存储"
-                    android:textColor="#8b909a"
-                    android:tag="dim"
-                    android:textSize="11sp"
-                    android:layout_marginTop="3dp" />
-            </LinearLayout>
-            <TextView
-                android:id="@+id/st_size"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="0 B"
-                android:textColor="#e8eaed"
-                android:tag="text"
-                android:textSize="15sp"
-                android:textStyle="bold" />
         </LinearLayout>
 
         <TextView

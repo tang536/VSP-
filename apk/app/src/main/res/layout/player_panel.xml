@@ -333,16 +333,34 @@
             android:layout_marginStart="6dp"
             android:orientation="vertical">
 
-            <TextView
-                android:id="@+id/player_title"
+            <FrameLayout
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:textColor="#FFFFFF"
-                android:tag="overlay_text"
-                android:textSize="14sp"
-                android:singleLine="true"
-                android:ellipsize="middle" />
+                android:layout_height="wrap_content">
 
+                <TextView
+                    android:id="@+id/player_title"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:paddingEnd="22dp"
+                    android:textColor="#FFFFFF"
+                    android:tag="overlay_text"
+                    android:textSize="14sp"
+                    android:singleLine="true"
+                    android:ellipsize="end" />
+
+                <!-- 覆盖在标题末尾省略号上的一层：只有真的截断时才出现，
+                     点它看完整文件名，不再额外画第二个省略号 -->
+                <View
+                    android:id="@+id/player_title_more"
+                    android:layout_width="40dp"
+                    android:layout_height="32dp"
+                    android:layout_gravity="end|center_vertical"
+                    android:background="?android:attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="查看完整文件名"
+                    android:visibility="gone" />
+            </FrameLayout>
+
+            <!-- 分辨率 / 体积只在「信息」里显示，顶部保持一行文件名 -->
             <TextView
                 android:id="@+id/player_sub"
                 android:layout_width="match_parent"
@@ -352,7 +370,8 @@
                 android:tag="dim"
                 android:textSize="11sp"
                 android:singleLine="true"
-                android:ellipsize="end" />
+                android:ellipsize="end"
+                android:visibility="gone" />
         </LinearLayout>
 
         <TextView

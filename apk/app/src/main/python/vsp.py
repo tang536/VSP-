@@ -600,21 +600,30 @@ def _bilibili_parse(url):
     pd = play.get("data") or {}
     durl = pd.get("durl") or []
     qname = _BILI_Q.get(pd.get("quality") or 0, "视频")
+    # 未登录时 B 站通常只下发 720P；把「当前可取最高」说清楚，
+    # 避免一整列都写 720P 时被误认为解析逻辑写死了。
+    if (pd.get("quality") or 0) < 80:
+        qname += "（当前可取最高）"
     videos = []
     for i, seg in enumerate(durl):
         u = seg.get("url") or ""
         if not u:
             continue
         f = _direct_format(u, i)
-        f["quality"] = qname + " 合流（含音轨）"
+        # 「含音轨」不用写进标题：右侧编码栏已经能看到 H.264/AAC，
+        # 标题只保留清晰度 + 分段信息，避免列表里出现「720P合...」这种截断。
+        f["quality"] = qname
         if len(durl) > 1:
-            f["quality"] += " · 第 %d/%d 段" % (i + 1, len(durl))
+            f["quality"] += " · 分段 %d/%d" % (i + 1, len(durl))
         videos.append(f)
         for j, bu in enumerate(seg.get("backup_url") or []):
             if not bu:
                 continue
             b = _direct_format(bu, 100 + i * 10 + j)
-            b["quality"] = qname + " 合流 · 备用线路 " + str(j + 1)
+            b["quality"] = qname
+            if len(durl) > 1:
+                b["quality"] += " · 分段 %d/%d" % (i + 1, len(durl))
+            b["quality"] += " · 备用线路 " + str(j + 1)
             videos.append(b)
 
     if not videos:
@@ -689,14 +698,23 @@ def normalize(info):
         acodec = f.get("acodec", "none")
         has_v = bool(vcodec and vcodec != "none")
         has_a = bool(acodec and acodec != "none")
+        height = f.get("height") or 0
+        # 列表标题只放短清晰度标签：format_note 通常就是「720p / 1080p60」；
+        # 没有时用高度补，避免把 yt-dlp 的整段 format 描述塞进来后被省略号截断。
+        quality = (f.get("format_note") or "").strip()
+        if not quality and height:
+            quality = "%dP" % height
+        if not quality:
+            quality = f.get("format_id", "")
         item = {
             "formatId": f.get("format_id", ""),
             "ext": f.get("ext", "mp4"),
             "container": f.get("ext", "mp4"),
-            "quality": f.get("format", "") or f.get("format_id", ""),
+            "quality": quality,
             "width": f.get("width"),
             "height": f.get("height"),
             "bitrate": f.get("tbr") or 0,
+            "fps": f.get("fps") or 0,
             "size": human_size(f.get("filesize") or f.get("filesize_approx")),
             "url": f.get("url", ""),
             # yt-dlp 的 protocol 决定预览器该按 HLS / DASH / 普通文件来播
@@ -803,13 +821,23 @@ def start_download(url, format_id, title, thumb="", needs_merge=False):
     with task_lock:
         task_counter[0] += 1
         tid = task_counter[0]
+        worker_token = object()
         tasks[tid] = {"taskId": str(tid), "title": title, "status": "running",
                       "progress": 0, "speed": "", "filename": "", "error": "",
-                      "total": 0, "downloaded": 0, "thumb": thumb or ""}
+                      "total": 0, "downloaded": 0, "thumb": thumb or "",
+                      # 保存原始参数，失败后「重试」要按同样的清晰度重新拉取
+                      "url": url, "formatId": format_id,
+                      "needsMerge": bool(needs_merge),
+                      # 旧线程收尾时用它判断自己是否已被新一轮重试取代
+                      "_worker": worker_token}
         cancel_flags[tid] = False
         pause_flags[tid] = False
         pause_conds[tid] = threading.Condition()
+    _start_worker(tid, url, format_id, title, needs_merge, worker_token)
+    return str(tid)
 
+
+def _start_worker(tid, url, format_id, title, needs_merge, worker_token):
     direct = format_id[len(DIRECT_PREFIX):] if format_id.startswith(DIRECT_PREFIX) else ""
     target_url = direct or url
     merge = bool(needs_merge) and not direct
@@ -831,9 +859,11 @@ def start_download(url, format_id, title, thumb="", needs_merge=False):
                 done = d.get('downloaded_bytes', 0)
                 pct = (done / total) if total else 0
                 value = base_from + pct * (base_to - base_from)
+                spd = d.get('speed') or 0
+                # human_size(0) 会返回 "-"；拼成 "-/s" 会被界面当成真实速度显示
+                speed_text = (human_size(spd) + "/s") if spd > 0 else ""
                 _set_task(tid, progress=value,
-                          total=total, downloaded=done,
-                          speed=human_size(d.get('speed', 0)) + "/s")
+                          total=total, downloaded=done, speed=speed_text)
             elif d['status'] == 'finished':
                 _set_task(tid, progress=base_to)
         return progress_hook
@@ -929,14 +959,26 @@ def start_download(url, format_id, title, thumb="", needs_merge=False):
                     _set_task(tid, status="error", error="未找到媒体文件")
                     return
 
-            # 删除任务后不再落盘，避免产生没有队列记录的文件
-            if not _task_alive(tid):
+            # 删除 / 取消后不再落盘，避免产生没有队列记录或用户不想要的文件
+            if cancel_flags.get(tid) or not _task_alive(tid):
+                if cancel_flags.get(tid) and _task_alive(tid):
+                    _set_task(tid, status="error", error="已取消")
                 return
             target_dir = get_download_dir()
+            dest = os.path.join(target_dir, os.path.basename(fpath))
             try:
-                shutil.copy2(fpath, os.path.join(target_dir, os.path.basename(fpath)))
+                shutil.copy2(fpath, dest)
             except Exception as e:
                 _set_task(tid, status="error", error=f"保存失败: {e}")
+                return
+            # 复制大文件期间用户可能已经取消：不能再把状态改回 done，
+            # 否则队列显示完成、下好的文件也删不掉。
+            if cancel_flags.get(tid) or not _task_alive(tid):
+                try:
+                    os.remove(dest)
+                except Exception:
+                    pass
+                _set_task(tid, status="error", error="已取消")
                 return
             _set_task(tid, status="done", progress=100,
                       total=os.path.getsize(fpath), downloaded=os.path.getsize(fpath),
@@ -945,12 +987,50 @@ def start_download(url, format_id, title, thumb="", needs_merge=False):
             _set_task(tid, status="error", error=str(e)[:200])
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
-            ydl_instances.pop(tid, None)
-            pause_flags.pop(tid, None)
-            pause_conds.pop(tid, None)
+            with task_lock:
+                t = tasks.get(tid)
+                # 当前这一轮仍是任务的主人，或任务已被删除：
+                # 都由此线程做最终清理。任务被删除时不能提前清取消标记，
+                # 否则下载线程下一次 wait_if_paused 看不到取消，会继续把整个文件下完。
+                cleanup = t is None or t.get("_worker") is worker_token
+                # 判断和清理必须同锁完成：如果先解锁再 pop，用户恰好在这中间点「重试」，
+                # 新线程刚建好的 pause_conds 会被旧线程删掉，「继续」就再也唤不醒。
+                if cleanup:
+                    ydl_instances.pop(tid, None)
+                    pause_flags.pop(tid, None)
+                    pause_conds.pop(tid, None)
+                    cancel_flags.pop(tid, None)
 
     threading.Thread(target=do_download, daemon=True).start()
-    return str(tid)
+
+
+def retry_task(task_id):
+    """网络失败后原地重试：沿用原 taskId，URL / 清晰度参数在创建任务时就已保存。"""
+    try:
+        tid = int(task_id)
+        with task_lock:
+            t = tasks.get(tid)
+            if t is None:
+                return "ok"
+            if t.get("status") != "error" or t.get("error") == "已取消":
+                return "ok"
+            url = t.get("url") or ""
+            format_id = t.get("formatId") or ""
+            title = t.get("title") or ""
+            needs_merge = bool(t.get("needsMerge"))
+            if not url:
+                t["error"] = "缺少下载地址，无法重试"
+                return "ok"
+            worker_token = object()
+            t.update(status="running", progress=0, speed="", filename="", error="",
+                     total=0, downloaded=0, _worker=worker_token)
+            cancel_flags[tid] = False
+            pause_flags[tid] = False
+            pause_conds[tid] = threading.Condition()
+        _start_worker(tid, url, format_id, title, needs_merge, worker_token)
+    except Exception:
+        pass
+    return "ok"
 
 
 def pause_task(task_id):
@@ -1002,6 +1082,15 @@ def delete_task(task_id):
         with task_lock:
             t = tasks.pop(tid, None)
             fn = (t or {}).get("filename", "")
+            status = (t or {}).get("status", "")
+            err = (t or {}).get("error", "")
+            # 已完成 / 普通失败的任务没有下载线程会再来收尾，标记在这里清掉；
+            # running / paused / 已取消仍可能有线程在用，留给 finally 清理。
+            settled = status == "done" or (status == "error" and err != "已取消")
+            if settled:
+                cancel_flags.pop(tid, None)
+                pause_flags.pop(tid, None)
+                pause_conds.pop(tid, None)
         if fn:
             fp = os.path.join(get_download_dir(), fn)
             if os.path.exists(fp):
@@ -1009,9 +1098,8 @@ def delete_task(task_id):
                     os.remove(fp)
                 except Exception:
                     pass
-        cancel_flags.pop(tid, None)
-        pause_flags.pop(tid, None)
-        pause_conds.pop(tid, None)
+        # 仍可能活跃任务的取消标记 / 暂停条件留给下载线程收尾时清理：
+        # 这里提前 pop 会让正在下载的线程失去取消信号，继续白跑完整条链接。
     except Exception:
         pass
     return "ok"
