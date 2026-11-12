@@ -1696,10 +1696,13 @@ def _start_worker(tid, url, format_id, title, needs_merge, worker_token):
                     _set_task(tid, status="error", error="未找到媒体文件")
                     return
 
+            # 看门狗已判定网络假死：不再落盘，也不要把失败态改回完成
+            if abort_flags.get(tid):
+                return
             # 删除 / 取消后不再落盘，避免产生没有队列记录或用户不想要的文件
             if cancel_flags.get(tid) or not _task_alive(tid):
                 if cancel_flags.get(tid) and _task_alive(tid):
-                    _set_task(tid, status="error", error="已取消")
+                    _set_task(tid, status="error", error="已取消", speed="")
                 return
             target_dir = get_download_dir()
             dest = os.path.join(target_dir, os.path.basename(fpath))
@@ -1708,20 +1711,31 @@ def _start_worker(tid, url, format_id, title, needs_merge, worker_token):
             except Exception as e:
                 _set_task(tid, status="error", error=f"保存失败: {e}")
                 return
-            # 复制大文件期间用户可能已经取消：不能再把状态改回 done，
-            # 否则队列显示完成、下好的文件也删不掉。
-            if cancel_flags.get(tid) or not _task_alive(tid):
+            # 复制大文件期间用户可能已经取消 / 看门狗判定超时：
+            # 不能再把状态改回 done，否则队列显示完成、下好的文件也删不掉。
+            if abort_flags.get(tid) or cancel_flags.get(tid) or not _task_alive(tid):
                 try:
                     os.remove(dest)
                 except Exception:
                     pass
-                _set_task(tid, status="error", error="已取消")
+                if not abort_flags.get(tid):
+                    _set_task(tid, status="error", error="已取消", speed="")
                 return
             _set_task(tid, status="done", progress=100,
                       total=os.path.getsize(fpath), downloaded=os.path.getsize(fpath),
                       speed="", filename=os.path.basename(fpath))
         except Exception as e:
-            _set_task(tid, status="error", error=str(e)[:200])
+            # 看门狗已经写过更准确的「网络长时间无响应」时不要覆盖；
+            # 普通网络失败则把旧速度清掉，避免界面继续显示假速度。
+            with task_lock:
+                t = tasks.get(tid)
+                if t is not None and t.get("status") == "error" \
+                        and t.get("error") == "网络长时间无响应，请重试":
+                    t["speed"] = ""
+                elif t is not None:
+                    t["status"] = "error"
+                    t["error"] = str(e)[:200]
+                    t["speed"] = ""
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
             with task_lock:
@@ -1737,6 +1751,8 @@ def _start_worker(tid, url, format_id, title, needs_merge, worker_token):
                     pause_flags.pop(tid, None)
                     pause_conds.pop(tid, None)
                     cancel_flags.pop(tid, None)
+                    abort_flags.pop(tid, None)
+                    last_activity.pop(tid, None)
 
     threading.Thread(target=do_download, daemon=True).start()
 
