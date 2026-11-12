@@ -38,6 +38,7 @@ import android.util.Size;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
@@ -311,6 +312,20 @@ public class MainActivity extends Activity {
     private boolean swipeLocked;
     private int swipeDirection = 0;
     private float swipeDownX = 0f, swipeDownY = 0f, swipeDx = 0f;
+    /**
+     * 本次手势已经判定为「竖向」：之后即使手指又左右晃，也不再翻页。
+     * 没有这个闩，手指停在原地抖几像素就会被当成横滑，界面自己往左右挪。
+     */
+    private boolean swipeRejected;
+    /** 横滑判定阈值（像素）。系统 touchSlop 只有 8dp，太小，手指轻抖就判成横滑 */
+    private float swipeSlop = 0f;
+    /** 视频 / 音频相册翻页用：整层跟手拖动 */
+    private float stageDownX = 0f, stageDownY = 0f;
+    private long stageDownTime = 0L;
+    private boolean stageSwiping, stageCancel;
+    private int stageDir = 0;
+    /** 主图当前显示的是哪个文件。跟手翻页落定后用它判断「这张已经显示过了」，避免再解一次图造成闪烁 */
+    private String watchImageSource = "";
     private static final float[] SPEEDS = {0.5f, 1.0f, 1.25f, 1.5f, 2.0f};
     private int speedIndex = 1;
 
@@ -566,6 +581,7 @@ public class MainActivity extends Activity {
             loadScanCache();
             loadLastParse();
             resumePendingUpdate();
+            showSplash(savedInstanceState);
 
             new Thread(() -> {
                 try {
@@ -594,6 +610,57 @@ public class MainActivity extends Activity {
             String msg = t.toString();
             if (t.getCause() != null) msg += "\nCause: " + t.getCause();
             Toast.makeText(this, "启动失败: " + msg, Toast.LENGTH_LONG).show();
+        }
+    }
+
+    // ---------------- 开场动画 ----------------
+
+    /**
+     * 本进程有没有播过开场：只在冷启动第一屏播。
+     * 从后台切回来（Activity 只是 onResume）不会重进 onCreate，自然不会重播；
+     * 被系统回收后再进来算一次全新冷启动，播一次也符合系统 App 的习惯。
+     */
+    private static boolean splashDone = false;
+
+    /**
+     * 仿系统 App 的开场：图标占 C 位、名称在下面，图标先淡入并轻微放大，
+     * 名称稍后跟上，停一拍再整层淡出。全程约 1.5 秒，不阻塞后面的初始化。
+     */
+    private void showSplash(Bundle savedInstanceState) {
+        if (splashDone || savedInstanceState != null) return;
+        splashDone = true;
+        try {
+            final ViewGroup decor = (ViewGroup) findViewById(android.R.id.content);
+            if (decor == null) return;
+            final View splash = getLayoutInflater().inflate(R.layout.splash_overlay, decor, false);
+            decor.addView(splash);
+            final View icon = splash.findViewById(R.id.splash_icon);
+            final View name = splash.findViewById(R.id.splash_name);
+            final View tip = splash.findViewById(R.id.splash_tip);
+            icon.setAlpha(0f);
+            icon.setScaleX(0.82f);
+            icon.setScaleY(0.82f);
+            name.setAlpha(0f);
+            name.setTranslationY(dp(10));
+            tip.setAlpha(0f);
+            tip.setTranslationY(dp(8));
+            android.view.animation.Interpolator ease =
+                    new android.view.animation.DecelerateInterpolator();
+            icon.animate().alpha(1f).scaleX(1f).scaleY(1f)
+                    .setDuration(420).setInterpolator(ease).start();
+            name.animate().alpha(1f).translationY(0f)
+                    .setStartDelay(200).setDuration(300).setInterpolator(ease).start();
+            tip.animate().alpha(1f).translationY(0f)
+                    .setStartDelay(320).setDuration(300).start();
+            splash.postDelayed(() -> splash.animate().alpha(0f).setDuration(380)
+                    .withEndAction(() -> {
+                        try {
+                            decor.removeView(splash);
+                        } catch (Throwable ignored) {
+                        }
+                    }).start(), 1150);
+        } catch (Throwable t) {
+            Log.w("VSP", "开场动画失败", t);
         }
     }
 
@@ -773,6 +840,7 @@ public class MainActivity extends Activity {
         // 点击画面唤出 / 收起浮层控制条
         View.OnClickListener toggle = v -> toggleWatchChrome();
         playerStage.setOnClickListener(toggle);
+        setupStageSwipe(toggle);
         playerVideo.setOnClickListener(toggle);
         if (playerExo != null) {
             playerExo.setOnClickListener(toggle);
@@ -2055,6 +2123,7 @@ public class MainActivity extends Activity {
                 boolean oldRecyclable = watchImageRecyclable;
                 watchImageBitmap = got;
                 watchImageRecyclable = canRecycle;
+                watchImageSource = source;
                 playerImage.setImageBitmap(got);
                 // 同步算矩阵：以前是 post 出去的，换图与重算之间会有一帧
                 // 拿新位图套旧 scale 画出来，看着就是「闪一下、图跳一下」
@@ -2069,6 +2138,7 @@ public class MainActivity extends Activity {
         watchImageToken++;
         releaseSwipeImage();
         if (playerImage != null) playerImage.setImageDrawable(null);
+        watchImageSource = "";
         if (watchImageBitmap != null) {
             if (watchImageRecyclable) recycleQuiet(watchImageBitmap);
             watchImageBitmap = null;
@@ -2951,6 +3021,124 @@ public class MainActivity extends Activity {
     // ---------------- 图片左右滑动（跟手） ----------------
 
     /**
+     * 横滑判定阈值。系统 getScaledTouchSlop 在多数机器上只有 8dp，
+     * 手指按住不动时那点抖动就会越线，于是一动不动屏幕自己往左右挪。
+     * 这里取「12dp 与 1.6 倍 touchSlop 的较大值」，并额外要求横向位移
+     * 明显大于纵向（见 handleWatchTouch），两个条件都满足才算真的要翻页。
+     */
+    private float swipeSlopPx() {
+        if (swipeSlop <= 0f) {
+            int ts = ViewConfiguration.get(this).getScaledTouchSlop();
+            swipeSlop = Math.max(dp(12), ts * 1.6f);
+        }
+        return swipeSlop;
+    }
+
+    /**
+     * 视频 / 音频（以及相册模式下的任何媒体）整层跟手翻页。
+     *
+     * 图片走的是 playerImage 上的 handleWatchTouch（要配合双指缩放），
+     * 视频没有可拖的位图，就把 player_stage 整层跟着手指走：
+     * 松手超过屏宽 22% 落定，切下一条时从反方向滑进来，避免中间黑一帧。
+     */
+    private void setupStageSwipe(final View.OnClickListener tapToggle) {
+        if (playerStage == null) return;
+        View.OnTouchListener listener = (v, ev) -> {
+            // 图片交给 playerImage 的缩放 + 跟手翻页；非相册（网络视频单条）不做翻页
+            if (playerType == TYPE_IMAGE) return false;
+            if (watchSiblings == null || watchSiblings.size() < 2) return false;
+            switch (ev.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    if (swipePending != 0) settleSwipeNow();
+                    stageDownX = ev.getX();
+                    stageDownY = ev.getY();
+                    stageDownTime = System.currentTimeMillis();
+                    stageSwiping = false;
+                    stageCancel = false;
+                    stageDir = 0;
+                    return true;
+                case MotionEvent.ACTION_MOVE: {
+                    if (stageCancel) return true;
+                    float dx = ev.getX() - stageDownX;
+                    float dy = ev.getY() - stageDownY;
+                    if (!stageSwiping) {
+                        float slop = swipeSlopPx();
+                        if (Math.abs(dx) < slop) {
+                            // 竖向已经明显越线：本次手势不再可能是翻页
+                            if (Math.abs(dy) > slop * 1.2f) stageCancel = true;
+                            return true;
+                        }
+                        if (Math.abs(dx) < Math.abs(dy) * 1.6f) {
+                            stageCancel = true;
+                            return true;
+                        }
+                        stageDir = dx < 0 ? 1 : -1;
+                        stageSwiping = true;
+                    }
+                    float w = Math.max(1f, playerStage.getWidth());
+                    float move = canStep(stageDir) ? dx : dx * 0.3f;
+                    playerStage.setTranslationX(move * 0.72f);
+                    return true;
+                }
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL: {
+                    long dt = System.currentTimeMillis() - stageDownTime;
+                    if (!stageSwiping) {
+                        // 没滑成：手动补一次点击 / 长按，否则控制条唤出会失灵
+                        if (!stageCancel && ev.getActionMasked() == MotionEvent.ACTION_UP) {
+                            if (dt >= 600) v.performLongClick();
+                            else if (dt < 320) tapToggle.onClick(v);
+                        }
+                        playerStage.animate().cancel();
+                        playerStage.setTranslationX(0f);
+                        return true;
+                    }
+                    float w = Math.max(1f, playerStage.getWidth());
+                    float total = ev.getX() - stageDownX;
+                    boolean atEdge = !canStep(stageDir);
+                    if (atEdge && Math.abs(total) > w * 0.1f) hintEdge(stageDir < 0);
+                    stageSwiping = false;
+                    if (!atEdge && Math.abs(total) > w * 0.22f) {
+                        commitStageSwipe(stageDir);
+                    } else {
+                        playerStage.animate().translationX(0f).setDuration(150).start();
+                    }
+                    return true;
+                }
+                default:
+                    return false;
+            }
+        };
+        // VideoView / 音频层自己带着点击监听，会先把事件吃掉，
+        // 所以同一套手势要挂到这两层上，否则只有黑边能滑、画面本身滑不动。
+        playerStage.setOnTouchListener(listener);
+        if (playerVideo != null) playerVideo.setOnTouchListener(listener);
+        playerAudio.setOnTouchListener(listener);
+    }
+
+    /** 视频 / 音频落定：整层滑出去 → 在反方向就位 → 换内容 → 滑回来 */
+    private void commitStageSwipe(int dir) {
+        float w = Math.max(1f, playerStage.getWidth());
+        final int target = watchIndex + dir;
+        if (watchSiblings == null || target < 0 || target >= watchSiblings.size()) {
+            playerStage.animate().translationX(0f).setDuration(150).start();
+            return;
+        }
+        playerStage.animate().cancel();
+        playerStage.animate().translationX(-dir * w).setDuration(150)
+                .withEndAction(() -> {
+                    MediaItem m = watchSiblings.get(target);
+                    int t = m.type >= 0 ? m.type : guessType(m.name);
+                    // 先放到来的那一侧，再换内容，最后滑进正中：
+                    // 这样切换过程中屏幕里始终有画面在动，不会闪一下黑
+                    playerStage.setTranslationX(dir * w);
+                    openPlayer(m.source, t, m.name, true, watchSiblings, target);
+                    playerStage.animate().translationX(0f).setDuration(180).start();
+                })
+                .start();
+    }
+
+    /**
      * 跟手翻页：手指往哪拖，当前图就往哪走，下一张（或上一张）从另一侧跟进来，
      * 松手按位移决定落定还是回弹。以前是 fling 一甩就瞬间换图，看不到过程。
      *
@@ -2965,6 +3153,7 @@ public class MainActivity extends Activity {
                 if (swipePending != 0) settleSwipeNow();
                 swipeDx = 0f;
                 swipeLocked = false;
+                swipeRejected = false;
                 swipeDirection = 0;
                 swipeDownX = ev.getX();
                 swipeDownY = ev.getY();
@@ -2974,9 +3163,18 @@ public class MainActivity extends Activity {
                 float dx = ev.getX() - swipeDownX;
                 float dy = ev.getY() - swipeDownY;
                 if (!swipeLocked) {
-                    if (Math.abs(dx) < dp(10)) return true;
-                    // 竖向为主的滑动不算翻页，避免和下拉/上滑冲突
-                    if (Math.abs(dx) < Math.abs(dy) * 1.2f) return true;
+                    // 本次手势已经判成竖向：后面手指再怎么左右晃也不翻页
+                    if (swipeRejected) return true;
+                    float slop = swipeSlopPx();
+                    if (Math.abs(dx) < slop) {
+                        if (Math.abs(dy) > slop * 1.2f) swipeRejected = true;
+                        return true;
+                    }
+                    // 竖向分量明显更大：这是上下滑动（看图时常见），不抢
+                    if (Math.abs(dx) < Math.abs(dy) * 1.6f) {
+                        swipeRejected = true;
+                        return true;
+                    }
                     swipeLocked = true;
                     swipeDirection = dx < 0 ? 1 : -1;
                     beginSwipe(swipeDirection);
@@ -3237,6 +3435,8 @@ public class MainActivity extends Activity {
             boolean oldRecyclable = watchImageRecyclable;
             watchImageBitmap = edge;
             watchImageRecyclable = true;
+            watchImageSource = watchSiblings.get(target).source == null
+                    ? "" : watchSiblings.get(target).source;
             playerImage.setImageBitmap(edge);
             applyImageFit();
             if (old != null && old != edge) {
@@ -3317,9 +3517,16 @@ public class MainActivity extends Activity {
         setPlayerTitleText(m.name);
         playerKind.setText("图片");
         updateThumbSelection();
-        // 先发起主图加载（会递增 token），再取图片尺寸：
-        // 反过来会让 fillImageMeta 捕获到旧 token，结果被当成过期数据丢弃。
-        loadWatchImage(m.source, true, m.source != null && m.source.startsWith("content://"), true);
+        // 跟手翻页已经把这张图顶到屏幕正中，这里再解一次大图只会让画面
+        // 「换一下再重画」——用户看到的就是切换闪一下。相同文件就不再重载。
+        boolean already = m.source != null && m.source.equals(watchImageSource)
+                && watchImageBitmap != null && !watchImageBitmap.isRecycled()
+                && playerImage.getDrawable() != null;
+        if (!already) {
+            // 先发起主图加载（会递增 token），再取图片尺寸：
+            // 反过来会让 fillImageMeta 捕获到旧 token，结果被当成过期数据丢弃。
+            loadWatchImage(m.source, true, m.source != null && m.source.startsWith("content://"), true);
+        }
         fillImageMeta(m.source, true);
         preloadSwipeNeighbors();
         resetImageZoom();
@@ -3649,6 +3856,13 @@ public class MainActivity extends Activity {
             }
             playerPanel.setVisibility(View.GONE);
             playerPanel.setBackgroundColor(Color.BLACK);
+            // 翻页时整层会被平移出去，退出必须复位，否则下次进来画面偏在屏幕外
+            if (playerStage != null) {
+                playerStage.animate().cancel();
+                playerStage.setTranslationX(0f);
+            }
+            stageSwiping = false;
+            stageCancel = false;
             playerType = TYPE_IMAGE;
             watchingAvatar = false;
             watchSiblings = null;

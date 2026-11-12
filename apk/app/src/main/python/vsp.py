@@ -1,8 +1,16 @@
-import json, os, threading, tempfile, shutil, re, time
-import urllib.request, urllib.parse, urllib.error
+import json, os, threading, tempfile, shutil, re, time, struct, hashlib
+import urllib.request, urllib.parse, urllib.error, http.client
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 import yt_dlp
+
+# HLS 的 AES-128 分片解密直接用 yt-dlp 自带的纯 Python 实现，
+# 不再额外引入 pycryptodome（Chaquopy 打包体积会明显变大）。
+try:
+    from yt_dlp.aes import aes_cbc_decrypt_bytes, unpad_pkcs7
+except Exception:
+    aes_cbc_decrypt_bytes = None
+    unpad_pkcs7 = None
 
 # 关键：模块导入阶段绝不写磁盘。
 # Android 11+ 分区存储下 /sdcard/Download 不是应用可直接写入的路径，
@@ -675,6 +683,7 @@ def parse(url):
             if entries:
                 info = next((e for e in entries if e), info)
             if info.get("formats") or info.get("url"):
+                _remember_formats(real, info)
                 data = normalize(info)
                 if data["videos"] or data["audios"] or data["images"]:
                     return json.dumps(data, ensure_ascii=False)
@@ -779,6 +788,11 @@ cancel_flags = {}
 pause_flags = {}
 pause_conds = {}
 ydl_instances = {}
+# 网络卡死检测：下载线程每收到一块数据就 touch 一次；
+# 看门狗先清掉过期的速度，再在长时间无数据时把任务置为可重试的失败态。
+abort_flags = {}
+last_activity = {}
+_watchdog_started = [False]
 
 
 def _set_task(tid, **fields):
@@ -801,6 +815,64 @@ def _wake(tid):
     if cond is not None:
         with cond:
             cond.notify_all()
+
+
+def _wait_if_paused(tid):
+    cond = pause_conds.get(tid)
+    if cond is not None:
+        while pause_flags.get(tid) and not cancel_flags.get(tid):
+            with cond:
+                cond.wait(0.5)
+    if cancel_flags.get(tid):
+        raise Exception("已取消")
+    if abort_flags.get(tid):
+        raise Exception("网络长时间无响应，请重试")
+
+
+def _check_abort(tid):
+    if cancel_flags.get(tid):
+        raise Exception("已取消")
+    if abort_flags.get(tid):
+        raise Exception("网络长时间无响应，请重试")
+
+
+def _touch(tid):
+    last_activity[tid] = time.time()
+
+
+def _watchdog_loop():
+    """下载假死保护。
+
+    分片服务器可能接受连接后既不回数据也不断开，界面会一直停在
+    「2~3 MB + 旧速度」。这里在 10 秒无新数据时先清掉速度，60 秒仍无
+    数据就把任务置为失败（队列里可原地重试），不再无限等。
+    """
+    while True:
+        time.sleep(5)
+        now = time.time()
+        with task_lock:
+            snapshot = [(tid, dict(t)) for tid, t in tasks.items()]
+        for tid, t in snapshot:
+            if t.get("status") != "running" or pause_flags.get(tid):
+                continue
+            last = last_activity.get(tid)
+            if not last:
+                continue
+            idle = now - last
+            speed = t.get("speed") or ""
+            if idle >= 10 and speed.endswith("/s"):
+                _set_task(tid, speed="")
+            if idle >= 60:
+                abort_flags[tid] = True
+                _set_task(tid, status="error", speed="",
+                          error="网络长时间无响应，请重试")
+
+
+def _ensure_watchdog():
+    if _watchdog_started[0]:
+        return
+    _watchdog_started[0] = True
+    threading.Thread(target=_watchdog_loop, daemon=True).start()
 
 
 def _merge_av(video_path, audio_path, out_path):
@@ -837,23 +909,676 @@ def start_download(url, format_id, title, thumb="", needs_merge=False):
     return str(tid)
 
 
+# ---------------------------------------------------------------- HLS 分片下载
+#
+# 这个站点的 m3u8 有两个坑：
+#   1. 播放列表里的分片地址带短签名，CDN 只缓存部分分片；缓存未命中的
+#      分片回源时会被直接重置（等约 5 秒后断连）。
+#   2. yt-dlp 原生 HLS 下载器只在开始时取一次播放列表，失败后不会重新
+#      拉取，于是一直卡在 2~3 MB，界面还保留最后一次速度。
+# 这里自己下分片：失败就刷新播放列表重新拿签名，指数退避重试；仍然
+# 失败则快速报错，交给队列的「重试」，不再假死。
+
+_HLS_ATTR_RE = re.compile(r'([A-Z0-9-]+)=("[^"]*"|[^,]*)')
+_HLS_PACE = 0.0
+_HLS_MAX_ATTEMPTS = 5
+# 并发分片数。这类源站大多只允许单条连接跑，开太多会被判成抓取、直接把
+# IP 拉黑（实测 8 路并发后整个域名对所有连接都拒绝），所以默认只开 2 路，
+# 一旦被拒就自动降级成单路，把已有的连接保住继续下。
+_HLS_WORKERS = 2
+
+
+def _hls_attrs(line):
+    out = {}
+    for m in _HLS_ATTR_RE.finditer(line):
+        v = m.group(2)
+        if v.startswith('"') and v.endswith('"'):
+            v = v[1:-1]
+        out[m.group(1)] = v
+    return out
+
+
+def _hls_byterange(text):
+    text = (text or "").strip()
+    if not text:
+        return None
+    if "@" in text:
+        length, offset = text.split("@", 1)
+        return int(length), int(offset)
+    return int(text), None
+
+
+def _hls_read(url, tid, referer="", timeout=20, on_bytes=None, headers=None,
+              max_stall=8, deadline=900):
+    """读一个 URL，支持「传到一半被源站掐断」后按字节断点续传。
+
+    这类站点的 CDN 会先回 Content-Length，然后只发几 KB 就 RST。原来的写法
+    直接 read() 到底，遇到 IncompleteRead 就整段重来，已经下到的字节全丢，
+    于是队列里的"已下载"一直涨、进度却卡在同一个分片上不再前进。
+    这里保留已收到的部分，下一次请求用 Range 从断点继续；服务器若无视 Range
+    （返回 200 而不是 206），则丢掉残片从头读。
+    只要每次还能拿到新字节就一直续，判定失败的依据是「连续 max_stall 次
+    一个字节都没拿到」，而不是总重试次数——否则大分片永远下不完。
+    """
+    req_headers = {"User-Agent": UA, "Accept": "*/*"}
+    if referer:
+        req_headers["Referer"] = referer
+    if headers:
+        req_headers.update(headers)
+
+    buf = bytearray()
+    attempts = 0
+    empty_streak = 0
+    # 调用方自己指定了 Range（分片本身是 byte-range）时不能叠加续传 Range
+    allow_resume = "Range" not in (headers or {})
+    start_time = time.time()
+    while True:
+        _wait_if_paused(tid)
+        _check_abort(tid)
+        hdrs = dict(req_headers)
+        if buf and allow_resume:
+            hdrs["Range"] = "bytes=%d-" % len(buf)
+        req = urllib.request.Request(url, headers=hdrs)
+        got = 0
+        expect_total = 0
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                if buf:
+                    # 续传请求必须真的从断点开始，否则会把重复数据拼进去
+                    if getattr(r, "status", 200) != 206:
+                        buf = bytearray()
+                    else:
+                        cr = r.headers.get("Content-Range") or ""
+                        m = re.match(r"bytes\s+(\d+)-", cr)
+                        if m and int(m.group(1)) != len(buf):
+                            buf = bytearray()
+                clen = int(r.headers.get("Content-Length") or 0)
+                if clen:
+                    expect_total = len(buf) + clen
+                while True:
+                    _wait_if_paused(tid)
+                    _check_abort(tid)
+                    piece = r.read(128 * 1024)
+                    if not piece:
+                        break
+                    buf.extend(piece)
+                    got += len(piece)
+                    _touch(tid)
+                    if on_bytes:
+                        on_bytes(len(buf))
+                # Content-Length 对不上说明又被截断：不能当成功返回
+                if expect_total and len(buf) < expect_total:
+                    raise http.client.IncompleteRead(
+                        b"", expect_total - len(buf))
+                return bytes(buf)
+        except http.client.IncompleteRead as e:
+            if getattr(e, "partial", None):
+                buf.extend(e.partial)
+                got += len(e.partial)
+            err = e
+        except Exception as e:
+            err = e
+        # 走到这里说明连接被掐断
+        attempts += 1
+        if got == 0:
+            empty_streak += 1
+        else:
+            empty_streak = 0
+        if empty_streak >= max_stall:
+            raise Exception("源站拒绝传输（连续 %d 次未返回数据，已收到 %d 字节）" %
+                            (empty_streak, len(buf)))
+        if time.time() - start_time > deadline:
+            raise Exception("读取超时（%.0fs，已收到 %d 字节）" %
+                            (time.time() - start_time, len(buf)))
+        if got == 0:
+            time.sleep(min(0.4 * attempts, 3))
+
+
+def _hls_parse(text, base):
+    """解析 m3u8。返回 (分片列表, 初始化分片, 主播放列表变体地址)。"""
+    lines = [l.strip() for l in (text or "").splitlines() if l.strip()]
+    if not lines:
+        raise Exception("HLS 播放列表为空")
+
+    # 主播放列表：选码率最高的一路
+    if any(l.startswith("#EXT-X-STREAM-INF") for l in lines):
+        best = None
+        for i, line in enumerate(lines):
+            if not line.startswith("#EXT-X-STREAM-INF"):
+                continue
+            attrs = _hls_attrs(line)
+            bw = int(attrs.get("BANDWIDTH") or 0)
+            j = i + 1
+            while j < len(lines) and (not lines[j] or lines[j].startswith("#")):
+                j += 1
+            if j < len(lines):
+                uri = urllib.parse.urljoin(base, lines[j])
+                if best is None or bw > best[0]:
+                    best = (bw, uri)
+        if best:
+            return [], None, best[1]
+
+    segments = []
+    init_seg = None
+    key = None
+    pending_range = None
+    last_range_end = 0
+    seq = 0
+    for line in lines:
+        if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+            try:
+                seq = int(line.split(":", 1)[1].strip())
+            except Exception:
+                seq = 0
+        elif line.startswith("#EXT-X-KEY:"):
+            attrs = _hls_attrs(line)
+            method = (attrs.get("METHOD") or "NONE").upper()
+            if method == "NONE":
+                key = None
+            else:
+                uri = attrs.get("URI") or ""
+                if uri:
+                    uri = urllib.parse.urljoin(base, uri)
+                iv = attrs.get("IV") or ""
+                if iv:
+                    raw = iv[2:] if iv.lower().startswith("0x") else iv
+                    iv = bytes.fromhex(raw)
+                else:
+                    iv = None
+                key = {"method": method, "uri": uri, "iv": iv, "key": None}
+        elif line.startswith("#EXT-X-MAP:"):
+            attrs = _hls_attrs(line)
+            uri = attrs.get("URI") or ""
+            if uri:
+                init_seg = {
+                    "url": urllib.parse.urljoin(base, uri),
+                    "range": _hls_byterange(attrs.get("BYTERANGE")),
+                    "key": key, "seq": 0,
+                }
+        elif line.startswith("#EXT-X-BYTERANGE:"):
+            pending_range = _hls_byterange(line.split(":", 1)[1])
+        elif not line.startswith("#"):
+            rng = pending_range
+            if rng:
+                length, offset = rng
+                if offset is None:
+                    offset = last_range_end
+                last_range_end = offset + length
+                rng = (length, offset)
+            segments.append({
+                "url": urllib.parse.urljoin(base, line),
+                "range": rng, "key": key, "seq": seq + len(segments),
+            })
+            pending_range = None
+    return segments, init_seg, None
+
+
+def _hls_playlist(url, tid, referer="", refresh=False):
+    fetch_url = url
+    if refresh:
+        sep = "&" if "?" in fetch_url else "?"
+        fetch_url = fetch_url + sep + "_vsp=" + str(int(time.time()))
+    data = _hls_read(fetch_url, tid, referer=referer, timeout=25)
+    return data.decode("utf-8", "ignore"), fetch_url
+
+
+def _hls_key(key, tid, referer=""):
+    if not key or key.get("method") != "AES-128":
+        return None
+    if key.get("key"):
+        return key["key"]
+    data = _hls_read(key.get("uri") or "", tid, referer=referer, timeout=20)
+    if len(data) != 16:
+        raise Exception("HLS 密钥长度异常")
+    key["key"] = data
+    return data
+
+
+def _hls_decrypt(data, seg, tid, referer=""):
+    key = seg.get("key")
+    if not key or key.get("method") != "AES-128":
+        return data
+    if aes_cbc_decrypt_bytes is None:
+        raise Exception("HLS AES 解密不可用")
+    k = _hls_key(key, tid, referer)
+    iv = key.get("iv") or struct.pack(">8xq", seg.get("seq") or 0)
+    out = aes_cbc_decrypt_bytes(data, k, iv)
+    try:
+        return unpad_pkcs7(out)
+    except Exception:
+        return out
+
+
+def _http_stream(url, dest, tid, headers=None, on_progress=None,
+                 max_stall=8, deadline=3600):
+    """把 URL 流式写到 dest，连接被源站掐断时按「已写字节」续传。
+
+    源站（这次这个 HLS/CDN 站点）会回完 Content-Length 后只发几 KB 就 RST，
+    普通写法一断就得从 0 开始，永远卡在几 MB；这里每次断线都从断点继续。
+    """
+    hdrs = {"User-Agent": UA, "Accept": "*/*"}
+    if headers:
+        hdrs.update(headers)
+
+    done = os.path.getsize(dest) if os.path.exists(dest) else 0
+    attempts = 0
+    empty_streak = 0
+    total = 0
+    start_time = time.time()
+    while True:
+        _wait_if_paused(tid)
+        _check_abort(tid)
+        req_headers = dict(hdrs)
+        if done:
+            req_headers["Range"] = "bytes=%d-" % done
+        req = urllib.request.Request(url, headers=req_headers)
+        got = 0
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                clen = int(r.headers.get("Content-Length") or 0)
+                if done:
+                    if getattr(r, "status", 200) != 206:
+                        # 不支持续传：只能整段重来
+                        done = 0
+                        mode = "wb"
+                    else:
+                        cr = r.headers.get("Content-Range") or ""
+                        m = re.match(r"bytes\s+(\d+)-", cr)
+                        if m and int(m.group(1)) != done:
+                            done = 0
+                            mode = "wb"
+                        else:
+                            mode = "ab"
+                        total = done + clen if clen else 0
+                else:
+                    mode = "wb"
+                    total = clen
+                with open(dest, mode) as f:
+                    while True:
+                        _wait_if_paused(tid)
+                        _check_abort(tid)
+                        piece = r.read(128 * 1024)
+                        if not piece:
+                            break
+                        f.write(piece)
+                        done += len(piece)
+                        got += len(piece)
+                        _touch(tid)
+                        if on_progress:
+                            on_progress(done, total)
+                if total and done < total:
+                    raise http.client.IncompleteRead(b"", total - done)
+            return dest
+        except Exception as e:
+            attempts += 1
+            if got == 0:
+                empty_streak += 1
+            else:
+                empty_streak = 0
+            if empty_streak >= max_stall:
+                raise Exception("源站拒绝传输（连续 %d 次未返回数据，已下 %s）" %
+                                (empty_streak, human_size(done)))
+            if time.time() - start_time > deadline:
+                raise Exception("下载超时（%.0fs，已下 %s）：%s" %
+                                (time.time() - start_time, human_size(done), str(e)[:40]))
+            if got == 0:
+                time.sleep(min(0.5 * attempts, 3))
+
+
+def _hls_fetch_segment(seg, tid, referer="", on_bytes=None):
+    headers = {}
+    rng = seg.get("range")
+    if rng:
+        length, offset = rng
+        headers["Range"] = "bytes=%d-%d" % (offset, offset + length - 1)
+    data = _hls_read(seg.get("url") or "", tid, referer=referer,
+                     timeout=20, on_bytes=on_bytes, headers=headers)
+    if not data:
+        raise Exception("分片内容为空")
+    return _hls_decrypt(data, seg, tid, referer)
+
+
+def _looks_hls(fmt):
+    """这条流是不是 HLS（m3u8）。是的话不要交给 yt-dlp 的分片下载器：
+    它只在开始取一次播放列表，签名过期/回源被拒后不会刷新，正是卡在 2~3MB 的原因。"""
+    proto = (fmt.get("protocol") or "").lower()
+    if proto.startswith("m3u8"):
+        return True
+    if proto.startswith("http_dash_segments"):
+        return False
+    return ".m3u8" in (fmt.get("url") or "").lower()
+
+
+# 最近一次解析出来的 streams：formatId -> {url, protocol}
+# 下载紧接着解析发生时直接用这份缓存，不用为了判断协议再跑一遍 yt-dlp。
+_format_cache = {}
+_format_cache_lock = threading.Lock()
+
+
+def _remember_formats(page_url, info):
+    try:
+        entries = {}
+        for f in (info or {}).get("formats") or []:
+            fid = str(f.get("format_id") or "")
+            if not fid:
+                continue
+            entries[fid] = {"url": f.get("url") or "",
+                            "protocol": f.get("protocol") or ""}
+        if not entries:
+            return
+        with _format_cache_lock:
+            _format_cache[(page_url or "").strip()] = (time.time(), entries)
+            if len(_format_cache) > 12:
+                oldest = sorted(_format_cache.items(), key=lambda kv: kv[1][0])[:4]
+                for k, _ in oldest:
+                    _format_cache.pop(k, None)
+    except Exception:
+        pass
+
+
+def _resolve_format(page_url, format_id):
+    """按 format_id 拿这条流的真实地址和协议（优先用刚解析时的缓存）。"""
+    if not format_id:
+        return None
+    key = (page_url or "").strip()
+    with _format_cache_lock:
+        cached = _format_cache.get(key)
+    if cached and time.time() - cached[0] < 600:
+        hit = cached[1].get(str(format_id))
+        if hit and hit.get("url"):
+            return hit
+    try:
+        with yt_dlp.YoutubeDL(_ydl_opts(page_url)) as ydl:
+            info = ydl.extract_info(page_url, download=False)
+        if not info:
+            return None
+        entries = info.get("entries")
+        if entries:
+            info = next((e for e in entries if e), info)
+        _remember_formats(page_url, info)
+        for f in info.get("formats") or []:
+            if str(f.get("format_id")) == str(format_id):
+                return {"url": f.get("url") or "",
+                        "protocol": f.get("protocol") or ""}
+    except Exception:
+        return None
+    return None
+
+
+def _hls_cache_dir(url):
+    """分片缓存放应用私有目录：重试 / 换网络后接着下，不用从第 1 片重来。"""
+    base = _private_dir
+    if not base:
+        try:
+            base = tempfile.gettempdir()
+        except Exception:
+            return None
+    try:
+        tag = hashlib.md5((url or "").encode("utf-8")).hexdigest()[:12]
+        d = os.path.join(base, "hls_cache", tag)
+        os.makedirs(d, exist_ok=True)
+        return d
+    except Exception:
+        return None
+
+
+def _hls_download(target_url, tmpdir, title, tid, referer="", end_pct=92):
+    """下 HLS：多线程并发拉分片 + 单分片断点续传 + 失败换签名重试。
+
+    这类站点的 CDN 对「一条连接连续拉」限制很狠，单线程必然卡在几 MB；
+    并发多条连接分头拉，单条被掐断就按字节续传，才可能真正下完。
+    已下完的分片留在私有缓存里，任务失败点「重试」时直接跳过，不用重下。
+    """
+    text, final_url = _hls_playlist(target_url, tid, referer)
+    segments, init_seg, variant = _hls_parse(text, final_url)
+    if variant:
+        text, final_url = _hls_playlist(variant, tid, referer)
+        segments, init_seg, variant = _hls_parse(text, final_url)
+    if not segments:
+        raise Exception("HLS 播放列表里没有分片")
+
+    total = len(segments)
+    ext = ".mp4" if init_seg else ".ts"
+    fpath = os.path.join(tmpdir, _safe_name(title, ext))
+    part = fpath + ".part"
+    cache_dir = _hls_cache_dir(target_url)
+    segdir = os.path.join(cache_dir, "seg%d" % total) if cache_dir else os.path.join(tmpdir, "_segs")
+    os.makedirs(segdir, exist_ok=True)
+
+    lock = threading.Lock()
+    state = {
+        "next": 0,             # 下一个待领取的分片下标
+        "serial": False,       # 是否已降级成单路
+        "serial_fails": 0,     # 降级后连续失败次数
+        "committed": 0,        # 已经落盘的分片总字节
+        "inflight": {},        # 在拉的分片：index -> 已收到字节
+        "done": 0,             # 已完成分片数
+        "shown": 0,            # 只增不减的展示字节
+        "last_bytes": 0,
+        "last_time": time.time(),
+        "speed": "",
+        "last_pct": 0.0,
+    }
+    # 上次失败前已经下完的分片：直接算数，不再重新请求
+    for index in range(total):
+        path = os.path.join(segdir, "%06d.bin" % index)
+        if os.path.exists(path):
+            try:
+                size = os.path.getsize(path)
+            except Exception:
+                continue
+            if size > 0:
+                state["committed"] += size
+                state["done"] += 1
+    if state["done"] >= total:
+        state["next"] = total
+    else:
+        # 从第一个缺片开始补，已下过的跳过
+        state["next"] = 0
+    errors = []
+    stop = threading.Event()
+
+    def report_value(force=False):
+        with lock:
+            cur = state["committed"] + sum(state["inflight"].values())
+            if cur > state["shown"]:
+                state["shown"] = cur
+            shown = state["shown"]
+            done = state["done"]
+            now = time.time()
+            speed = state["speed"]
+            if force or now - state["last_time"] >= 0.6:
+                delta = shown - state["last_bytes"]
+                spd = delta / max(now - state["last_time"], 0.001)
+                if spd > 1:
+                    speed = human_size(spd) + "/s"
+                state["speed"] = speed
+                state["last_bytes"] = shown
+                state["last_time"] = now
+            # 进度按已完成分片推进，只增不减
+            pct = (done / float(total)) * end_pct if total else 0.0
+            if pct > state["last_pct"]:
+                state["last_pct"] = pct
+            pct = state["last_pct"]
+        if speed:
+            _set_task(tid, progress=pct, downloaded=shown, speed=speed)
+        else:
+            _set_task(tid, progress=pct, downloaded=shown)
+
+    def on_seg_bytes(index, sofar):
+        with lock:
+            state["inflight"][index] = sofar
+        report_value()
+
+    def refresh_segments():
+        """重新拉播放列表换分片签名（带锁，避免 8 个线程同时刷新）。"""
+        try:
+            new_text, new_final = _hls_playlist(target_url, tid, referer, refresh=True)
+            new_segs, new_init, new_variant = _hls_parse(new_text, new_final)
+            if new_variant:
+                new_text, new_final = _hls_playlist(new_variant, tid, referer, refresh=True)
+                new_segs, new_init, new_variant = _hls_parse(new_text, new_final)
+            if len(new_segs) == total:
+                return new_segs
+        except Exception:
+            pass
+        return None
+
+    refresh_lock = threading.Lock()
+
+    def fetch_one(index):
+        seg = segments[index]
+        last_err = None
+        for attempt in range(_HLS_MAX_ATTEMPTS + 2):
+            _wait_if_paused(tid)
+            _check_abort(tid)
+            try:
+                return _hls_fetch_segment(
+                    seg, tid, referer, lambda n: on_seg_bytes(index, n))
+            except Exception as e:
+                last_err = e
+                with lock:
+                    state["inflight"][index] = 0
+                if "拒绝" in str(e):
+                    # 源站已经在拒绝：多连接只会让它更狠，立刻降级成单路，
+                    # 失败也不在这里空转重试，交给上层降速后重来。
+                    with lock:
+                        state["serial"] = True
+                    raise
+                if attempt >= 1:
+                    with refresh_lock:
+                        new_segs = refresh_segments()
+                    if new_segs:
+                        seg = new_segs[index]
+                time.sleep(min(0.6 * (attempt + 1), 5))
+        raise Exception("分片 %d/%d：%s" % (index + 1, total, str(last_err)[:80]))
+
+    def worker(slot):
+        while not stop.is_set():
+            # 降级成单路后，除 0 号线程外的都退出，把连接额度让给正在下的那条
+            if slot > 0 and state.get("serial"):
+                return
+            with lock:
+                index = state["next"]
+                if index >= total:
+                    return
+                state["next"] = index + 1
+            # 上次已经下完的这段直接跳过（缓存目录里就有）
+            cached_path = os.path.join(segdir, "%06d.bin" % index)
+            if os.path.exists(cached_path) and os.path.getsize(cached_path) > 0:
+                continue
+            try:
+                data = fetch_one(index)
+            except Exception as e:
+                msg = str(e)
+                throttled = ("拒绝" in msg or "超时" in msg or "中断" in msg)
+                if throttled:
+                    with lock:
+                        state["serial"] = True
+                        state["serial_fails"] += 1
+                        fails = state["serial_fails"]
+                        committed_now = state["committed"]
+                        if committed_now == 0 or fails >= 3:
+                            errors.append(
+                                "源站限制下载：连续 %d 个分片被拒。该站对下载做了限制，"
+                                "可以换网络或等几分钟再试，或直接用预览播放。" % fails)
+                            stop.set()
+                            return
+                    # 被源站拒了一次：单路慢速继续，给源站留出缓冲时间。
+                    # 这段等待要算作「仍在活动」，否则会被看门狗判成假死。
+                    for _ in range(4):
+                        time.sleep(2)
+                        _touch(tid)
+                    with lock:
+                        state["next"] = index
+                    continue
+                if not stop.is_set():
+                    errors.append(msg)
+                stop.set()
+                return
+            with lock:
+                state["serial_fails"] = 0
+            path = os.path.join(segdir, "%06d.bin" % index)
+            try:
+                with open(path, "wb") as sf:
+                    sf.write(data)
+            except Exception as e:
+                errors.append("写分片失败：%s" % str(e)[:60])
+                stop.set()
+                return
+            with lock:
+                state["committed"] += len(data)
+                state["done"] += 1
+                state["inflight"][index] = 0
+            report_value()
+
+    with lock:
+        state["next"] = 0
+
+    if init_seg:
+        init_path = os.path.join(segdir, "init.bin")
+        if not (os.path.exists(init_path) and os.path.getsize(init_path) > 0):
+            _touch(tid)
+            data = _hls_fetch_segment(init_seg, tid, referer, lambda n: None)
+            with open(init_path, "wb") as f:
+                f.write(data)
+
+    threads = []
+    for slot in range(min(_HLS_WORKERS, total)):
+        t = threading.Thread(target=worker, args=(slot,), daemon=True)
+        t.start()
+        threads.append(t)
+    for t in threads:
+        while t.is_alive():
+            t.join(0.5)
+            _wait_if_paused(tid)
+            _check_abort(tid)
+            report_value()
+
+    if errors:
+        raise Exception(errors[0])
+
+    report_value(force=True)
+    with open(part, "wb") as f:
+        init_path = os.path.join(segdir, "init.bin")
+        if os.path.exists(init_path):
+            with open(init_path, "rb") as sf:
+                f.write(sf.read())
+        for index in range(total):
+            path = os.path.join(segdir, "%06d.bin" % index)
+            if not os.path.exists(path):
+                raise Exception("分片 %d 缺失，下载不完整" % (index + 1))
+            with open(path, "rb") as sf:
+                f.write(sf.read())
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(part, fpath)
+    # 组装完成：整片缓存都不再需要，删掉免得占着几百 MB
+    shutil.rmtree(segdir, ignore_errors=True)
+    if cache_dir:
+        try:
+            shutil.rmtree(os.path.dirname(segdir), ignore_errors=True)
+        except Exception:
+            pass
+    return fpath
+
+
 def _start_worker(tid, url, format_id, title, needs_merge, worker_token):
     direct = format_id[len(DIRECT_PREFIX):] if format_id.startswith(DIRECT_PREFIX) else ""
     target_url = direct or url
     merge = bool(needs_merge) and not direct
+    abort_flags[tid] = False
+    last_activity[tid] = time.time()
+    _ensure_watchdog()
 
     def wait_if_paused():
-        cond = pause_conds.get(tid)
-        if cond is not None:
-            while pause_flags.get(tid) and not cancel_flags.get(tid):
-                with cond:
-                    cond.wait(0.5)
-        if cancel_flags.get(tid):
-            raise Exception("已取消")
+        _wait_if_paused(tid)
 
     def make_hook(base_from, base_to):
         def progress_hook(d):
             wait_if_paused()
+            _check_abort(tid)
+            _touch(tid)
             if d['status'] == 'downloading':
                 total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
                 done = d.get('downloaded_bytes', 0)
@@ -885,27 +1610,28 @@ def _start_worker(tid, url, format_id, title, needs_merge, worker_token):
             ydl.download([target])
 
     def raw_download(target, dest, base_from, base_to):
-        """直链（mp4/m4a）直接用 urllib 流式落盘：比走 yt-dlp 少一层解析，更不容易失败。"""
-        req = urllib.request.Request(target, headers=_play_headers(url))
-        with urllib.request.urlopen(req, timeout=30) as r, open(dest, "wb") as f:
-            total = int(r.headers.get("Content-Length") or 0)
-            done = 0
-            last_bytes, last_time = 0, time.time()
-            while True:
-                wait_if_paused()
-                buf = r.read(256 * 1024)
-                if not buf:
-                    break
-                f.write(buf)
-                done += len(buf)
-                pct = (done / total) if total else 0
-                now = time.time()
-                speed = ""
-                if now - last_time >= 0.4:
-                    speed = human_size((done - last_bytes) / (now - last_time)) + "/s"
-                    last_bytes, last_time = done, now
-                _set_task(tid, progress=base_from + pct * (base_to - base_from),
-                          total=total, downloaded=done, speed=speed)
+        """直链（mp4/m4a）流式落盘：被源站掐断后按字节断点续传，不再整段重来。"""
+        headers = _play_headers(url)
+        total = [0]
+        last = [0.0, 0.0, ""]   # time, bytes, speed text
+
+        def on_progress(done, tot):
+            if tot and not total[0]:
+                total[0] = tot
+            now = time.time()
+            speed = ""
+            if now - last[0] >= 0.5:
+                spd = (done - last[1]) / max(now - last[0], 0.001)
+                speed = human_size(spd) + "/s" if spd > 0 else ""
+                last[0], last[1], last[2] = now, done, speed
+            else:
+                speed = last[2]
+            tot2 = total[0] or tot or 0
+            pct = (done / tot2) if tot2 else 0
+            _set_task(tid, progress=base_from + pct * (base_to - base_from),
+                      total=tot2, downloaded=done, speed=speed)
+
+        _http_stream(target, dest, tid, headers, on_progress)
         return dest
 
     def do_download():
@@ -918,9 +1644,10 @@ def _start_worker(tid, url, format_id, title, needs_merge, worker_token):
                 # 通用兜底拿到的直链：mp4 直接流式下载，m3u8 分片交给 yt-dlp
                 low = target_url.lower()
                 if ".m3u8" in low:
-                    outtmpl = os.path.join(tmpdir, "%(title)s.%(ext)s")
-                    ydl_download(target_url, "best", outtmpl, 0, 92)
-                    fpath = pick_media([os.path.join(tmpdir, f) for f in os.listdir(tmpdir)])
+                    # HLS 自己下：yt-dlp 的 HLS 下载器不会在分片签名过期 /
+                    # 回源被重置时刷新播放列表，正是这次卡在 2~3 MB 的原因。
+                    fpath = _hls_download(target_url, tmpdir, title, tid,
+                                          referer=url, end_pct=92)
                 else:
                     ext = _ext_of(target_url) or ".mp4"
                     fpath = os.path.join(tmpdir, _safe_name(title, ext))
@@ -929,14 +1656,24 @@ def _start_worker(tid, url, format_id, title, needs_merge, worker_token):
                     _set_task(tid, status="error", error="未找到媒体文件")
                     return
             else:
-                outtmpl = os.path.join(tmpdir, "%(title)s.%(ext)s")
-                fmt_arg = f"{format_id}/best" if format_id else "best"
-                ydl_download(target_url, fmt_arg, outtmpl,
-                             0, 60 if merge else 92)
-                files = [os.path.join(tmpdir, f) for f in os.listdir(tmpdir)]
-                fpath = pick_media(files)
+                # 先确认这条流是不是 HLS：是的话必须自己下。
+                # 交给 yt-dlp 的 HLS 下载器只会取一次播放列表，签名一过期
+                # 就一直卡在 2~3 MB（这次这个站就是这么卡住的）。
+                fmt_meta = _resolve_format(target_url, format_id)
+                is_hls = bool(fmt_meta and _looks_hls(fmt_meta) and fmt_meta.get("url"))
+                if is_hls:
+                    _set_task(tid, speed="HLS 分片下载中…")
+                    fpath = _hls_download(fmt_meta["url"], tmpdir, title, tid,
+                                          referer=url, end_pct=92)
+                else:
+                    outtmpl = os.path.join(tmpdir, "%(title)s.%(ext)s")
+                    fmt_arg = f"{format_id}/best" if format_id else "best"
+                    ydl_download(target_url, fmt_arg, outtmpl,
+                                 0, 60 if merge else 92)
+                    files = [os.path.join(tmpdir, f) for f in os.listdir(tmpdir)]
+                    fpath = pick_media(files)
 
-                if merge:
+                if merge and not is_hls:
                     wait_if_paused()
                     # 单独补一条音轨，再用系统 muxer 合成带声音的 mp4
                     audio_dir = os.path.join(tmpdir, "audio")
