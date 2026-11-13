@@ -75,24 +75,14 @@
                 android:layout_marginTop="8dp" />
         </LinearLayout>
 
-        <!-- 横向滚动容器：当前图与相邻图并排放进同一个容器，翻页时由容器统一滚动。
-             以前是分别给两张 ImageView 设位移，两层各自重绘，高刷屏上会逐帧错位（抖动）。 -->
-        <FrameLayout
-            android:id="@+id/player_image_strip"
+        <ImageView
+            android:id="@+id/player_image"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:clipChildren="true"
-            android:clipToPadding="false">
-
-            <ImageView
-                android:id="@+id/player_image"
-                android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:scaleType="matrix"
-                android:background="#000000"
-                android:visibility="gone"
-                android:contentDescription="图片查看" />
-        </FrameLayout>
+            android:scaleType="matrix"
+            android:background="#000000"
+            android:visibility="gone"
+            android:contentDescription="图片查看" />
     </FrameLayout>
 
     <!-- 视频预览态：画面照常播放，下方给一行「时长 · 分辨率」和一个全屏播放按钮。
