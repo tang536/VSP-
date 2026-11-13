@@ -3153,6 +3153,16 @@ public class MainActivity extends Activity {
                 // 上一次落定的 190ms 动画还没跑完就又按下：立刻结账。
                 // 否则两次 commitSwipe 会前后脚改 watchIndex，索引错位后位图跟着错，直接崩。
                 if (swipePending != 0) settleSwipeNow();
+                // 上一轮的回弹动画必须停掉并把位移归零：它还在跑的时候新一次拖动会
+                // 和它抢同一个 translationX，两帧两个值，就是那个「一直闪」。
+                playerImage.animate().cancel();
+                if (watchSwipeImage != null) watchSwipeImage.animate().cancel();
+                playerImage.setTranslationX(0f);
+                if (watchSwipeImage != null) {
+                    watchSwipeImage.setTranslationX(swipeDirection > 0
+                            ? Math.max(1f, playerImage.getWidth())
+                            : -Math.max(1f, playerImage.getWidth()));
+                }
                 swipeDx = 0f;
                 swipeLocked = false;
                 swipeRejected = false;
@@ -3367,6 +3377,11 @@ public class MainActivity extends Activity {
     /** 拖动中：主图跟着手指，相邻图贴着它一起走 */
     private void applySwipeOffset(float dx) {
         float w = Math.max(1f, playerImage.getWidth());
+        // 只有一个写入者：先把还在跑的落定/回弹动画取消掉再设值。
+        // 否则动画每帧写一次 translationX、这里每帧又写一次自己的值，
+        // 两条路径打架，画面就会在两个位置之间来回跳（用户看到的「闪烁」）。
+        playerImage.animate().cancel();
+        if (watchSwipeImage != null) watchSwipeImage.animate().cancel();
         // 这里不再看 watchSwipeImage 是否 VISIBLE：解码还没回来时那一层是 INVISIBLE 的，
         // 但主图必须照样跟手，否则前几十毫秒手指是拖不动的。
         if (!canStep(swipeDirection)) {
@@ -3390,6 +3405,17 @@ public class MainActivity extends Activity {
         if (watchSwipeImage != null) watchSwipeImage.animate().cancel();
         if (!commit) {
             swipePending = 0;
+            float back = Math.abs(playerImage.getTranslationX());
+            if (back < swipeSlopPx()) {
+                // 几乎没拖动（手指只是抖了几像素）：直接归位，别为此跑一段动画，
+                // 那段动画正是下一次按下时和拖动抢 translationX 的元凶。
+                playerImage.setTranslationX(0f);
+                if (watchSwipeImage != null) {
+                    watchSwipeImage.setTranslationX(swipeDirection > 0 ? w : -w);
+                }
+                hideSwipeView();
+                return;
+            }
             playerImage.animate().translationX(0f).setDuration(160).start();
             if (hasEdge) {
                 watchSwipeImage.animate().translationX(swipeDirection > 0 ? w : -w)
