@@ -1306,7 +1306,12 @@ def _resolve_format(page_url, format_id):
 
 
 def _hls_cache_dir(url):
-    """分片缓存放应用私有目录：重试 / 换网络后接着下，不用从第 1 片重来。"""
+    """分片缓存放应用私有目录：重试 / 换网络后接着下，不用从第 1 片重来。
+
+    缓存的 key 只取 URL 的 host+path，不含查询串：这类站的 auth_key 每次解析都会变，
+    如果按整条 URL 做 key，用户点一次「重试」就会换一个新目录，之前下好的分片全白费，
+    表现就是「一直从 0 开始、永远下不完」。
+    """
     base = _private_dir
     if not base:
         try:
@@ -1314,7 +1319,12 @@ def _hls_cache_dir(url):
         except Exception:
             return None
     try:
-        tag = hashlib.md5((url or "").encode("utf-8")).hexdigest()[:12]
+        try:
+            parts = urllib.parse.urlsplit(url or "")
+            key_src = (parts.scheme + "://" + parts.netloc + parts.path)
+        except Exception:
+            key_src = (url or "").split("?")[0]
+        tag = hashlib.md5(key_src.encode("utf-8")).hexdigest()[:12]
         d = os.path.join(base, "hls_cache", tag)
         os.makedirs(d, exist_ok=True)
         return d
@@ -1322,12 +1332,14 @@ def _hls_cache_dir(url):
         return None
 
 
-def _hls_download(target_url, tmpdir, title, tid, referer="", end_pct=92):
+def _hls_download(target_url, tmpdir, title, tid, referer="", end_pct=92, dest_dir=None):
     """下 HLS：多线程并发拉分片 + 单分片断点续传 + 失败换签名重试。
 
     这类站点的 CDN 对「一条连接连续拉」限制很狠，单线程必然卡在几 MB；
     并发多条连接分头拉，单条被掐断就按字节续传，才可能真正下完。
     已下完的分片留在私有缓存里，任务失败点「重试」时直接跳过，不用重下。
+    dest_dir 给定时直接拼到目标目录，避免「先落临时目录再复制一份」占双份空间
+    —— 几百 MB 的片子，手机上很容易因此写满存储报失败。
     """
     text, final_url = _hls_playlist(target_url, tid, referer)
     segments, init_seg, variant = _hls_parse(text, final_url)
@@ -1339,7 +1351,15 @@ def _hls_download(target_url, tmpdir, title, tid, referer="", end_pct=92):
 
     total = len(segments)
     ext = ".mp4" if init_seg else ".ts"
-    fpath = os.path.join(tmpdir, _safe_name(title, ext))
+    name = _safe_name(title, ext)
+    if dest_dir:
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+        except Exception:
+            pass
+        fpath = os.path.join(dest_dir, name)
+    else:
+        fpath = os.path.join(tmpdir, name)
     part = fpath + ".part"
     cache_dir = _hls_cache_dir(target_url)
     segdir = os.path.join(cache_dir, "seg%d" % total) if cache_dir else os.path.join(tmpdir, "_segs")
@@ -1478,15 +1498,28 @@ def _hls_download(target_url, tmpdir, title, tid, referer="", end_pct=92):
                         state["serial_fails"] += 1
                         fails = state["serial_fails"]
                         committed_now = state["committed"]
-                        if committed_now == 0 or fails >= 3:
+                        # 已经下到东西了就绝不放弃：限速站点只会越来越慢，
+                        # 但分片是能一个个到手的，退得足够久就能继续。
+                        if committed_now == 0 and fails >= 8:
                             errors.append(
-                                "源站限制下载：连续 %d 个分片被拒。该站对下载做了限制，"
-                                "可以换网络或等几分钟再试，或直接用预览播放。" % fails)
+                                "源站限制下载：连续 %d 个分片被拒（一个字节都没拿到）。"
+                                "该站对下载做了限制，可以先换网络，或直接用预览播放。" % fails)
                             stop.set()
                             return
-                    # 被源站拒了一次：单路慢速继续，给源站留出缓冲时间。
-                    # 这段等待要算作「仍在活动」，否则会被看门狗判成假死。
-                    for _ in range(4):
+                    # 换一批分片签名再重试：auth_key 有效期只有几分钟，
+                    # 用旧链一直重试等于一直撞在过期签名上。
+                    try:
+                        with refresh_lock:
+                            new_segs = refresh_segments()
+                        if new_segs:
+                            with lock:
+                                segments[:] = new_segs
+                    except Exception:
+                        pass
+                    # 退避拉长到最多 60 秒，期间保持「仍在活动」，
+                    # 否则会被看门狗判成假死直接掐掉。
+                    wait_s = min(10 * max(1, fails), 60)
+                    for _ in range(max(1, wait_s // 2)):
                         time.sleep(2)
                         _touch(tid)
                     with lock:
@@ -1647,7 +1680,8 @@ def _start_worker(tid, url, format_id, title, needs_merge, worker_token):
                     # HLS 自己下：yt-dlp 的 HLS 下载器不会在分片签名过期 /
                     # 回源被重置时刷新播放列表，正是这次卡在 2~3 MB 的原因。
                     fpath = _hls_download(target_url, tmpdir, title, tid,
-                                          referer=url, end_pct=92)
+                                          referer=url, end_pct=92,
+                                          dest_dir=get_download_dir())
                 else:
                     ext = _ext_of(target_url) or ".mp4"
                     fpath = os.path.join(tmpdir, _safe_name(title, ext))
@@ -1664,7 +1698,8 @@ def _start_worker(tid, url, format_id, title, needs_merge, worker_token):
                 if is_hls:
                     _set_task(tid, speed="HLS 分片下载中…")
                     fpath = _hls_download(fmt_meta["url"], tmpdir, title, tid,
-                                          referer=url, end_pct=92)
+                                          referer=url, end_pct=92,
+                                          dest_dir=get_download_dir())
                 else:
                     outtmpl = os.path.join(tmpdir, "%(title)s.%(ext)s")
                     fmt_arg = f"{format_id}/best" if format_id else "best"
@@ -1707,7 +1742,9 @@ def _start_worker(tid, url, format_id, title, needs_merge, worker_token):
             target_dir = get_download_dir()
             dest = os.path.join(target_dir, os.path.basename(fpath))
             try:
-                shutil.copy2(fpath, dest)
+                # HLS 已经直接拼在下载目录里了，再复制一次等于白占一份空间
+                if os.path.abspath(fpath) != os.path.abspath(dest):
+                    shutil.copy2(fpath, dest)
             except Exception as e:
                 _set_task(tid, status="error", error=f"保存失败: {e}")
                 return

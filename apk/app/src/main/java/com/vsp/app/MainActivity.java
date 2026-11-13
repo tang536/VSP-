@@ -317,6 +317,8 @@ public class MainActivity extends Activity {
      * 没有这个闩，手指停在原地抖几像素就会被当成横滑，界面自己往左右挪。
      */
     private boolean swipeRejected;
+    /** 松手时相邻图还没解出来：记下要前进的方向，等位图回来自动补这一格 */
+    private int pendingAdvance = 0;
     /** 横滑判定阈值（像素）。系统 touchSlop 只有 8dp，太小，手指轻抖就判成横滑 */
     private float swipeSlop = 0f;
     /** 视频 / 音频相册翻页用：整层跟手拖动 */
@@ -3154,6 +3156,7 @@ public class MainActivity extends Activity {
                 swipeDx = 0f;
                 swipeLocked = false;
                 swipeRejected = false;
+                pendingAdvance = 0;
                 swipeDirection = 0;
                 swipeDownX = ev.getX();
                 swipeDownY = ev.getY();
@@ -3343,10 +3346,17 @@ public class MainActivity extends Activity {
                 watchSwipeBitmap = got;
                 if (got != null && !got.isRecycled()) {
                     watchSwipeImage.setImageBitmap(got);
-                    // 手指还按着才显形：松手了就别再让一张图突然冒出来
                     if (swipeLocked && swipeDirection != 0) {
+                        // 手指还按着：贴到当前跟手位置
                         watchSwipeImage.setVisibility(View.VISIBLE);
                         applySwipeOffset(swipeDx);
+                    } else if (pendingAdvance != 0) {
+                        // 松手时这张图还没解出来，先回弹了：图一到就立刻补上这一格，
+                        // 直接换、不做动画，免得「滑到黑屏上再冒出一张图」
+                        int dir = pendingAdvance;
+                        pendingAdvance = 0;
+                        swipeDirection = dir;
+                        commitSwipe();
                     }
                 }
                 if (old != null && old != got) recycleQuiet(old);
@@ -3392,6 +3402,15 @@ public class MainActivity extends Activity {
             return;
         }
         swipePending = swipeDirection;
+        if (!hasEdge) {
+            // 相邻图还没解出来：这时候把主图滑出去，屏幕上就是一块黑，
+            // 再等图回来 —— 这正是「滑动时闪一下」的第二处来源。
+            // 先回弹，图一到位立刻补上这一格（loadSwipeImage 里处理）。
+            pendingAdvance = swipeDirection;
+            swipePending = 0;
+            playerImage.animate().translationX(0f).setDuration(120).start();
+            return;
+        }
         playerImage.animate().translationX(-swipeDirection * w).setDuration(190)
                 .withEndAction(this::commitSwipe)
                 .start();
@@ -3437,14 +3456,19 @@ public class MainActivity extends Activity {
             watchImageRecyclable = true;
             watchImageSource = watchSiblings.get(target).source == null
                     ? "" : watchSiblings.get(target).source;
+            playerImage.setTranslationX(0f);
             playerImage.setImageBitmap(edge);
             applyImageFit();
             if (old != null && old != edge) {
                 if (oldRecyclable) recycleQuiet(old);
             }
+        } else {
+            playerImage.setTranslationX(0f);
         }
-        playerImage.setTranslationX(0f);
-        hideSwipeView();
+        // 关键：整层等下一帧画完再撤。原来同一次 UI 里先换图再撤层，
+        // 有些机型会在「新图还没绘出来、旧层已消失」之间插一帧空画面，
+        // 就是用户看到的闪一下。post 出去之后这一帧始终有内容。
+        playerImage.post(this::hideSwipeView);
         swipeDirection = 0;
         switchWatchImage(target);
     }
@@ -3477,6 +3501,7 @@ public class MainActivity extends Activity {
         swipeLocked = false;
         swipeDirection = 0;
         swipePending = 0;
+        pendingAdvance = 0;
     }
 
     /** 回收位图，任何异常都吞掉：宁可漏回收一点内存，也不能因为一次 recycle 把界面搞崩 */
