@@ -244,6 +244,8 @@ public class MainActivity extends Activity {
     private String previewPageUrl = "", previewFormatId = "";
     private boolean exoTriedDropAudio = false, exoTriedRefresh = false;
     private View playerAudio, playerHeader, playerStage, playerOverlay;
+    /** 图片翻页用的横向容器：主图与相邻图都在里面，翻页只滚这个容器 */
+    private ViewGroup playerStrip;
     private int playerType = TYPE_IMAGE;
     private ImageView playerImage, playerAudioCover, playerAudioToggle;
     private TextView playerAudioTitle, playerAudioTime, playerTime, playerDuration, btnSpeed,
@@ -814,6 +816,7 @@ public class MainActivity extends Activity {
         playerAudioToggle = playerPanel.findViewById(R.id.player_audio_toggle);
         playerHeader = playerPanel.findViewById(R.id.player_header);
         playerStage = playerPanel.findViewById(R.id.player_stage);
+        playerStrip = playerPanel.findViewById(R.id.player_image_strip);
         playerOverlay = playerPanel.findViewById(R.id.player_overlay);
         playerBottom = playerPanel.findViewById(R.id.player_bottom);
         playerCtrlRow = playerPanel.findViewById(R.id.player_ctrl_row);
@@ -851,6 +854,12 @@ public class MainActivity extends Activity {
         // 点击画面唤出 / 收起浮层控制条
         View.OnClickListener toggle = v -> toggleWatchChrome();
         playerStage.setOnClickListener(toggle);
+        // 舞台尺寸变化（切横屏、控制条出现）时同步容器宽度，否则滚动范围还是旧的一屏宽
+        playerStage.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            if (r - l == or - ol && b - t == ob - ot) return;
+            ensureStripSized();
+            if (!swipeLocked && swipePending == 0) resetStripScroll();
+        });
         setupStageSwipe(toggle);
         playerVideo.setOnClickListener(toggle);
         if (playerExo != null) {
@@ -2322,6 +2331,13 @@ public class MainActivity extends Activity {
         }
         playerAudio.setVisibility(type == TYPE_AUDIO ? View.VISIBLE : View.GONE);
         playerImage.setVisibility(type == TYPE_IMAGE ? View.VISIBLE : View.GONE);
+        if (type == TYPE_IMAGE) {
+            // 首次进入图片模式时舞台还没量过尺寸：等一帧把容器撑到 3 屏宽并归位
+            playerImage.post(() -> {
+                ensureStripSized();
+                if (!swipeLocked && swipePending == 0) resetStripScroll();
+            });
+        }
         playerAudioSeek.setProgress(0);
         playerTime.setText("00:00");
         playerDuration.setText("00:00");
@@ -3389,8 +3405,10 @@ public class MainActivity extends Activity {
     /** 相邻图的那一层：加在主图下面，拖动时两张图并排出现 */
     private ImageView ensureSwipeView() {
         if (watchSwipeImage != null) return watchSwipeImage;
-        if (playerImage == null || !(playerImage.getParent() instanceof ViewGroup)) return null;
-        ViewGroup parent = (ViewGroup) playerImage.getParent();
+        ViewGroup parent = playerStrip != null ? playerStrip
+                : (playerImage != null && playerImage.getParent() instanceof ViewGroup
+                        ? (ViewGroup) playerImage.getParent() : null);
+        if (parent == null || playerImage == null) return null;
         ImageView iv = new ImageView(this);
         iv.setLayoutParams(new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -3409,19 +3427,18 @@ public class MainActivity extends Activity {
     private void beginSwipe(int dir) {
         ImageView edge = ensureSwipeView();
         if (edge == null) return;
-        // 高刷屏上每帧重绘一张几千万像素的图，栅格化跟不上就会出现「隔帧闪」；
-        // 拖动期间给主图挂一层硬件层，内容直接复用上一帧纹理，跟手才稳。
-        try {
-            playerImage.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        } catch (Throwable ignored) {
-        }
         int target = watchIndex + dir;
+        ensureStripSized();
         float w = Math.max(1f, playerImage.getWidth());
         // 先无条件断开上一张的引用。上一张的位图可能已经在落定后被主图接管并 recycle 了，
         // 这时候只要 View 还拿着它、还被显示出来，绘制线程就会抛
         // "Cannot draw a recycled bitmap" —— 这是本次闪退的直接原因。
         edge.setImageDrawable(null);
-        edge.setTranslationX(dir > 0 ? w : -w);
+        // 相邻图放进容器的相邻一格：下一张在右格，上一张在左格
+        edge.setX(dir > 0 ? 2f * w : 0f);
+        swipeDirection = dir;
+        swipeOffset = 0f;
+        applySwipeVisual();
         if (target < 0 || target >= watchSiblings.size()) {
             // 到头了：这一侧没有图，只让主图跟着走一点做反馈
             edge.setVisibility(View.VISIBLE);
@@ -3511,15 +3528,58 @@ public class MainActivity extends Activity {
         applySwipeVisual();
     }
 
-    /** 唯一写「主图 + 相邻层」位置的地方 */
+    /** 唯一写「主图 + 相邻层」位置的地方：只滚这一个容器 */
     private void applySwipeVisual() {
-        // 主图必须整层平移（不能用矩阵平移内容）：这一层底色是不透明黑，
-        // 只挪内容的话黑底会一直盖住下面那层相邻图，拖动时就看不到「即将滑到的图」。
-        if (playerImage != null) playerImage.setTranslationX(swipeOffset);
-        if (watchSwipeImage == null) return;
-        float w = Math.max(1f, playerImage.getWidth());
-        float start = swipeDirection > 0 ? w : -w;
-        watchSwipeImage.setTranslationX(start + swipeOffset);
+        if (playerStrip == null || playerImage == null) return;
+        int w = Math.max(1, playerImage.getWidth());
+        int sx = w - Math.round(swipeOffset);
+        // 越界保护：偏移量再怎么算也不能把滚动位置推出 [0, 2w]
+        sx = Math.max(0, Math.min(w * 2, sx));
+        if (playerStrip.getScrollX() != sx) playerStrip.scrollTo(sx, 0);
+    }
+
+    /** 静止状态：让主图那一格正好铺满屏幕 */
+    private void resetStripScroll() {
+        if (playerStrip == null || playerStage == null) return;
+        int w = playerStage.getWidth();
+        if (w <= 0) return;
+        if (playerStrip.getScrollX() != w) playerStrip.scrollTo(w, 0);
+    }
+
+    /**
+     * 把滚动容器撑成 3 屏宽、主图放中间一格。
+     * 主图与相邻图都在同一个容器里，翻页只是滚容器：一次绘制、一次裁剪，
+     * 不会出现两层各自重绘时的逐帧错位。
+     */
+    private void ensureStripSized() {
+        if (playerStrip == null || playerStage == null || playerImage == null) return;
+        int w = playerStage.getWidth();
+        if (w <= 0) return;
+        ViewGroup.LayoutParams raw = playerStrip.getLayoutParams();
+        if (!(raw instanceof FrameLayout.LayoutParams)) return;
+        FrameLayout.LayoutParams sp = (FrameLayout.LayoutParams) raw;
+        if (sp.width != w * 3) {
+            sp.width = w * 3;
+            sp.height = ViewGroup.LayoutParams.MATCH_PARENT;
+            playerStrip.setLayoutParams(sp);
+        }
+        setStripChildWidth(playerImage, w);
+        if (watchSwipeImage != null) setStripChildWidth(watchSwipeImage, w);
+    }
+
+    private void setStripChildWidth(View v, int w) {
+        if (v == null) return;
+        ViewGroup.LayoutParams raw = v.getLayoutParams();
+        if (!(raw instanceof FrameLayout.LayoutParams)) {
+            v.setLayoutParams(new FrameLayout.LayoutParams(w, ViewGroup.LayoutParams.MATCH_PARENT));
+            return;
+        }
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) raw;
+        if (lp.width != w || lp.height != ViewGroup.LayoutParams.MATCH_PARENT) {
+            lp.width = w;
+            lp.height = ViewGroup.LayoutParams.MATCH_PARENT;
+            v.setLayoutParams(lp);
+        }
     }
 
     private void cancelSwipeAnim() {
@@ -3627,7 +3687,7 @@ public class MainActivity extends Activity {
             watchImageSource = watchSiblings.get(target).source == null
                     ? "" : watchSiblings.get(target).source;
             swipeOffset = 0f;
-            playerImage.setTranslationX(0f);
+            resetStripScroll();
             playerImage.setImageBitmap(edge);
             applyImageFit();
             if (old != null && old != edge) {
@@ -3647,12 +3707,6 @@ public class MainActivity extends Activity {
 
     private void hideSwipeView() {
         watchSwipeToken++;   // 在途解码的结果直接作废
-        if (playerImage != null) {
-            try {
-                playerImage.setLayerType(View.LAYER_TYPE_NONE, null);
-            } catch (Throwable ignored) {
-            }
-        }
         if (watchSwipeImage == null) return;
         watchSwipeImage.animate().cancel();
         // 关键：必须把 ImageView 上的位图引用断掉。相邻图落定后会被主图接管，
@@ -3660,7 +3714,7 @@ public class MainActivity extends Activity {
         // 下次一显示就是 "Cannot draw a recycled bitmap"，直接闪退。
         watchSwipeImage.setImageDrawable(null);
         watchSwipeImage.setVisibility(View.GONE);
-        watchSwipeImage.setTranslationX(0f);
+        watchSwipeImage.setX(0f);
     }
 
     /** 丢掉相邻图与位图（退出观看、切到视频时调用） */
@@ -3829,7 +3883,7 @@ public class MainActivity extends Activity {
         imageTy = 0f;
         // 回到适配状态 = 也不该再有任何横滑位移
         swipeOffset = 0f;
-        if (swipeAnim == null) playerImage.setTranslationX(0f);
+        if (swipeAnim == null) resetStripScroll();
         clampImageTranslation();
         applyImageMatrix();
     }
