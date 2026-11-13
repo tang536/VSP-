@@ -298,8 +298,11 @@ public class MainActivity extends Activity {
     private Bitmap watchSwipeBitmap;
     private int watchSwipeIndex = -1;
     private int watchSwipeToken = 0;
-    /** 前后邻图预解码缓存：打开/落定后提前解好，拖动时直接贴图，避免等解码造成卡顿与黑闪 */
+    /** 相邻图预解码缓存：打开/落定后提前解好，拖动时直接贴图，避免等解码造成卡顿与黑闪 */
     private final android.util.SparseArray<Bitmap> swipeCache = new android.util.SparseArray<>();
+    /** 视频/音频划到图片时，先把已经预解码好的那张塞进去，避免中间空一帧 */
+    private Bitmap seedImageBitmap;
+    private String seedImageSource;
     /**
      * 相邻图解码线程池。以前每次滑动都 new Thread：连划十下就是十个线程同时解 1600px 大图，
      * 峰值内存直接顶穿堆，这就是「划一会儿就闪退」的另一半原因。单线程串行最稳。
@@ -2140,6 +2143,8 @@ public class MainActivity extends Activity {
                 // 拿新位图套旧 scale 画出来，看着就是「闪一下、图跳一下」
                 applyImageFit();
                 if (old != null && old != got && oldRecyclable) recycleQuiet(old);
+                // 图片已经画出来了，这时候才真正收掉视频/音频那一层
+                if (playerType == TYPE_IMAGE) completeVideoToImageSwitch();
             });
         }, "vsp-view-image").start();
     }
@@ -2191,6 +2196,32 @@ public class MainActivity extends Activity {
 
     private void openPlayer(String source, int type, String title, boolean local) {
         openPlayer(source, type, title, local, null, -1, null);
+    }
+
+    /** 视频 / 音频切到图片的过渡期：只暂停，不销毁，画面留在屏幕上 */
+    private void pauseForImageTransition() {
+        try {
+            if (playerVideo != null && playerVideo.getVisibility() == View.VISIBLE) playerVideo.pause();
+        } catch (Throwable ignored) {
+        }
+        try {
+            if (playerExo != null && playerExo.getPlayer() != null) playerExo.getPlayer().pause();
+        } catch (Throwable ignored) {
+        }
+        try {
+            if (audioPlayer != null && audioPlayer.isPlaying()) audioPlayer.pause();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 图片已经画出来了：这时候才收掉播放层，整个切换过程屏幕上一直有内容 */
+    private void completeVideoToImageSwitch() {
+        if (playerImage != null) playerImage.setBackgroundColor(Color.BLACK);
+        if (playerType != TYPE_IMAGE) return;   // 中途又切走了，不要乱收
+        if (playerVideo != null) playerVideo.setVisibility(View.GONE);
+        if (playerExo != null) playerExo.setVisibility(View.GONE);
+        if (playerAudio != null) playerAudio.setVisibility(View.GONE);
+        stopPlayer();
     }
 
     private void openPlayer(String source, int type, String title, boolean local,
@@ -2273,13 +2304,18 @@ public class MainActivity extends Activity {
         // 解析输入框还带着焦点时直接进观看层，软键盘会把窗口顶起来：
         // 观看层被压扁、底部进度条跑到屏幕外，只能退出 app 重进才恢复。先进来先收键盘。
         dismissKeyboard();
-        stopPlayer();
+        final int prevType = playerType;
+        // 视频 / 音频切到图片：图片解码要几十到几百毫秒，这期间不能先把画面收了，
+        // 否则中间就是一块纯黑（用户看到的就是「划到图片时看不到图片」）。
+        // 所以这里先暂停、把旧画面留着，等图片真的画出来再收。
+        final boolean deferVideoStop = type == TYPE_IMAGE && prevType != TYPE_IMAGE;
+        if (deferVideoStop) pauseForImageTransition();
+        else stopPlayer();
         attachToWatchHost();
         playerPanel.setBackgroundColor(Color.BLACK);
         playerPanel.setVisibility(View.VISIBLE);
         boolean media = type != TYPE_IMAGE;
         boolean keepFull = playerFull;
-        final int prevType = playerType;
         playerType = type;
         fullscreen = true;
         watchingAvatar = false;
@@ -2316,12 +2352,17 @@ public class MainActivity extends Activity {
         // 从图片切到视频 / 音频：先放掉主图占的内存
         if (type != TYPE_IMAGE && prevType == TYPE_IMAGE) snapshotStageCover();
         if (type != TYPE_IMAGE) releaseWatchImage();
-        playerVideo.setVisibility(type == TYPE_VIDEO && !isNetworkVideo ? View.VISIBLE : View.GONE);
+        playerVideo.setVisibility(type == TYPE_VIDEO && !isNetworkVideo ? View.VISIBLE
+                : (deferVideoStop ? playerVideo.getVisibility() : View.GONE));
         if (playerExo != null) {
-            playerExo.setVisibility(isNetworkVideo ? View.VISIBLE : View.GONE);
+            playerExo.setVisibility(isNetworkVideo ? View.VISIBLE
+                    : (deferVideoStop ? playerExo.getVisibility() : View.GONE));
         }
-        playerAudio.setVisibility(type == TYPE_AUDIO ? View.VISIBLE : View.GONE);
+        playerAudio.setVisibility(type == TYPE_AUDIO ? View.VISIBLE
+                : (deferVideoStop ? playerAudio.getVisibility() : View.GONE));
         playerImage.setVisibility(type == TYPE_IMAGE ? View.VISIBLE : View.GONE);
+        // 等图片画出来的这段时间，主图这层先别铺黑，否则会把下面的旧画面盖成黑屏
+        if (deferVideoStop) playerImage.setBackgroundColor(Color.TRANSPARENT);
         playerAudioSeek.setProgress(0);
         playerTime.setText("00:00");
         playerDuration.setText("00:00");
@@ -2343,6 +2384,22 @@ public class MainActivity extends Activity {
         }
         applyImmersive(true);
         resetImageZoom();
+        // 从视频/音频划到图片：如果这张图已经预解码过，直接贴上去，
+        // 这样切换动画里滑进来的就是真图，不是黑块。
+        if (type == TYPE_IMAGE) {
+            Bitmap seed = seedImageBitmap;
+            String seedSrc = seedImageSource;
+            seedImageBitmap = null;
+            seedImageSource = null;
+            if (seed != null && !seed.isRecycled() && source != null && source.equals(seedSrc)) {
+                watchImageBitmap = seed;
+                watchImageRecyclable = true;
+                watchImageSource = source;
+                playerImage.setImageBitmap(seed);
+                applyImageFit();
+                completeVideoToImageSwitch();
+            }
+        }
 
         if (type == TYPE_VIDEO) {
             if (isNetworkVideo) {
@@ -2398,7 +2455,11 @@ public class MainActivity extends Activity {
         } else {
             updateVideoInlineMeta(null, source, local);
             // 视频 / 音频从本地列表进入时也保留同一套底栏
-            if (gallery) renderWatchThumbs();
+            if (gallery) {
+                renderWatchThumbs();
+                // 看视频时也预取前后两格：划回图片、划到下一个视频都能立刻看到画面
+                preloadSwipeNeighbors();
+            }
         }
         // 本地相册模式（图片 / 视频 / 音频）统一走顶部 + 缩略图 + 操作栏；
         // 网络视频、单个音频等仍用原来的播放器控制条。
@@ -3223,6 +3284,16 @@ public class MainActivity extends Activity {
             return;
         }
         playerStage.animate().cancel();
+        // 下一格是图片，且已经预解码过：先把它交给 openPlayer，落定时能立刻上屏
+        MediaItem lookahead = watchSiblings.get(target);
+        int lookType = lookahead.type >= 0 ? lookahead.type : guessType(lookahead.name);
+        if (lookType == TYPE_IMAGE) {
+            Bitmap cached = swipeCache.get(target);
+            if (cached != null && !cached.isRecycled()) {
+                seedImageBitmap = cached;
+                seedImageSource = lookahead.source;
+            }
+        }
         playerStage.animate().translationX(-dir * w).setDuration(150)
                 .withEndAction(() -> {
                     MediaItem m = watchSiblings.get(target);
@@ -3364,15 +3435,19 @@ public class MainActivity extends Activity {
         MediaItem m = watchSiblings.get(pos);
         if (m == null) return;
         int type = m.type >= 0 ? m.type : guessType(m.name);
-        if (type != TYPE_IMAGE) return;   // 视频/音频不预解码成图片，切换时交给完整播放器
+        if (type != TYPE_IMAGE && type != TYPE_VIDEO) return;   // 音频没有可取的预览画面
         final String src = m.source;
         if (src == null || src.isEmpty()) return;
         final boolean isContent = src.startsWith("content://");
+        final int srcType = type;
         swipePool.execute(() -> {
-            Bitmap b = isContent ? decodeContentImage(src, 1600) : decodeSampled(new File(src), 1600);
+            Bitmap b = srcType == TYPE_IMAGE
+                    ? (isContent ? decodeContentImage(src, 1600) : decodeSampled(new File(src), 1600))
+                    : videoCoverFrame(src, isContent);
             if (b == null) return;
             ui.post(() -> {
-                if (playerType != TYPE_IMAGE || watchSiblings == null || watchIndex < 0
+                // 看视频时也要留着相邻页的预览：从视频划回图片、或划到下一个视频都靠它
+                if (watchSiblings == null || watchIndex < 0
                         || Math.abs(pos - watchIndex) > 1) {
                     recycleQuiet(b);
                     return;
@@ -3415,6 +3490,10 @@ public class MainActivity extends Activity {
             playerImage.setLayerType(View.LAYER_TYPE_HARDWARE, null);
         } catch (Throwable ignored) {
         }
+        // 主图这层底色是不透明黑。位移走的是矩阵（挪内容，不挪这一层），
+        // 黑底留在原地就会把下面那层相邻图整块盖住，于是拖动时看不到「即将滑到的图」。
+        // 拖动期间放开底色，让相邻图从被挪空的那一侧透出来；松手复位再补回黑色。
+        playerImage.setBackgroundColor(Color.TRANSPARENT);
         int target = watchIndex + dir;
         float w = Math.max(1f, playerImage.getWidth());
         // 先无条件断开上一张的引用。上一张的位图可能已经在落定后被主图接管并 recycle 了，
@@ -3459,8 +3538,27 @@ public class MainActivity extends Activity {
         MediaItem m = watchSiblings.get(pos);
         int type = m.type >= 0 ? m.type : guessType(m.name);
         if (type != TYPE_IMAGE) {
-            // 视频/音频不按图片解码，落定后由 openPlayer 切换播放器
+            final String vsrc = m.source;
+            // 相邻是视频：取它的第一帧当「下一页」的预览图。
+            // 以前这里直接 return，相邻层永远空着，于是从图片划向视频怎么划都翻不过去。
+            if (type == TYPE_VIDEO && vsrc != null && !vsrc.isEmpty()) {
+                final boolean vContent = vsrc.startsWith("content://");
+                swipePool.execute(() -> {
+                    Bitmap b = videoCoverFrame(vsrc, vContent);
+                    ui.post(() -> landSwipeBitmap(token, b));
+                });
+                return;
+            }
+            // 音频没有画面：不出预览，但松手时若已判定要翻页，就直接切过去
             watchSwipeIndex = -1;
+            if (pendingAdvance != 0) {
+                final int dir = pendingAdvance;
+                pendingAdvance = 0;
+                ui.post(() -> {
+                    swipeDirection = dir;
+                    settleSwipeNow();
+                });
+            }
             return;
         }
         final String src = m.source;
@@ -3469,32 +3567,61 @@ public class MainActivity extends Activity {
             Bitmap b;
             if (isContent) b = decodeContentImage(src, 1600);
             else b = decodeSampled(new File(src), 1600);
-            final Bitmap got = b;
-            ui.post(() -> {
-                if (token != watchSwipeToken || watchSwipeImage == null) {
-                    if (got != null) recycleQuiet(got);
-                    return;
-                }
-                Bitmap old = watchSwipeBitmap;
-                watchSwipeBitmap = got;
-                if (got != null && !got.isRecycled()) {
-                    watchSwipeImage.setImageBitmap(got);
-                    if (swipeLocked && swipeDirection != 0) {
-                        // 手指还按着：贴到当前跟手位置
-                        watchSwipeImage.setVisibility(View.VISIBLE);
-                        applySwipeOffset(swipeDx);
-                    } else if (pendingAdvance != 0) {
-                        // 松手时这张图还没解出来，先回弹了：图一到就立刻补上这一格，
-                        // 直接换、不做动画，免得「滑到黑屏上再冒出一张图」
-                        int dir = pendingAdvance;
-                        pendingAdvance = 0;
-                        swipeDirection = dir;
-                        commitSwipe();
-                    }
-                }
-                if (old != null && old != got) recycleQuiet(old);
-            });
+            ui.post(() -> landSwipeBitmap(token, b));
         });
+    }
+
+    /** 相邻页位图到位：贴图 / 跟手 / 补格，三处共用 */
+    private void landSwipeBitmap(int token, Bitmap got) {
+        if (token != watchSwipeToken || watchSwipeImage == null) {
+            if (got != null) recycleQuiet(got);
+            return;
+        }
+        Bitmap old = watchSwipeBitmap;
+        watchSwipeBitmap = got;
+        if (got != null && !got.isRecycled()) {
+            watchSwipeImage.setImageBitmap(got);
+            if (swipeLocked && swipeDirection != 0) {
+                // 手指还按着：贴到当前跟手位置
+                watchSwipeImage.setVisibility(View.VISIBLE);
+                applySwipeOffset(swipeDx);
+            } else if (pendingAdvance != 0) {
+                // 松手时这一页还没准备好，先回弹了：一到位就立刻补上，
+                // 直接换、不做动画，免得「滑到黑屏上再冒出一张图」
+                int dir = pendingAdvance;
+                pendingAdvance = 0;
+                swipeDirection = dir;
+                commitSwipe();
+            }
+        }
+        if (old != null && old != got) recycleQuiet(old);
+    }
+
+    /** 视频第一帧，用作相邻页预览；取不到返回 null */
+    private Bitmap videoCoverFrame(String src, boolean isContent) {
+        android.media.MediaMetadataRetriever r = new android.media.MediaMetadataRetriever();
+        try {
+            if (isContent) r.setDataSource(this, Uri.parse(src));
+            else r.setDataSource(src);
+            Bitmap full = r.getFrameAtTime(0,
+                    android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+            if (full == null) return null;
+            int w = full.getWidth();
+            if (w > 1600 && w > 0) {
+                int nh = Math.max(1, Math.round(full.getHeight() * 1600f / w));
+                Bitmap s = Bitmap.createScaledBitmap(full, 1600, nh, true);
+                if (s != full) full.recycle();
+                return s;
+            }
+            return full;
+        } catch (Throwable t) {
+            return null;
+        } finally {
+            try {
+                r.release();
+            } catch (Throwable ignored) {
+            }
+        }
     }
 
     /**
@@ -3649,6 +3776,7 @@ public class MainActivity extends Activity {
                 playerImage.setLayerType(View.LAYER_TYPE_NONE, null);
             } catch (Throwable ignored) {
             }
+            playerImage.setBackgroundColor(Color.BLACK);
         }
         if (watchSwipeImage == null) return;
         watchSwipeImage.animate().cancel();
