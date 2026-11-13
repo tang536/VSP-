@@ -3513,10 +3513,12 @@ public class MainActivity extends Activity {
 
     /** 唯一写「主图 + 相邻层」位置的地方 */
     private void applySwipeVisual() {
-        applyImageMatrix();
+        // 主图必须整层平移（不能用矩阵平移内容）：这一层底色是不透明黑，
+        // 只挪内容的话黑底会一直盖住下面那层相邻图，拖动时就看不到「即将滑到的图」。
+        if (playerImage != null) playerImage.setTranslationX(swipeOffset);
         if (watchSwipeImage == null) return;
         float w = Math.max(1f, playerImage.getWidth());
-        float start = canStep(swipeDirection) ? (swipeDirection > 0 ? w : -w) : (swipeDirection > 0 ? w : -w);
+        float start = swipeDirection > 0 ? w : -w;
         watchSwipeImage.setTranslationX(start + swipeOffset);
     }
 
@@ -3625,6 +3627,7 @@ public class MainActivity extends Activity {
             watchImageSource = watchSiblings.get(target).source == null
                     ? "" : watchSiblings.get(target).source;
             swipeOffset = 0f;
+            playerImage.setTranslationX(0f);
             playerImage.setImageBitmap(edge);
             applyImageFit();
             if (old != null && old != edge) {
@@ -3780,9 +3783,9 @@ public class MainActivity extends Activity {
     private void applyImageMatrix() {
         imageMatrix.reset();
         imageMatrix.setScale(imageScale, imageScale);
-        // 横滑位移也走矩阵：这样「拖动 / 回弹 / 落定」都只改 swipeOffset 一个量，
-        // 不会再有第二个东西去覆盖 View 的 translationX。
-        imageMatrix.postTranslate(imageTx + swipeOffset, imageTy);
+        // 这里只负责缩放 / 平移（双指缩放状态）；横滑位移由 applySwipeVisual() 统一写，
+        // 两类位移分开，避免同一个方向被叠加两次。
+        imageMatrix.postTranslate(imageTx, imageTy);
         playerImage.setImageMatrix(imageMatrix);
     }
 
@@ -3824,6 +3827,9 @@ public class MainActivity extends Activity {
         imageScale = base;
         imageTx = 0f;
         imageTy = 0f;
+        // 回到适配状态 = 也不该再有任何横滑位移
+        swipeOffset = 0f;
+        if (swipeAnim == null) playerImage.setTranslationX(0f);
         clampImageTranslation();
         applyImageMatrix();
     }
