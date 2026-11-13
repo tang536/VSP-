@@ -5,6 +5,8 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.app.DownloadManager;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.ValueAnimator;
 import android.content.ContentUris;
 import android.content.Context;
 import android.content.Intent;
@@ -38,6 +40,7 @@ import android.util.Size;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
 import android.view.View;
+import android.view.VelocityTracker;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -319,6 +322,12 @@ public class MainActivity extends Activity {
     private boolean swipeRejected;
     /** 松手时相邻图还没解出来：记下要前进的方向，等位图回来自动补这一格 */
     private int pendingAdvance = 0;
+    /** 横滑位移的唯一存放处，单位 px；正=整张图向右移 */
+    private float swipeOffset = 0f;
+    /** 位移动画；只有它会改 swipeOffset，拖动时直接改，二者不会同时写 */
+    private ValueAnimator swipeAnim = null;
+    /** 手势速度追踪，用来判断甩出去还是弹回 */
+    private android.view.VelocityTracker swipeVelocity = null;
     /** 横滑判定阈值（像素）。系统 touchSlop 只有 8dp，太小，手指轻抖就判成横滑 */
     private float swipeSlop = 0f;
     /** 视频 / 音频相册翻页用：整层跟手拖动 */
@@ -2189,6 +2198,76 @@ public class MainActivity extends Activity {
         openPlayer(source, type, title, local, siblings, index, null);
     }
 
+    /**
+     * 图片 ↔ 视频切换时的「定格盖板」。
+     *
+     * 直接切过去的话，视频要等 MediaPlayer prepare 完才有第一帧、图片要等解码，
+     * 中间就是一块纯黑 —— 这就是「切换一点都不丝滑」的观感来源。
+     * 做法是把当前画面拍成一张位图盖在上面，新内容出来再淡出，屏幕里始终有画面。
+     */
+    private ImageView stageCover;
+    private Bitmap stageCoverBmp;
+
+    private void snapshotStageCover() {
+        if (playerStage == null) return;
+        int w = playerStage.getWidth();
+        int h = playerStage.getHeight();
+        if (w <= 0 || h <= 0) return;
+        Bitmap b = null;
+        try {
+            b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+            playerStage.draw(new Canvas(b));
+        } catch (Throwable t) {
+            if (b != null) recycleQuiet(b);
+            return;
+        }
+        hideStageCoverNow();
+        stageCoverBmp = b;
+        ImageView iv = new ImageView(this);
+        iv.setScaleType(ImageView.ScaleType.FIT_XY);
+        iv.setImageBitmap(b);
+        iv.setBackgroundColor(Color.BLACK);
+        iv.setClickable(false);
+        iv.setFocusable(false);
+        ((ViewGroup) playerStage).addView(iv, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        stageCover = iv;
+        // 兜底：视频迟迟不出第一帧也别把旧画面一直压在上面
+        ui.removeCallbacks(hideStageCoverRunnable);
+        ui.postDelayed(hideStageCoverRunnable, 900);
+    }
+
+    private final Runnable hideStageCoverRunnable = this::hideStageCover;
+
+    private void hideStageCover() {
+        final ImageView iv = stageCover;
+        if (iv == null) return;
+        stageCover = null;
+        ui.removeCallbacks(hideStageCoverRunnable);
+        iv.animate().alpha(0f).setDuration(140).withEndAction(() -> {
+            if (iv.getParent() instanceof ViewGroup) ((ViewGroup) iv.getParent()).removeView(iv);
+            if (stageCoverBmp != null) {
+                recycleQuiet(stageCoverBmp);
+                stageCoverBmp = null;
+            }
+        }).start();
+    }
+
+    /** 立刻撤（换下一张盖板前用，不做淡出） */
+    private void hideStageCoverNow() {
+        ui.removeCallbacks(hideStageCoverRunnable);
+        if (stageCover != null) {
+            if (stageCover.getParent() instanceof ViewGroup) {
+                ((ViewGroup) stageCover.getParent()).removeView(stageCover);
+            }
+            stageCover = null;
+        }
+        if (stageCoverBmp != null) {
+            recycleQuiet(stageCoverBmp);
+            stageCoverBmp = null;
+        }
+    }
+
     private void openPlayer(String source, int type, String title, boolean local,
                             List<MediaItem> siblings, int index, JSONObject fmt) {
         // 解析输入框还带着焦点时直接进观看层，软键盘会把窗口顶起来：
@@ -2200,6 +2279,7 @@ public class MainActivity extends Activity {
         playerPanel.setVisibility(View.VISIBLE);
         boolean media = type != TYPE_IMAGE;
         boolean keepFull = playerFull;
+        final int prevType = playerType;
         playerType = type;
         fullscreen = true;
         watchingAvatar = false;
@@ -2234,6 +2314,7 @@ public class MainActivity extends Activity {
         if (playerSeekWrap != null) playerSeekWrap.setVisibility(View.VISIBLE);
         if (playerVolumePop != null) playerVolumePop.setVisibility(View.GONE);
         // 从图片切到视频 / 音频：先放掉主图占的内存
+        if (type != TYPE_IMAGE && prevType == TYPE_IMAGE) snapshotStageCover();
         if (type != TYPE_IMAGE) releaseWatchImage();
         playerVideo.setVisibility(type == TYPE_VIDEO && !isNetworkVideo ? View.VISIBLE : View.GONE);
         if (playerExo != null) {
@@ -2278,8 +2359,14 @@ public class MainActivity extends Activity {
                     applyPlaybackSettings(mp);
                     playerAudioToggle.setImageResource(R.drawable.ic_pause);
                     updateVideoInlineMeta(mp, source, local);
+                    // 第一帧已经就绪，撤掉图片留下的定格盖板
+                    playerVideo.postDelayed(this::hideStageCover, 90);
                     ui.removeCallbacks(progressTick);
                     ui.post(progressTick);
+                });
+                playerVideo.setOnInfoListener((mp, what, extra) -> {
+                    if (what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) hideStageCover();
+                    return false;
                 });
                 playerVideo.setOnErrorListener((mp, what, extra) -> {
                     Toast.makeText(this, "无法播放该视频（格式可能不受支持）",
@@ -2296,6 +2383,8 @@ public class MainActivity extends Activity {
             playerAudioTitle.setText(title);
             playerAudioTime.setText("音频播放");
             prepareAudio(source, local);
+            // 音频没有画面，盖板留一下就走
+            ui.postDelayed(this::hideStageCover, 220);
         } else {
             // 解码统一放后台：以前在主线程 decode 一张几千万像素的原图要几百毫秒到 1 秒，
             // 表现就是切图卡住、单击唤出操作条也慢半拍。顺带用序号丢弃过期结果。
@@ -2366,6 +2455,13 @@ public class MainActivity extends Activity {
             playerExo.setPlayer(exoPlayer);
             playerExo.setVisibility(View.VISIBLE);
             playerVideo.setVisibility(View.GONE);
+            exoPlayer.addListener(new androidx.media3.common.Player.Listener() {
+                @Override
+                public void onRenderedFirstFrame() {
+                    // ExoPlayer 第一帧真正上屏了才撤定格盖板
+                    hideStageCover();
+                }
+            });
             try {
                 exoPlayer.setAudioAttributes(new AudioAttributes.Builder()
                         .setUsage(C.USAGE_MEDIA)
@@ -3154,15 +3250,10 @@ public class MainActivity extends Activity {
                 // 否则两次 commitSwipe 会前后脚改 watchIndex，索引错位后位图跟着错，直接崩。
                 if (swipePending != 0) settleSwipeNow();
                 // 上一轮的回弹动画必须停掉并把位移归零：它还在跑的时候新一次拖动会
-                // 和它抢同一个 translationX，两帧两个值，就是那个「一直闪」。
-                playerImage.animate().cancel();
-                if (watchSwipeImage != null) watchSwipeImage.animate().cancel();
-                playerImage.setTranslationX(0f);
-                if (watchSwipeImage != null) {
-                    watchSwipeImage.setTranslationX(swipeDirection > 0
-                            ? Math.max(1f, playerImage.getWidth())
-                            : -Math.max(1f, playerImage.getWidth()));
-                }
+                // 和它抢同一个位置，两帧两个值，就是那个「一直闪」。
+                cancelSwipeAnim();
+                swipeOffset = 0f;
+                applySwipeVisual();
                 swipeDx = 0f;
                 swipeLocked = false;
                 swipeRejected = false;
@@ -3170,8 +3261,22 @@ public class MainActivity extends Activity {
                 swipeDirection = 0;
                 swipeDownX = ev.getX();
                 swipeDownY = ev.getY();
+                // 速度追踪：松手时靠它判断「甩」出去还是弹回，相册那种跟手感来自这里
+                try {
+                    if (swipeVelocity != null) swipeVelocity.recycle();
+                    swipeVelocity = VelocityTracker.obtain();
+                    swipeVelocity.addMovement(ev);
+                } catch (Throwable ignored) {
+                    swipeVelocity = null;
+                }
                 return true;
             case MotionEvent.ACTION_MOVE:
+                if (swipeVelocity != null) {
+                    try {
+                        swipeVelocity.addMovement(ev);
+                    } catch (Throwable ignored) {
+                    }
+                }
                 if (zoomed || watchSiblings == null || watchSiblings.size() < 2) return true;
                 float dx = ev.getX() - swipeDownX;
                 float dy = ev.getY() - swipeDownY;
@@ -3200,7 +3305,19 @@ public class MainActivity extends Activity {
                 if (swipeLocked) {
                     float w = Math.max(1f, playerImage.getWidth());
                     boolean atEdge = !canStep(swipeDirection);
-                    boolean commit = !atEdge && Math.abs(swipeDx) > w * 0.24f;
+                    float vx = 0f;
+                    if (swipeVelocity != null) {
+                        try {
+                            swipeVelocity.addMovement(ev);
+                            swipeVelocity.computeCurrentVelocity(1000, 6000f);
+                            vx = swipeVelocity.getXVelocity();
+                        } catch (Throwable ignored) {
+                            vx = 0f;
+                        }
+                    }
+                    // 甩得快就算没拖到 24% 也翻页；慢慢拖则要过 24% 才翻
+                    boolean fling = Math.abs(vx) > 1200f && (!atEdge);
+                    boolean commit = !atEdge && (Math.abs(swipeDx) > w * 0.24f || fling);
                     // 拖到尽头给一句提示，不然只有回弹会让人以为卡住了
                     if (atEdge && Math.abs(swipeDx) > w * 0.12f) hintEdge(swipeDirection < 0);
                     finishSwipe(commit);
@@ -3292,6 +3409,12 @@ public class MainActivity extends Activity {
     private void beginSwipe(int dir) {
         ImageView edge = ensureSwipeView();
         if (edge == null) return;
+        // 高刷屏上每帧重绘一张几千万像素的图，栅格化跟不上就会出现「隔帧闪」；
+        // 拖动期间给主图挂一层硬件层，内容直接复用上一帧纹理，跟手才稳。
+        try {
+            playerImage.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        } catch (Throwable ignored) {
+        }
         int target = watchIndex + dir;
         float w = Math.max(1f, playerImage.getWidth());
         // 先无条件断开上一张的引用。上一张的位图可能已经在落定后被主图接管并 recycle 了，
@@ -3374,57 +3497,80 @@ public class MainActivity extends Activity {
         });
     }
 
-    /** 拖动中：主图跟着手指，相邻图贴着它一起走 */
+    /**
+     * 拖动中：主图跟着手指，相邻图贴着它一起走。
+     *
+     * 位移只存进 swipeOffset 一个变量，主图由 applyImageMatrix() 写进矩阵、
+     * 相邻层由 applySwipeVisual() 写 translationX —— 两条都是同一个函数在写，
+     * 没有第二个人（ViewPropertyAnimator）在每帧覆盖同一个属性。
+     * 之前画面以 30Hz 在相差 48px 的两个位置之间跳，就是两个写入者互相覆盖造成的。
+     */
     private void applySwipeOffset(float dx) {
+        cancelSwipeAnim();
+        swipeOffset = canStep(swipeDirection) ? dx : dx * 0.32f;
+        applySwipeVisual();
+    }
+
+    /** 唯一写「主图 + 相邻层」位置的地方 */
+    private void applySwipeVisual() {
+        applyImageMatrix();
+        if (watchSwipeImage == null) return;
         float w = Math.max(1f, playerImage.getWidth());
-        // 只有一个写入者：先把还在跑的落定/回弹动画取消掉再设值。
-        // 否则动画每帧写一次 translationX、这里每帧又写一次自己的值，
-        // 两条路径打架，画面就会在两个位置之间来回跳（用户看到的「闪烁」）。
-        playerImage.animate().cancel();
-        if (watchSwipeImage != null) watchSwipeImage.animate().cancel();
-        // 这里不再看 watchSwipeImage 是否 VISIBLE：解码还没回来时那一层是 INVISIBLE 的，
-        // 但主图必须照样跟手，否则前几十毫秒手指是拖不动的。
-        if (!canStep(swipeDirection)) {
-            // 边界外没有图：加阻力，拖不远，松手自动弹回
-            playerImage.setTranslationX(dx * 0.32f);
-            if (watchSwipeImage != null) {
-                watchSwipeImage.setTranslationX(swipeDirection > 0 ? w : -w);
-            }
+        float start = canStep(swipeDirection) ? (swipeDirection > 0 ? w : -w) : (swipeDirection > 0 ? w : -w);
+        watchSwipeImage.setTranslationX(start + swipeOffset);
+    }
+
+    private void cancelSwipeAnim() {
+        if (swipeAnim != null) {
+            swipeAnim.removeAllUpdateListeners();
+            swipeAnim.removeAllListeners();
+            swipeAnim.cancel();
+            swipeAnim = null;
+        }
+    }
+
+    /** 用自己持有的 ValueAnimator 跑位移：它只改 swipeOffset，再交给 applySwipeVisual 画 */
+    private void animateSwipeTo(float target, long duration, final Runnable endAction) {
+        cancelSwipeAnim();
+        final float from = swipeOffset;
+        if (Math.abs(target - from) < 1f || duration <= 0) {
+            swipeOffset = target;
+            applySwipeVisual();
+            if (endAction != null) endAction.run();
             return;
         }
-        playerImage.setTranslationX(dx);
-        if (watchSwipeImage != null) {
-            watchSwipeImage.setTranslationX((swipeDirection > 0 ? w : -w) + dx);
-        }
+        ValueAnimator anim = ValueAnimator.ofFloat(from, target);
+        anim.setDuration(duration);
+        anim.setInterpolator(new android.view.animation.DecelerateInterpolator(1.6f));
+        anim.addUpdateListener(a -> {
+            swipeOffset = (Float) a.getAnimatedValue();
+            applySwipeVisual();
+        });
+        anim.addListener(new android.animation.AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(android.animation.Animator a) {
+                if (swipeAnim != a) return;
+                swipeAnim = null;
+                if (endAction != null) endAction.run();
+            }
+        });
+        swipeAnim = anim;
+        anim.start();
     }
 
     private void finishSwipe(boolean commit) {
         float w = Math.max(1f, playerImage.getWidth());
         boolean hasEdge = watchSwipeImage != null && watchSwipeImage.getVisibility() == View.VISIBLE;
-        playerImage.animate().cancel();
-        if (watchSwipeImage != null) watchSwipeImage.animate().cancel();
         if (!commit) {
             swipePending = 0;
-            float back = Math.abs(playerImage.getTranslationX());
-            if (back < swipeSlopPx()) {
-                // 几乎没拖动（手指只是抖了几像素）：直接归位，别为此跑一段动画，
-                // 那段动画正是下一次按下时和拖动抢 translationX 的元凶。
-                playerImage.setTranslationX(0f);
-                if (watchSwipeImage != null) {
-                    watchSwipeImage.setTranslationX(swipeDirection > 0 ? w : -w);
-                }
+            if (Math.abs(swipeOffset) < swipeSlopPx()) {
+                // 几乎没拖动（手指只是抖了几像素）：直接归位，不跑动画
+                swipeOffset = 0f;
+                applySwipeVisual();
                 hideSwipeView();
                 return;
             }
-            playerImage.animate().translationX(0f).setDuration(160).start();
-            if (hasEdge) {
-                watchSwipeImage.animate().translationX(swipeDirection > 0 ? w : -w)
-                        .setDuration(160)
-                        .withEndAction(this::hideSwipeView)
-                        .start();
-            } else {
-                hideSwipeView();
-            }
+            animateSwipeTo(0f, 180, this::hideSwipeView);
             return;
         }
         swipePending = swipeDirection;
@@ -3434,23 +3580,18 @@ public class MainActivity extends Activity {
             // 先回弹，图一到位立刻补上这一格（loadSwipeImage 里处理）。
             pendingAdvance = swipeDirection;
             swipePending = 0;
-            playerImage.animate().translationX(0f).setDuration(120).start();
+            animateSwipeTo(0f, 140, null);
             return;
         }
-        playerImage.animate().translationX(-swipeDirection * w).setDuration(190)
-                .withEndAction(this::commitSwipe)
-                .start();
-        if (hasEdge) {
-            watchSwipeImage.animate().translationX(0f).setDuration(190).start();
-        }
+        animateSwipeTo(-swipeDirection * w, 200, this::commitSwipe);
     }
 
     /** 动画还没结束就又按下了：别等 endAction，立刻把待落定的那一步做完 */
     private void settleSwipeNow() {
         if (swipePending == 0) return;
-        playerImage.animate().cancel();
-        if (watchSwipeImage != null) watchSwipeImage.animate().cancel();
+        cancelSwipeAnim();
         if (swipeDirection == 0) swipeDirection = swipePending;
+        swipeOffset = -(swipeDirection > 0 ? 1 : -1) * Math.max(1f, playerImage.getWidth());
         commitSwipe();
     }
 
@@ -3460,8 +3601,9 @@ public class MainActivity extends Activity {
         int dir = swipeDirection;
         int target = watchIndex + dir;
         if (watchSiblings == null || target < 0 || target >= watchSiblings.size()) {
-            playerImage.animate().cancel();
-            playerImage.setTranslationX(0f);
+            cancelSwipeAnim();
+            swipeOffset = 0f;
+            applySwipeVisual();
             hideSwipeView();
             return;
         }
@@ -3471,7 +3613,7 @@ public class MainActivity extends Activity {
         Bitmap cached = swipeCache.get(target);
         swipeCache.remove(target);
         if (cached != null && cached != edge) recycleQuiet(cached);
-        playerImage.animate().cancel();
+        cancelSwipeAnim();
         if (edge != null && !edge.isRecycled()) {
             // 顺序很要紧：先换图、再同步重算矩阵、最后才把相邻层藏掉。
             // 原来是先藏再换，藏起来到换完之间那一帧主图还是上一张，
@@ -3482,14 +3624,15 @@ public class MainActivity extends Activity {
             watchImageRecyclable = true;
             watchImageSource = watchSiblings.get(target).source == null
                     ? "" : watchSiblings.get(target).source;
-            playerImage.setTranslationX(0f);
+            swipeOffset = 0f;
             playerImage.setImageBitmap(edge);
             applyImageFit();
             if (old != null && old != edge) {
                 if (oldRecyclable) recycleQuiet(old);
             }
         } else {
-            playerImage.setTranslationX(0f);
+            swipeOffset = 0f;
+            applySwipeVisual();
         }
         // 关键：整层等下一帧画完再撤。原来同一次 UI 里先换图再撤层，
         // 有些机型会在「新图还没绘出来、旧层已消失」之间插一帧空画面，
@@ -3501,6 +3644,12 @@ public class MainActivity extends Activity {
 
     private void hideSwipeView() {
         watchSwipeToken++;   // 在途解码的结果直接作废
+        if (playerImage != null) {
+            try {
+                playerImage.setLayerType(View.LAYER_TYPE_NONE, null);
+            } catch (Throwable ignored) {
+            }
+        }
         if (watchSwipeImage == null) return;
         watchSwipeImage.animate().cancel();
         // 关键：必须把 ImageView 上的位图引用断掉。相邻图落定后会被主图接管，
@@ -3528,6 +3677,8 @@ public class MainActivity extends Activity {
         swipeDirection = 0;
         swipePending = 0;
         pendingAdvance = 0;
+        cancelSwipeAnim();
+        swipeOffset = 0f;
     }
 
     /** 回收位图，任何异常都吞掉：宁可漏回收一点内存，也不能因为一次 recycle 把界面搞崩 */
@@ -3565,6 +3716,8 @@ public class MainActivity extends Activity {
         watchSource = m.source;
         watchTitle = m.name;
         watchLocal = true;
+        cancelSwipeAnim();
+        swipeOffset = 0f;
         setPlayerTitleText(m.name);
         playerKind.setText("图片");
         updateThumbSelection();
@@ -3627,7 +3780,9 @@ public class MainActivity extends Activity {
     private void applyImageMatrix() {
         imageMatrix.reset();
         imageMatrix.setScale(imageScale, imageScale);
-        imageMatrix.postTranslate(imageTx, imageTy);
+        // 横滑位移也走矩阵：这样「拖动 / 回弹 / 落定」都只改 swipeOffset 一个量，
+        // 不会再有第二个东西去覆盖 View 的 translationX。
+        imageMatrix.postTranslate(imageTx + swipeOffset, imageTy);
         playerImage.setImageMatrix(imageMatrix);
     }
 
@@ -3893,6 +4048,7 @@ public class MainActivity extends Activity {
     private void exitWatch() {
         if (playerPanel == null) return;
         try {
+            hideStageCoverNow();
             stopPlayer();
             hidePlayerOverlay();
             fullscreen = false;
