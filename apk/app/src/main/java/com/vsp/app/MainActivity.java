@@ -3540,9 +3540,11 @@ public class MainActivity extends Activity {
 
     /** 静止状态：让主图那一格正好铺满屏幕 */
     private void resetStripScroll() {
-        if (playerStrip == null || playerStage == null) return;
+        if (playerStrip == null || playerStage == null || playerImage == null) return;
         int w = playerStage.getWidth();
         if (w <= 0) return;
+        // 主图固定在中间格，容器滚到一屏宽，屏幕上就正好是主图
+        playerImage.setX(w);
         if (playerStrip.getScrollX() != w) playerStrip.scrollTo(w, 0);
     }
 
@@ -3565,6 +3567,9 @@ public class MainActivity extends Activity {
         }
         setStripChildWidth(playerImage, w);
         if (watchSwipeImage != null) setStripChildWidth(watchSwipeImage, w);
+        // 主图必须摆在中间那一格（x = 一屏宽）。静止时容器滚到一屏宽的位置，
+        // 屏幕里看到的就正好是主图那一格；少了这一步主图会被滚到屏幕外，什么都不显示。
+        playerImage.setX(w);
     }
 
     private void setStripChildWidth(View v, int w) {
