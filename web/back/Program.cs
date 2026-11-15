@@ -10,6 +10,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Text;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -104,7 +105,18 @@ app.MapPost("/api/parse", async (ParseReq req, YtDlpRunner yt, ILoggerFactory lo
     }
     catch (Exception ex)
     {
-        return Results.BadRequest(new { detail = ex.Message });
+        // yt-dlp 不认这类「archives」站点（Unsupported URL）。app 端 vsp.py 自带站点提取器，
+        // 这里回退到同一份引擎，web 与 app 的解析能力保持一致。
+        try
+        {
+            var json = await VspBridge.ParseAsync(req.Url);
+            return Results.Text(json, "application/json");
+        }
+        catch (Exception ex2)
+        {
+            var note = $"{ex.Message}；App 引擎：{ex2.Message}";
+            return Results.BadRequest(new { detail = note });
+        }
     }
 });
 
@@ -113,10 +125,21 @@ app.MapPost("/api/download", async (DownloadReq req, DownloadTaskManager mgr, Yt
     var dir = string.IsNullOrWhiteSpace(req.SaveDir) ? saveDir : req.SaveDir;
     Directory.CreateDirectory(dir);
     var task = mgr.Create(req.Url, req.Title ?? "video", dir);
+    var direct = req.DirectUrl ?? "";
+    var isHls = direct.Contains(".m3u8", StringComparison.OrdinalIgnoreCase);
+    var isDirect = !string.IsNullOrEmpty(direct)
+                   && ((req.FormatId ?? "").StartsWith("url:") || isHls);
 
-    if (req.Kind == "image" && !string.IsNullOrEmpty(req.DirectUrl))
+    if (req.Kind == "image" && !string.IsNullOrEmpty(direct))
     {
-        _ = yt.DownloadImageAsync(task, req.DirectUrl, req.Title ?? "image", dir);
+        _ = yt.DownloadImageAsync(task, direct, req.Title ?? "image", dir);
+    }
+    else if (isDirect)
+    {
+        // 直链 / m3u8：交给 app 引擎。它自己下分片、失败刷新播放列表重新拿签名，
+        // 不会像 yt-dlp 的 HLS 下载器那样卡在 2~3MB 还留着假速度。
+        var formatId = (req.FormatId ?? "").StartsWith("url:") ? req.FormatId! : "url:" + direct;
+        _ = VspBridge.DownloadAsync(task, req.Url, formatId, req.Title ?? "video", dir);
     }
     else
     {
@@ -422,10 +445,216 @@ class DownloadTaskManager
     public IEnumerable<DownloadTask> All() => _tasks.Values;
 }
 
+// ---------------- App 引擎（vsp.py）桥接 ----------------
+// web 与 app 共用同一份解析 / 下载实现：站点提取器、HLS 分片下载（刷新播放列表、
+// 指数退避、分片缓存）都只有一套代码，不会出现「App 能下、网页卡死」的分叉。
+
+class PythonLocator
+{
+    private static string? _cached;
+    private static readonly object _lock = new();
+
+    public static string Exe
+    {
+        get
+        {
+            lock (_lock)
+            {
+                if (_cached != null) return _cached;
+                _cached = Probe() ?? "python";
+                Console.WriteLine($"Python 解释器：{_cached}");
+                return _cached;
+            }
+        }
+    }
+
+    private static string? Probe()
+    {
+        var cands = new List<string>();
+        var env = Environment.GetEnvironmentVariable("VSP_PYTHON");
+        if (!string.IsNullOrWhiteSpace(env)) cands.Add(env);
+        cands.Add("python");
+        try
+        {
+            var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                                    ".dsh", "dsh-runtimes");
+            if (Directory.Exists(root))
+                foreach (var d in Directory.GetDirectories(root))
+                    cands.Add(Path.Combine(d, "dependencies", "python", "python.exe"));
+        }
+        catch { }
+        cands.Add("py");
+
+        foreach (var c in cands)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = c,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    StandardOutputEncoding = Encoding.UTF8,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                psi.ArgumentList.Add("-c");
+                psi.ArgumentList.Add("import sys,yt_dlp;print(sys.executable)");
+                using var p = new Process { StartInfo = psi };
+                p.Start();
+                var stdout = p.StandardOutput.ReadToEnd();
+                if (!p.WaitForExit(15000)) { try { p.Kill(true); } catch { } continue; }
+                if (p.ExitCode == 0 && stdout.Trim().Length > 0) return stdout.Trim();
+            }
+            catch { }
+        }
+        return null;
+    }
+}
+
+class VspBridge
+{
+    private static string? _script;
+
+    public static string ScriptPath
+    {
+        get
+        {
+            if (_script != null) return _script;
+            var cands = new List<string>();
+            var env = Environment.GetEnvironmentVariable("VSP_PY_SCRIPT");
+            if (!string.IsNullOrWhiteSpace(env)) cands.Add(env);
+            var roots = new List<string> { AppContext.BaseDirectory, Directory.GetCurrentDirectory() };
+            var d = Directory.GetCurrentDirectory();
+            for (int i = 0; i < 4 && d.Length > 3; i++)
+            {
+                d = Path.GetDirectoryName(d) ?? d;
+                if (d.Length <= 3) break;
+                roots.Add(d);
+            }
+            foreach (var r in roots) cands.Add(Path.Combine(r, "python", "vsp_cli.py"));
+            foreach (var c in cands)
+                if (File.Exists(c)) { _script = c; return c; }
+            throw new Exception("找不到 vsp_cli.py，无法加载 App 引擎");
+        }
+    }
+
+    private static ProcessStartInfo MakePsi()
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = PythonLocator.Exe,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        return psi;
+    }
+
+    public static async Task<string> ParseAsync(string url)
+    {
+        var psi = MakePsi();
+        psi.ArgumentList.Add(ScriptPath);
+        psi.ArgumentList.Add("parse");
+        psi.ArgumentList.Add(url);
+
+        using var proc = new Process { StartInfo = psi };
+        proc.Start();
+        var outTask = proc.StandardOutput.ReadToEndAsync();
+        var errTask = proc.StandardError.ReadToEndAsync();
+        var exitTask = proc.WaitForExitAsync();
+        var timeout = Task.Delay(90000);
+        if (await Task.WhenAny(Task.WhenAll(outTask, errTask, exitTask), timeout) == timeout)
+        {
+            try { proc.Kill(true); } catch { }
+            throw new Exception("App 引擎解析超时（90 秒）");
+        }
+        var stdout = (await outTask).Trim();
+        var stderr = (await errTask).Trim();
+        if (proc.ExitCode != 0 || string.IsNullOrEmpty(stdout))
+        {
+            var msg = string.IsNullOrEmpty(stderr) ? "App 引擎解析失败" : stderr.Split('\n')[0].Trim();
+            throw new Exception(msg);
+        }
+        return stdout;
+    }
+
+    public static async Task DownloadAsync(DownloadTask task, string pageUrl, string formatId,
+                                          string title, string dir)
+    {
+        try
+        {
+            var psi = MakePsi();
+            psi.ArgumentList.Add(ScriptPath);
+            psi.ArgumentList.Add("download");
+            psi.ArgumentList.Add(pageUrl);
+            psi.ArgumentList.Add(formatId);
+            psi.ArgumentList.Add(title);
+            psi.ArgumentList.Add(dir);
+
+            var proc = new Process { StartInfo = psi };
+            task.Proc = proc;
+            proc.Start();
+
+            var tail = new Queue<string>();
+            string? line;
+            while ((line = await proc.StandardOutput.ReadLineAsync()) != null)
+            {
+                var s = line.Trim();
+                if (!s.StartsWith("{")) continue;
+                try
+                {
+                    using var doc = JsonDocument.Parse(s);
+                    var st = doc.RootElement.TryGetProperty("status", out var se) ? se.GetString() ?? "running" : "running";
+                    if (doc.RootElement.TryGetProperty("progress", out var pr) && pr.ValueKind == JsonValueKind.Number)
+                        task.Progress = pr.GetDouble();
+                    if (doc.RootElement.TryGetProperty("speed", out var sp) && sp.ValueKind == JsonValueKind.String)
+                        task.Speed = sp.GetString() ?? "";
+                    if (doc.RootElement.TryGetProperty("filename", out var fn) && fn.ValueKind == JsonValueKind.String)
+                    {
+                        var v = fn.GetString() ?? "";
+                        if (!string.IsNullOrEmpty(v)) task.Filename = v;
+                    }
+                    if (st == "done") { task.Progress = 100; task.Status = "done"; task.Speed = ""; }
+                    else if (st == "error")
+                    {
+                        task.Status = "error";
+                        task.Speed = "";
+                        task.Error = doc.RootElement.TryGetProperty("error", out var er) ? er.GetString() ?? "下载失败" : "下载失败";
+                        tail.Enqueue(task.Error);
+                    }
+                }
+                catch { }
+            }
+            await proc.WaitForExitAsync();
+
+            if (task.Status == "done") return;
+            if (proc.ExitCode == 0) { task.Progress = 100; task.Status = "done"; return; }
+            if (task.Status != "error")
+            {
+                task.Status = "error";
+                task.Speed = "";
+                task.Error = tail.Count > 0 ? tail.Last() : "下载失败";
+            }
+        }
+        catch (Exception ex)
+        {
+            task.Status = "error";
+            task.Speed = "";
+            task.Error = ex.Message;
+        }
+    }
+}
+
 // ---------------- yt-dlp 调用 ----------------
 class YtDlpRunner
 {
-    private static string PythonExe => "python";
+    // 不能再直接写 "python"：PATH 里的解释器不一定装了 yt_dlp。
+    // PythonLocator 会探到一个真正带 yt_dlp 的解释器，vsp 引擎也共用它。
+    private static string PythonExe => PythonLocator.Exe;
 
     private List<string> BaseArgs() => new()
     {

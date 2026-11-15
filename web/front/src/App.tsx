@@ -42,7 +42,16 @@ type Task = {
 }
 
 const API = ''
-const VERSION = 'v1.1.0'
+const VERSION = 'v1.1.8'
+const APP_VERSION_CODE = '11008'
+const GH_RELEASES = 'https://github.com/tang536/VSP-/releases'
+const GITEE_RELEASES = 'https://gitee.com/tang-rongqiang/VSP/releases'
+const APK_URL = `https://github.com/tang536/VSP-/releases/download/v${VERSION.replace(/^v/, '')}/VSP-Parse-v${VERSION.replace(/^v/, '')}.apk`
+
+// 判断是否为直链媒体（可走 Range 代理秒开），HLS 走流式管道
+function isDirectMedia(u: string): boolean {
+  return !!u && !/\.m3u8(\?|$)/i.test(u) && !/^https?:\/\/[^/]+\/api\/proxy/i.test(u)
+}
 
 function fmtDuration(s: number): string {
   if (!s) return ''
@@ -112,6 +121,8 @@ function App() {
   const [dark, setDark] = useState(() => localStorage.getItem('theme') !== 'light')
   const [page, setPage] = useState<'home' | 'me'>('home')
   const [saveDir, setSaveDir] = useState('')
+  // 每一行格式对应的下载任务，点「下载」立刻能看到进度，不用切到「我的」
+  const [rowTasks, setRowTasks] = useState<Record<string, string>>({})
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light')
@@ -159,47 +170,84 @@ function App() {
     return () => clearTimeout(t)
   }, [toast])
 
-  function onDownload(fmt: Format, kind: 'video' | 'audio' | 'image') {
+  async function onDownload(fmt: Format, kind: 'video' | 'audio' | 'image') {
     if (!result) return
-    const params = new URLSearchParams({
-      kind,
-      url: result.webpageUrl || url,
-      title: result.title,
-      formatId: fmt.formatId,
-    })
-    if (kind === 'image') params.set('directUrl', fmt.url)
-    const a = document.createElement('a')
-    a.href = `/api/download-stream?${params.toString()}`
-    a.download = ''
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    setToast('已开始下载，前往「我的」查看进度')
+    const key = rowKey(fmt)
+    try {
+      const r = await fetch(`${API}/api/download`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: result.webpageUrl || url,
+          formatId: fmt.formatId,
+          kind,
+          directUrl: fmt.url,
+          title: result.title,
+          saveDir,
+        }),
+      })
+      const data = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(data.detail || '下载启动失败')
+      setRowTasks(m => ({ ...m, [key]: data.taskId }))
+      setToast('已开始下载，进度就在这一行')
+      refreshTasks()
+    } catch (e: any) {
+      setToast(`下载失败：${e.message}`)
+    }
   }
 
   function onPreview(fmt: Format, kind: string) {
     if (!result) return
+    const pageUrl = result.webpageUrl || url
     if (kind === 'images') {
-      setPreview({ kind, url: proxyUrl(fmt.url, result.webpageUrl || url), title: result.title })
+      setPreview({ kind, url: proxyUrl(fmt.url, pageUrl), title: result.title })
       return
     }
-    // 视频/音频：走后端 yt-dlp 流式预览（自动合并音视频轨）
+    // 直链（mp4/m4a 等）走代理：支持 Range，点开就能拖进度条
+    if (isDirectMedia(fmt.url)) {
+      setPreview({ kind, url: proxyUrl(fmt.url, pageUrl), title: result.title })
+      return
+    }
+    // HLS 分片源：交给后端流式管道（自动合并）
     const params = new URLSearchParams({
       kind: kind === 'audios' ? 'audio' : 'video',
-      url: result.webpageUrl || url,
+      url: pageUrl,
       title: result.title,
       formatId: fmt.formatId,
       preview: '1',
     })
-    setPreview({ kind, url: `/api/download-stream?${params.toString()}`, title: result.title })
+    setPreview({ kind, url: `${API}/api/download-stream?${params.toString()}`, title: result.title })
   }
 
-  function onCancelTask(taskId: string) {
-    fetch(`/api/cancel?taskId=${taskId}`, { method: 'POST' }).then(refreshTasks)
+  async function onCancelTask(taskId: string) {
+    setTasks(prev => prev.map(t => (t.taskId === taskId ? { ...t, status: 'error', error: '已取消' } : t)))
+    try {
+      await fetch(`${API}/api/cancel?taskId=${encodeURIComponent(taskId)}`, { method: 'POST' })
+      setToast('已取消下载')
+    } catch {
+      setToast('取消失败')
+    }
+    refreshTasks()
   }
 
-  function onDeleteTask(taskId: string) {
-    fetch(`/api/tasks/${taskId}`, { method: 'DELETE' }).then(refreshTasks)
+  async function onDeleteTask(taskId: string) {
+    setTasks(prev => prev.filter(t => t.taskId !== taskId))
+    setRowTasks(m => {
+      const next: Record<string, string> = {}
+      for (const [k, v] of Object.entries(m)) if (v !== taskId) next[k] = v
+      return next
+    })
+    try {
+      await fetch(`${API}/api/tasks/${encodeURIComponent(taskId)}`, { method: 'DELETE' })
+      setToast('已删除任务及文件')
+    } catch {
+      setToast('删除失败')
+    }
+    refreshTasks()
+  }
+
+  function rowKey(f: Format) {
+    return `${tab}|${f.formatId}|${f.quality}`
   }
 
   const lists: { key: typeof tab; label: string; data: Format[] }[] = [
@@ -267,24 +315,53 @@ function App() {
                 {lists.find(l => l.key === tab)!.data.length === 0 && (
                   <div className="empty">该分类下无可用格式</div>
                 )}
-                {lists.find(l => l.key === tab)!.data.map((f, i) => (
-                  <div className="format-row" key={f.formatId + i}>
-                    <div className="f-quality">{f.quality}</div>
-                    <div className="f-meta">
-                      <span className="f-ext">{f.container}</span>
-                      {f.vcodec && <span className="f-codec">{f.vcodec.split('.')[0]}</span>}
-                      {f.acodec && <span className="f-codec">{f.acodec.split('.')[0]}</span>}
-                      {f.bitrate > 0 && <span className="f-codec">{Math.round(f.bitrate)}k</span>}
+                {lists.find(l => l.key === tab)!.data.map((f, i) => {
+                  const taskId = rowTasks[rowKey(f)]
+                  const rowTask = taskId ? tasks.find(t => t.taskId === taskId) : undefined
+                  return (
+                    <div className="format-row" key={f.formatId + i}>
+                      <div className="f-quality">{f.quality}</div>
+                      <div className="f-meta">
+                        <span className="f-ext">{f.container}</span>
+                        {f.vcodec && <span className="f-codec">{f.vcodec.split('.')[0]}</span>}
+                        {f.acodec && <span className="f-codec">{f.acodec.split('.')[0]}</span>}
+                        {f.bitrate > 0 && <span className="f-codec">{Math.round(f.bitrate)}k</span>}
+                        {rowTask && (
+                          <span className={`row-state ${rowTask.status}`}>
+                            {rowTask.status === 'running' &&
+                              `${rowTask.progress.toFixed(0)}%${rowTask.speed ? ' · ' + rowTask.speed : ''}`}
+                            {rowTask.status === 'done' && '已存入下载目录'}
+                            {rowTask.status === 'error' && (rowTask.error || '失败')}
+                          </span>
+                        )}
+                      </div>
+                      <div className="f-size">{f.size}</div>
+                      <div className="f-actions">
+                        {rowTask && rowTask.status === 'running' ? (
+                          <button className="ghost-btn" onClick={() => onCancelTask(rowTask.taskId)}>取消</button>
+                        ) : (
+                          <button className="ghost-btn" onClick={() => onPreview(f, tab)}>预览</button>
+                        )}
+                        {rowTask && (rowTask.status === 'done' || rowTask.status === 'error') ? (
+                          <button className="ghost-btn" onClick={() => onDeleteTask(rowTask.taskId)}>删除</button>
+                        ) : (
+                          <button
+                            className="primary-btn small"
+                            disabled={rowTask?.status === 'running'}
+                            onClick={() => onDownload(f, tab === 'videos' ? 'video' : tab === 'audios' ? 'audio' : 'image')}
+                          >
+                            {rowTask?.status === 'running' ? '下载中' : '下载'}
+                          </button>
+                        )}
+                      </div>
+                      {rowTask && rowTask.status === 'running' && (
+                        <div className="row-bar">
+                          <div className="row-bar-fill" style={{ width: `${Math.max(1, rowTask.progress)}%` }} />
+                        </div>
+                      )}
                     </div>
-                    <div className="f-size">{f.size}</div>
-                    <div className="f-actions">
-                      <button className="ghost-btn" onClick={() => onPreview(f, tab)}>预览</button>
-                      <button className="primary-btn small" onClick={() => onDownload(f, tab === 'videos' ? 'video' : tab === 'audios' ? 'audio' : 'image')}>
-                        下载
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             </section>
           )}
@@ -311,7 +388,7 @@ function App() {
                   <span className="task-status">
                     {t.status === 'running' && `${t.progress.toFixed(0)}% ${t.speed}`}
                     {t.status === 'done' && '完成'}
-                    {t.status === 'error' && '失败'}
+                    {t.status === 'error' && (t.error || '失败')}
                   </span>
                 </div>
                 <div className="task-bar-row">
@@ -344,6 +421,30 @@ function App() {
               <span className="setting-icon">{Icon.folder}</span>
               <span className="setting-label">下载目录</span>
               <span className="setting-value path">{saveDir || '打开'}</span>
+            </div>
+          </section>
+
+          <section className="me-section">
+            <h2 className="me-title">关于</h2>
+            <div className="setting-row">
+              <span className="setting-label">当前版本</span>
+              <span className="setting-value">{VERSION} · build {APP_VERSION_CODE}</span>
+            </div>
+            <div className="setting-row" onClick={() => window.open(APK_URL, '_blank')}>
+              <span className="setting-label">下载最新 APK</span>
+              <span className="setting-value">GitHub Release</span>
+            </div>
+            <div className="setting-row" onClick={() => window.open(GITEE_RELEASES, '_blank')}>
+              <span className="setting-label">Gitee 发布页</span>
+              <span className="setting-value">备用下载</span>
+            </div>
+            <div className="setting-row" onClick={() => window.open(`${GH_RELEASES}/tag/v${VERSION.replace(/^v/, '')}`, '_blank')}>
+              <span className="setting-label">更新说明</span>
+              <span className="setting-value">{VERSION}</span>
+            </div>
+            <div className="about-note">
+              本版与 App 同步：相册左右滑不再抖动、图片与视频可双向滑动切换、
+              预览可拖进度、下载即时可见、取消与删除真实生效。
             </div>
           </section>
 

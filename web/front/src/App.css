@@ -220,6 +220,34 @@ button { font-family: inherit; }
 }
 .f-actions { display: flex; gap: 8px; justify-content: flex-end; }
 
+/* 行内下载状态与进度 */
+.row-state {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.row-state.running { color: var(--accent); }
+.row-state.done { color: var(--ok); }
+.row-state.error { color: var(--danger); }
+.row-bar {
+  grid-column: 1 / -1;
+  height: 2px;
+  background: var(--surface-2);
+  margin-top: 6px;
+}
+.row-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.25s linear;
+}
+.about-note {
+  font-size: 12px;
+  color: var(--ink-dim);
+  padding: 12px 16px;
+  background: var(--surface);
+  margin-bottom: 1px;
+  line-height: 1.7;
+}
+
 .queue {
   position: fixed;
   left: 0; right: 0; bottom: 0;
