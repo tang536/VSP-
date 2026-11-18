@@ -11,12 +11,6 @@
                 <!-- 与 Web 首页一致的解析框：按钮固定在右侧，输入框自适应 -->
                 <DockPanel LastChildFill="True">
                     <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Spacing="8" Margin="8,0,0,0">
-                        <Button Classes="ghost" Height="42" Command="{Binding ShowHistoryCommand}">
-                            <StackPanel Orientation="Horizontal" Spacing="6">
-                                <PathIcon Data="{StaticResource IconHistory}" VerticalAlignment="Center" />
-                                <TextBlock Text="历史解析" VerticalAlignment="Center" />
-                            </StackPanel>
-                        </Button>
                         <Button Classes="primary" Command="{Binding ParseCommand}">
                             <StackPanel Orientation="Horizontal" Spacing="6">
                                 <PathIcon Data="{StaticResource IconSearch}" VerticalAlignment="Center" />

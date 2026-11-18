@@ -8,7 +8,7 @@
         WindowStartupLocation="CenterOwner"
         Background="{DynamicResource AppBackground}">
     <Grid RowDefinitions="Auto,*,Auto" Margin="24,20">
-        <Grid Grid.Row="0" ColumnDefinitions="Auto,Auto,Auto,*,Auto,Auto" ColumnSpacing="10">
+        <Grid Grid.Row="0" ColumnDefinitions="Auto,Auto,Auto,*,Auto" ColumnSpacing="10">
             <PathIcon Grid.Column="0" Data="{StaticResource IconHistory}" Width="18" Height="18"
                       Foreground="{DynamicResource Accent}" VerticalAlignment="Center" />
             <TextBlock Grid.Column="1" Text="历史解析" Classes="h1" VerticalAlignment="Center" />
@@ -20,12 +20,6 @@
                 <StackPanel Orientation="Horizontal" Spacing="5">
                     <PathIcon Data="{StaticResource IconTrash}" Width="12" Height="12" />
                     <TextBlock Text="清空" FontSize="12" VerticalAlignment="Center" />
-                </StackPanel>
-            </Button>
-            <Button Grid.Column="5" Classes="ghost small" Click="Close_Click">
-                <StackPanel Orientation="Horizontal" Spacing="5">
-                    <PathIcon Data="{StaticResource IconClose}" Width="12" Height="12" />
-                    <TextBlock Text="关闭" FontSize="12" VerticalAlignment="Center" />
                 </StackPanel>
             </Button>
         </Grid>

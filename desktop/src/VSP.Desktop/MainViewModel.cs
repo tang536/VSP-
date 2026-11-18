@@ -398,23 +398,31 @@ public sealed class MainViewModel : BindableBase
                 Status = "失败：" + (string.IsNullOrEmpty(result.Error) ? "没有找到可下载的音视频" : result.Error);
                 return;
             }
-            _result = result;
-            _formatTasks.Clear();
-            _services.Settings.AddRecent(Url.Trim());
-            RebuildRecent();
-            Status = $"解析完成：{result.Videos.Count} 个视频 / {result.Audios.Count} 个音频 / {result.Images.Count} 张图片";
-            Raise(nameof(HasResult)); Raise(nameof(ResultTitle)); Raise(nameof(ResultMeta));
-            Raise(nameof(ResultUploader)); Raise(nameof(HasUploader)); Raise(nameof(ResultDurationText));
-            Raise(nameof(HasDuration)); Raise(nameof(ResultDescription)); Raise(nameof(HasDescription));
-            RaiseTabs();
-            SelectedTab = result.Videos.Count > 0 ? 0 : result.Audios.Count > 0 ? 1 : 2;
-            _ = LoadCoverAsync(result.Thumbnail);
+            ApplyResult(result);
         }
         catch (Exception ex)
         {
             Status = "失败：" + ex.Message;
         }
         finally { IsBusy = false; }
+    }
+
+    internal void ApplyResult(ParseResult result)
+    {
+        _result = result;
+        _formatTasks.Clear();
+        _services.Settings.AddRecent(Url.Trim());
+        RebuildRecent();
+        Status = $"解析完成：{result.Videos.Count} 个视频 / {result.Audios.Count} 个音频 / {result.Images.Count} 张图片";
+        Raise(nameof(HasResult)); Raise(nameof(ResultTitle)); Raise(nameof(ResultMeta));
+        Raise(nameof(ResultUploader)); Raise(nameof(HasUploader)); Raise(nameof(ResultDurationText));
+        Raise(nameof(HasDuration)); Raise(nameof(ResultDescription)); Raise(nameof(HasDescription));
+        // SelectedTab 首次解析时仍是默认值 0，setter 里的 Set 不会触发刷新，
+        // 必须显式重建列表，否则第一次解析看不到任何格式项。
+        _selectedTab = result.Videos.Count > 0 ? 0 : result.Audios.Count > 0 ? 1 : 2;
+        RefreshFormats();
+        RaiseTabs();
+        _ = LoadCoverAsync(result.Thumbnail);
     }
 
     private async Task LoadCoverAsync(string url)

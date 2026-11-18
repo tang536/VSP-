@@ -2,6 +2,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
+using VSP.Core;
 
 namespace VSP.Desktop.Views;
 
@@ -60,6 +61,38 @@ internal static class UiShot
         await Settle();
         Save(history, Path.Combine(dir, "8-history.png"), 1.25);
         history.Close();
+
+        // 首次解析结果：默认 Tab 就是 0，专门验证结果列表仍会被填充
+        vm.ShowHomeCommand.Execute(null);
+        vm.Url = "https://example.com/watch?v=demo";
+        var fake = new ParseResult
+        {
+            Title = "示例视频 · 结果列表验收",
+            Uploader = "演示频道",
+            Duration = 372,
+            Description = "用于验收首次解析后的结果卡片与格式列表",
+            Source = "示例站点",
+        };
+        fake.Videos.Add(new MediaFormat
+        {
+            FormatId = "1080p", Quality = "1080p", Ext = "mp4", Container = "mp4",
+            Width = 1920, Height = 1080, Size = "128.4 MiB", Url = "https://example.com/v1080.mp4",
+            Protocol = "https", Vcodec = "h264", Acodec = "aac",
+        });
+        fake.Videos.Add(new MediaFormat
+        {
+            FormatId = "720p", Quality = "720p", Ext = "mp4", Container = "mp4",
+            Width = 1280, Height = 720, Size = "64.2 MiB", Url = "https://example.com/v720.mp4",
+            Protocol = "https", Vcodec = "h264", Acodec = "aac",
+        });
+        fake.Audios.Add(new MediaFormat
+        {
+            FormatId = "audio", Quality = "128kbps", Ext = "m4a", Size = "5.6 MiB",
+            Url = "https://example.com/a.m4a", Protocol = "https",
+        });
+        vm.ApplyResult(fake);
+        await Settle();
+        Save(window, Path.Combine(dir, "9-first-result.png"), 1.0);
 
         vm.IsDarkTheme = wasDark;
         Console.WriteLine("shot done");
