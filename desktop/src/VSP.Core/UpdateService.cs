@@ -81,9 +81,13 @@ public sealed class UpdateService
 
             var tag = root.TryGetProperty("tag_name", out var t) && t.ValueKind == JsonValueKind.String
                 ? t.GetString() ?? "" : Str(root, "version");
+            // 桌面版用 desktop-v1.0.0 这种带前缀的标签，和 App 的 v1.1.x 完全分开。
+            tag = tag.Trim();
+            if (tag.StartsWith("desktop-", StringComparison.OrdinalIgnoreCase)) tag = tag["desktop-".Length..];
             tag = tag.TrimStart('v', 'V');
             if (string.IsNullOrWhiteSpace(tag)) return null;
 
+            // App 的 APK release 没有任何 .msi 资产，走不到下面，天然被排除。
             string download = "";
             if (root.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
             {
