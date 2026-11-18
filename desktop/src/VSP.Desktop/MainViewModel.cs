@@ -193,6 +193,7 @@ public sealed class MainViewModel : BindableBase
     public ObservableCollection<RecentItemViewModel> RecentItems { get; } = [];
 
     public event Action? FormatTasksChanged;
+    public event Action? HistoryItemPicked;
 
     public string Url { get => _url; set => Set(ref _url, value); }
     public string Status { get => _status; private set { if (Set(ref _status, value)) { Raise(nameof(HasStatus)); Raise(nameof(IsErrorStatus)); } } }
@@ -253,6 +254,7 @@ public sealed class MainViewModel : BindableBase
     public bool HasNoTasks => TaskItems.Count == 0;
     public bool HasNoLocal => LocalItems.Count == 0;
     public bool HasRecent => RecentItems.Count > 0;
+    public string RecentSummary => $"{RecentItems.Count} 条";
     public string LocalSummary => $"共 {LocalItems.Count} 个媒体文件";
     public string TaskSummary => TaskItems.Count == 0 ? "暂无任务" : $"{TaskItems.Count} 个任务";
 
@@ -277,6 +279,9 @@ public sealed class MainViewModel : BindableBase
     public ICommand ShowMeCommand { get; }
     public ICommand ShowQueueCommand { get; }
     public ICommand ShowStorageCommand { get; }
+    public ICommand ShowHistoryCommand { get; }
+    public ICommand ClearHistoryCommand { get; }
+    public ICommand ClosePreviewCommand { get; }
     public ICommand BackCommand { get; }
     public ICommand ParseCommand { get; }
     public ICommand ClearCommand { get; }
@@ -300,8 +305,14 @@ public sealed class MainViewModel : BindableBase
     public bool IsMePage => _page == 2;
     public bool IsQueuePage => _page == 3;
     public bool IsStoragePage => _page == 4;
-    public bool IsMeNav => _page >= 2;
+    public bool IsPreviewPage => _page == 5;
+    public bool IsMeNav => _page >= 2 && _page != 5;
     private int _page;
+    private int _returnPage;
+    private Views.PreviewViewModel? _preview;
+    public Views.PreviewViewModel? Preview { get => _preview; private set => Set(ref _preview, value); }
+    public bool IsPlayerFullScreen { get => _isPlayerFullScreen; private set => Set(ref _isPlayerFullScreen, value); }
+    private bool _isPlayerFullScreen;
 
     public MainViewModel(AppServices services)
     {
@@ -311,6 +322,9 @@ public sealed class MainViewModel : BindableBase
         ShowMeCommand = new RelayCommand(() => { Go(2); RefreshLocal(); RefreshStorage(); });
         ShowQueueCommand = new RelayCommand(() => { Go(3); RefreshLocal(); });
         ShowStorageCommand = new RelayCommand(() => { Go(4); RefreshLocal(); RefreshStorage(); });
+        ShowHistoryCommand = new RelayCommand(ShowHistory);
+        ClearHistoryCommand = new RelayCommand(ClearHistory);
+        ClosePreviewCommand = new RelayCommand(ClosePreview);
         BackCommand = new RelayCommand(() => Go(2));
         ParseCommand = new RelayCommand(() => _ = ParseAsync());
         ClearCommand = new RelayCommand(Clear);
@@ -351,9 +365,11 @@ public sealed class MainViewModel : BindableBase
 
     private void Go(int page)
     {
+        if (_page == 5 && page != 5) DisposePreview();
         _page = page;
         Raise(nameof(IsHome)); Raise(nameof(IsLocal)); Raise(nameof(IsMePage));
         Raise(nameof(IsQueuePage)); Raise(nameof(IsStoragePage)); Raise(nameof(IsMeNav));
+        Raise(nameof(IsPreviewPage));
     }
 
     private void RaiseTabs()
@@ -474,12 +490,35 @@ public sealed class MainViewModel : BindableBase
         ShowPreview(new PreviewRequest(media.Name, url, isImage));
     }
 
-    private static void ShowPreview(PreviewRequest request)
+    private void ShowPreview(PreviewRequest request)
     {
-        var lifetime = Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime;
-        var window = new PreviewWindow(request);
-        if (lifetime?.MainWindow is { } owner) window.Show(owner);
-        else window.Show();
+        DisposePreview();
+        if (_page != 5) _returnPage = _page;
+        var vm = new PreviewViewModel(request);
+        vm.CloseRequested += ClosePreview;
+        vm.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(PreviewViewModel.IsFullScreen)) IsPlayerFullScreen = vm.IsFullScreen;
+        };
+        Preview = vm;
+        Go(5);
+    }
+
+    public void OpenPreview(PreviewRequest request) => ShowPreview(request);
+
+    private void ClosePreview()
+    {
+        DisposePreview();
+        Go(_returnPage);
+    }
+
+    private void DisposePreview()
+    {
+        if (Preview is not { } vm) return;
+        vm.CloseRequested -= ClosePreview;
+        Preview = null;
+        vm.Dispose();
+        IsPlayerFullScreen = false;
     }
 
     private void RebuildTasks()
@@ -503,9 +542,29 @@ public sealed class MainViewModel : BindableBase
         RecentItems.Clear();
         foreach (var url in _services.Settings.Recent) RecentItems.Add(new RecentItemViewModel(this, url));
         Raise(nameof(HasRecent));
+        Raise(nameof(RecentSummary));
     }
 
-    public void UseRecent(string url) { Url = url; _ = ParseAsync(); }
+    private void ShowHistory()
+    {
+        var lifetime = Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime;
+        var window = new Views.HistoryWindow(this);
+        if (lifetime?.MainWindow is { } owner) window.ShowDialog(owner);
+        else window.Show();
+    }
+
+    private void ClearHistory()
+    {
+        _services.Settings.ClearRecent();
+        RebuildRecent();
+    }
+
+    public void UseRecent(string url)
+    {
+        Url = url;
+        _ = ParseAsync();
+        HistoryItemPicked?.Invoke();
+    }
 
     public void CancelTask(DownloadTaskInfo task) => _services.Downloads.Cancel(task.TaskId);
     public void RetryTask(DownloadTaskInfo task) => _services.Downloads.Retry(task.TaskId);

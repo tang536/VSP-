@@ -2,7 +2,7 @@
   "platform": "desktop",
   "version": "1.0.0",
   "msi": "https://github.com/tang536/VSP-/releases/download/desktop-v1.0.0/VSP-Setup-v1.0.0.msi",
-  "size": 87521002,
+  "size": 87529194,
   "notes": "首个 Windows 桌面版：解析 / 下载队列 / 本地文件 / 存储管理，内嵌解析引擎",
   "page": "https://github.com/tang536/VSP-/releases/tag/desktop-v1.0.0"
 }

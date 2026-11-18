@@ -40,6 +40,27 @@ internal static class UiShot
         await Settle();
         Save(window, Path.Combine(dir, "6-me-light.png"), 1.0);
 
+        // 预览页：内嵌播放器 + 进度/音量/全屏控制条
+        vm.OpenPreview(new PreviewRequest("示例视频 · 内嵌播放器验收", "about:blank", false));
+        await Settle();
+        Save(window, Path.Combine(dir, "7-preview.png"), 1.0);
+        if (vm.Preview is { } previewVm)
+        {
+            previewVm.SetFullScreen(true);
+            await Settle();
+            Save(window, Path.Combine(dir, "7b-preview-fullscreen.png"), 1.0);
+            previewVm.SetFullScreen(false);
+            await Settle();
+        }
+        vm.ClosePreviewCommand.Execute(null);
+
+        // 历史解析弹窗
+        var history = new HistoryWindow(vm);
+        history.Show();
+        await Settle();
+        Save(history, Path.Combine(dir, "8-history.png"), 1.25);
+        history.Close();
+
         vm.IsDarkTheme = wasDark;
         Console.WriteLine("shot done");
     }

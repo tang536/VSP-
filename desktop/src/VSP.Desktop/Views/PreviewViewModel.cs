@@ -2,6 +2,8 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Windows.Input;
+using Avalonia;
+using Avalonia.Controls;
 using Avalonia.Threading;
 using LibVLCSharp.Shared;
 using VSP.Core;
@@ -15,21 +17,31 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
     private readonly PreviewRequest _request;
     private readonly DispatcherTimer _timer;
     private MediaPlayer? _player;
+    private Media? _media;
+    private LibVLC? _libvlc;
     private bool _seeking;
+    private bool _disposed;
     private string _error = "";
     private string _imagePath = "";
     private double _position;
+    private double _volume = 100;
+    private bool _isMuted;
+    private bool _isPlaying;
+    private bool _isFullScreen;
     private string _positionText = "00:00 / 00:00";
-    private string _playPauseText = "暂停";
 
     public event PropertyChangedEventHandler? PropertyChanged;
+    public event Action? CloseRequested;
 
     public string Title => _request.Title;
+    public string Url => _request.Url;
     public bool IsImage => _request.IsImage;
     public bool IsVideo => !_request.IsImage;
     public ICommand PlayPauseCommand { get; }
     public ICommand StopCommand { get; }
-    public ICommand MuteCommand { get; }
+    public ICommand ToggleMuteCommand { get; }
+    public ICommand CloseCommand { get; }
+    public ICommand ToggleFullScreenCommand { get; }
 
     public string Error { get => _error; private set => Set(ref _error, value); }
     public bool HasError => !string.IsNullOrEmpty(Error);
@@ -47,8 +59,36 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
         }
     }
 
+    public double Volume
+    {
+        get => _volume;
+        set
+        {
+            var v = Math.Clamp(value, 0, 100);
+            if (Set(ref _volume, v) && _player is not null)
+            {
+                try { _player.Volume = (int)Math.Round(v); } catch { }
+            }
+            if (_isMuted && v > 0) IsMuted = false;
+        }
+    }
+
+    public bool IsMuted { get => _isMuted; private set { if (Set(ref _isMuted, value)) { Raise(nameof(MuteText)); Raise(nameof(MuteIcon)); } } }
+    public string MuteText => IsMuted ? "取消静音" : "静音";
+    public Avalonia.Media.Geometry? MuteIcon =>
+        Application.Current?.FindResource(IsMuted ? "IconMute" : "IconVolume") as Avalonia.Media.Geometry;
+
+    public bool IsPlaying { get => _isPlaying; private set { if (Set(ref _isPlaying, value)) Raise(nameof(PlayPauseIcon)); } }
+    public Avalonia.Media.Geometry? PlayPauseIcon =>
+        Application.Current?.FindResource(IsPlaying ? "IconPause" : "IconPlay") as Avalonia.Media.Geometry;
+
+    public bool IsFullScreen { get => _isFullScreen; private set { if (Set(ref _isFullScreen, value)) { Raise(nameof(FullScreenText)); Raise(nameof(ShowControls)); Raise(nameof(ShowHeader)); } } }
+    public string FullScreenText => IsFullScreen ? "退出全屏" : "全屏";
+    public bool ShowControls => IsVideo && !IsFullScreen;
+    public bool ShowHeader => !IsFullScreen;
+    public void SetFullScreen(bool value) => IsFullScreen = value;
+
     public string PositionText { get => _positionText; private set => Set(ref _positionText, value); }
-    public string PlayPauseText { get => _playPauseText; private set => Set(ref _playPauseText, value); }
 
     public PreviewViewModel(PreviewRequest request)
     {
@@ -56,22 +96,38 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
         PlayPauseCommand = new RelayCommand(() =>
         {
             if (_player is null) return;
-            if (_player.IsPlaying) _player.Pause(); else _player.Play();
-            PlayPauseText = _player.IsPlaying ? "暂停" : "播放";
+            try
+            {
+                if (_player.IsPlaying) _player.Pause(); else _player.Play();
+                IsPlaying = _player.IsPlaying;
+            }
+            catch (Exception ex) { Error = "播放控制失败：" + ex.Message; }
         });
-        StopCommand = new RelayCommand(() => _player?.Stop());
-        MuteCommand = new RelayCommand(() => { if (_player is not null) _player.Mute = !_player.Mute; });
+        StopCommand = new RelayCommand(() =>
+        {
+            try { _player?.Stop(); IsPlaying = false; } catch { }
+        });
+        ToggleMuteCommand = new RelayCommand(() =>
+        {
+            if (_player is null) return;
+            try { _player.Mute = !_player.Mute; IsMuted = _player.Mute; } catch { }
+        });
+        CloseCommand = new RelayCommand(() => CloseRequested?.Invoke());
+        ToggleFullScreenCommand = new RelayCommand(() => IsFullScreen = !IsFullScreen);
 
-        _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+        _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
         _timer.Tick += (_, _) => RefreshPosition();
         _timer.Start();
     }
 
     public void ReportError(string message) => Error = message;
 
-    public void Attach(MediaPlayer player)
+    public void Attach(LibVLC libvlc, MediaPlayer player, Media media)
     {
+        _libvlc = libvlc;
         _player = player;
+        _media = media;
+        try { player.Volume = (int)Math.Round(_volume); } catch { }
         player.EncounteredError += (_, _) =>
             Error = "播放失败。可尝试更新到最新版解析引擎，或下载后用本地播放器打开。";
     }
@@ -108,20 +164,33 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
             _seeking = true;
             Position = length > 0 ? Math.Min(100, time * 100.0 / length) : 0;
             _seeking = false;
-            PositionText = $"{MediaUtil.FormatDuration(time / 1000.0)} / {MediaUtil.FormatDuration(length / 1000.0)}";
-            if (_player.IsPlaying) PlayPauseText = "暂停";
+            var timeText = time > 0 ? MediaUtil.FormatDuration(time / 1000.0) : "00:00";
+            var lengthText = length > 0 ? MediaUtil.FormatDuration(length / 1000.0) : "00:00";
+            PositionText = $"{timeText} / {lengthText}";
+            IsPlaying = _player.IsPlaying;
         }
         catch { }
     }
 
-    public void Dispose() => _timer.Stop();
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        _timer.Stop();
+        try { _player?.Stop(); } catch { }
+        _media?.Dispose();
+        _player?.Dispose();
+        _libvlc?.Dispose();
+    }
+
+    private void Raise(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 
     private bool Set<T>(ref T field, T value, [CallerMemberName] string? name = null)
     {
         if (EqualityComparer<T>.Default.Equals(field, value)) return false;
         field = value;
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
-        if (name == nameof(Error)) PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasError)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name!));
+        if (name == nameof(Error)) Raise(nameof(HasError));
         return true;
     }
 }
