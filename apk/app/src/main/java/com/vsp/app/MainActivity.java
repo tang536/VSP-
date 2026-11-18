@@ -1897,7 +1897,7 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             try {
                 String result = py.getModule("vsp").callAttr("parse", target).toString();
-                JSONObject data = new JSONObject(result);
+                JSONObject data = parseResultJson(result, target);
                 ui.post(() -> {
                     setParsing(false);
                     parsedData = data;
@@ -1932,11 +1932,39 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    /**
+     * 引擎返回的是 json.dumps 的字符串。网络抖动/风控时可能拿到空串或被截断的结果，
+     * 直接 new JSONObject 会抛「End of input at character …」这种用户看不懂的英文。
+     * 这里先做一次结构检查，失败就立刻重解析一次，仍不行再抛可读原因。
+     */
+    private JSONObject parseResultJson(String result, String target) throws Exception {
+        String text = result == null ? "" : result.trim();
+        if (text.isEmpty() || !text.startsWith("{")) {
+            text = py.getModule("vsp").callAttr("parse", target).toString().trim();
+        }
+        try {
+            return new JSONObject(text);
+        } catch (Exception first) {
+            try {
+                String retry = py.getModule("vsp").callAttr("parse", target).toString().trim();
+                return new JSONObject(retry);
+            } catch (Exception second) {
+                throw new Exception("解析结果不完整，请重试");
+            }
+        }
+    }
+
     /** Chaquopy 把 Python 异常包了一层，取最后一段真正的原因给用户看 */
     private String friendlyError(Exception e) {
         String msg = e.getMessage() == null ? e.toString() : e.getMessage();
         int idx = msg.lastIndexOf("Exception: ");
         if (idx >= 0) msg = msg.substring(idx + 11);
+        // org.json / Python 的原始报错对用户没意义，翻译成能据此操作的说法
+        if (msg.contains("End of input") || msg.contains("Unterminated")
+                || msg.contains("Expecting value") || msg.contains("Expecting ','")
+                || msg.contains("Unterminated string")) {
+            msg = "接口返回的不是有效 JSON（多为风控或网络拦截），重试一下";
+        }
         if (msg.length() > 220) msg = msg.substring(0, 220) + "…";
         return msg.trim();
     }

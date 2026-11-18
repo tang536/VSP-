@@ -1,4 +1,4 @@
-import json, os, threading, tempfile, shutil, re, time, struct, hashlib
+import json, os, threading, tempfile, shutil, re, time, struct, hashlib, gzip, zlib
 import urllib.request, urllib.parse, urllib.error, http.client
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
@@ -565,16 +565,53 @@ def _bili_ids(url):
     return None, None
 
 
+def _bili_decompress(r):
+    """B 站接口偶尔会带 Content-Encoding，未解压直接 decode 会把 JSON 变成乱码。"""
+    raw = r.read()
+    enc = (r.headers.get("Content-Encoding") or "").lower()
+    try:
+        if "gzip" in enc:
+            raw = gzip.decompress(raw)
+        elif "deflate" in enc:
+            raw = zlib.decompress(raw)
+    except Exception:
+        pass
+    return raw.decode("utf-8", "replace")
+
+
 def _bili_api(path, **params):
     q = urllib.parse.urlencode(params)
     api = "https://api.bilibili.com" + path + ("?" + q if q else "")
-    req = urllib.request.Request(api, headers={
-        "User-Agent": UA,
-        "Referer": "https://www.bilibili.com/",
-        "Accept": "application/json, text/plain, */*",
-    })
-    with urllib.request.urlopen(req, timeout=25) as r:
-        return json.loads(r.read().decode("utf-8", "replace"))
+    # 风控/运营商拦截时会返回 HTML 或空包，只读一次就 json.loads 会直接抛
+    # 「Expecting value」这类原始错误给界面。这里换 UA 重试几次，
+    # 仍拿不到 JSON 就抛出可读的中文说明（App 端会原样展示）。
+    uas = (
+        UA,
+        "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+    )
+    last = ""
+    for attempt in range(3):
+        for ua in uas:
+            try:
+                req = urllib.request.Request(api, headers={
+                    "User-Agent": ua,
+                    "Referer": "https://www.bilibili.com/",
+                    "Accept": "application/json, text/plain, */*",
+                    "Accept-Language": "zh-CN,zh;q=0.9",
+                })
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    text = _bili_decompress(r)
+                try:
+                    return json.loads(text)
+                except Exception:
+                    last = text.strip()[:80].replace("\n", " ")
+                    continue
+            except Exception as e:
+                last = str(e)[:80]
+        time.sleep(0.6 + attempt)
+    raise Exception("B 站接口没有返回 JSON（可能被风控或网络拦截），请重试："
+                    + (last or "空响应"))
 
 
 def _bilibili_parse(url):

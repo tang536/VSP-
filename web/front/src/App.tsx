@@ -42,8 +42,8 @@ type Task = {
 }
 
 const API = ''
-const VERSION = 'v1.1.8'
-const APP_VERSION_CODE = '11008'
+const VERSION = 'v1.1.9'
+const APP_VERSION_CODE = '11009'
 const GH_RELEASES = 'https://github.com/tang536/VSP-/releases'
 const GITEE_RELEASES = 'https://gitee.com/tang-rongqiang/VSP/releases'
 const APK_URL = `https://github.com/tang536/VSP-/releases/download/v${VERSION.replace(/^v/, '')}/VSP-Parse-v${VERSION.replace(/^v/, '')}.apk`
