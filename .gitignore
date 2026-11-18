@@ -46,11 +46,13 @@ web/back/obj/
 desktop/publish/
 desktop/packaging/runtime/
 desktop/packaging/cache/
-# 桌面端更新索引与安装包要入库，其它构建产物（.wixpdb 等）忽略
+# 只有更新索引入库；安装包走 GitHub Release 资产分发，不进仓库
+# （单包 ~84MB，进 git 会永久撑大历史，GitHub 也会报 GH001 大文件告警）
 !desktop/dist/
 desktop/dist/*
 !desktop/dist/latest.json
-!desktop/dist/*.msi
+desktop/dist/*.msi
+desktop/dist/*.wixpdb
 
 # ---------- Python ----------
 __pycache__/
