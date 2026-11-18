@@ -59,11 +59,12 @@ public partial class PreviewView : UserControl
         vm.PropertyChanged += OnVmPropertyChanged;
         DetachPlayer();
 
-        if (!vm.IsVideo)
+        if (vm.IsImage)
         {
             _ = vm.LoadImageAsync();
             return;
         }
+        if (vm.IsAudio) _ = vm.LoadCoverAsync();
 
         try
         {
@@ -71,7 +72,8 @@ public partial class PreviewView : UserControl
             var player = new MediaPlayer(libvlc);
             var media = new Media(libvlc, new Uri(vm.Url));
             var view = this.FindControl<VideoView>("VideoView");
-            if (view is not null) view.MediaPlayer = player;
+            // 音频只播放声音，不需要 NativeControlHost 子窗口
+            if (view is not null && !vm.IsAudio) view.MediaPlayer = player;
             vm.Attach(libvlc, player, media);
             player.Play(media);
         }

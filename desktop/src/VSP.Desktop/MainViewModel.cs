@@ -484,7 +484,8 @@ public sealed class MainViewModel : BindableBase
             if (string.IsNullOrEmpty(referer) && !string.IsNullOrEmpty(_result?.WebpageUrl))
                 referer = _result.WebpageUrl;
             var localUrl = _services.Preview.Register(format.Url, referer);
-            ShowPreview(new PreviewRequest(format.DisplayName, localUrl, false));
+            var isAudio = _result?.Audios.Contains(format) ?? false;
+            ShowPreview(new PreviewRequest(format.DisplayName, localUrl, false, isAudio, format.Thumbnail));
         }
         catch (Exception ex) { Status = "失败：无法启动预览：" + ex.Message; }
         await Task.CompletedTask;
@@ -494,8 +495,9 @@ public sealed class MainViewModel : BindableBase
     {
         await Task.CompletedTask;
         var isImage = MediaUtil.IsImage(media.Path);
+        var isAudio = !isImage && MediaUtil.IsAudio(media.Path);
         var url = isImage ? new Uri(media.Path).AbsoluteUri : _services.Preview.Register("file:///" + media.Path.Replace('\\', '/'));
-        ShowPreview(new PreviewRequest(media.Name, url, isImage));
+        ShowPreview(new PreviewRequest(media.Name, url, isImage, isAudio));
     }
 
     private void ShowPreview(PreviewRequest request)
