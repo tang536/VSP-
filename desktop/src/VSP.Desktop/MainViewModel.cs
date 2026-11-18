@@ -570,16 +570,19 @@ public sealed class MainViewModel : BindableBase
 
     private async Task CheckUpdateAsync()
     {
-        UpdateStatus = "正在检查桌面版更新…";
+        UpdateStatus = "正在检查更新…";
         try
         {
-            _update = await _services.Updates.CheckAsync();
+            var (info, reached) = await _services.Updates.CheckAsync();
+            _update = info;
             // 只显示桌面版本身的更新，App 的 APK 版本绝不参与比较。
-            UpdateStatus = _update is null
-                ? $"当前已是最新版本 {AppVersion}"
-                : $"发现新版本 v{_update.Version}：{_update.Notes}";
+            UpdateStatus = !reached
+                ? "检查更新失败：连不上更新服务器，请检查网络后重试"
+                : info is null
+                    ? $"当前已是最新版本 {AppVersion}"
+                    : $"发现新版本 v{info.Version}：{info.Notes}";
         }
-        catch (Exception ex) { UpdateStatus = "检查失败：" + ex.Message; }
+        catch (Exception ex) { UpdateStatus = "检查更新失败：" + ex.Message; }
         Raise(nameof(HasUpdate));
     }
 

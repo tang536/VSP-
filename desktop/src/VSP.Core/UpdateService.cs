@@ -30,7 +30,7 @@ public sealed class UpdateService
         _client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", RefererPolicy.UserAgent);
     }
 
-    public async Task<UpdateInfo?> CheckAsync(CancellationToken ct = default)
+    public async Task<(UpdateInfo? Update, bool Reached)> CheckAsync(CancellationToken ct = default)
     {
         // 优先级：两边的 Release 资产 > GitHub raw 索引 > Gitee raw 索引。
         // Gitee 的 raw 对大文件要登录（返回 403 large file require login for access），
@@ -43,22 +43,34 @@ public sealed class UpdateService
             (DesktopIndex, 3),
         };
 
-        var candidates = new List<(UpdateInfo Info, int Rank)>();
-        foreach (var (url, rank) in sources)
+        // 四个源并发拉取：串行的话断网时要一个接一个等超时，最坏两分钟。
+        var tasks = sources.Select(async s =>
         {
             try
             {
-                var json = await _client.GetStringAsync(url, ct);
-                var info = Parse(url, json);
-                if (info is not null) candidates.Add((info, rank));
+                var json = await _client.GetStringAsync(s.Url, ct);
+                return (Ok: true, s.Rank, Info: Parse(s.Url, json));
             }
-            catch { }
-        }
-        return candidates.Where(c => Compare(c.Info.Version, Version) > 0 && IsMsi(c.Info.DownloadUrl))
-                         .OrderByDescending(c => c.Info.Version, Comparer<string>.Create(Compare))
-                         .ThenBy(c => c.Rank)
-                         .Select(c => c.Info)
-                         .FirstOrDefault();
+            catch
+            {
+                return (Ok: false, s.Rank, Info: (UpdateInfo?)null);
+            }
+        });
+        var results = await Task.WhenAll(tasks);
+
+        var candidates = results.Where(r => r.Ok && r.Info is not null)
+                                .Select(r => (Info: r.Info!, r.Rank))
+                                .ToList();
+        var reached = results.Count(r => r.Ok);
+
+        var best = candidates.Where(c => Compare(c.Info.Version, Version) > 0 && IsMsi(c.Info.DownloadUrl))
+                             .OrderByDescending(c => c.Info.Version, Comparer<string>.Create(Compare))
+                             .ThenBy(c => c.Rank)
+                             .Select(c => c.Info)
+                             .FirstOrDefault();
+
+        // Reached=false 表示四个源全都连不上（离线 / 被墙），调用方要跟"已是最新"区分开。
+        return (best, reached > 0);
     }
 
     private static bool IsMsi(string url) =>
