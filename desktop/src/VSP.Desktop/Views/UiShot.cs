@@ -55,6 +55,18 @@ internal static class UiShot
         }
         vm.ClosePreviewCommand.Execute(null);
 
+        // 音频预览：手机端风格播放控制（进度行 + 控制行 + 音量浮层）
+        vm.OpenPreview(new PreviewRequest("示例音频 · 沉浸式预览", "about:blank", false, true, ""));
+        await Settle();
+        Save(window, Path.Combine(dir, "7c-audio.png"), 1.0);
+        if (vm.Preview is { } audioVm)
+        {
+            audioVm.ToggleVolumePopupCommand.Execute(null);
+            await Settle();
+            Save(window, Path.Combine(dir, "7d-audio-volume.png"), 1.0);
+        }
+        vm.ClosePreviewCommand.Execute(null);
+
         // 历史解析弹窗
         var history = new HistoryWindow(vm);
         history.Show();

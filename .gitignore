@@ -71,6 +71,7 @@ desktop.ini
 
 # ---------- 工具会话数据 ----------
 .workbuddy/
+.playwright-cli/
 
 # ---------- 临时文件 ----------
 *.log

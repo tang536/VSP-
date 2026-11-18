@@ -10,7 +10,8 @@ using VSP.Core;
 
 namespace VSP.Desktop.Views;
 
-public sealed record PreviewRequest(string Title, string Url, bool IsImage);
+public sealed record PreviewRequest(string Title, string Url, bool IsImage,
+    bool IsAudio = false, string CoverUrl = "");
 
 public sealed class PreviewViewModel : INotifyPropertyChanged
 {
@@ -23,12 +24,15 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
     private bool _disposed;
     private string _error = "";
     private string _imagePath = "";
+    private string _coverPath = "";
     private double _position;
     private double _volume = 100;
     private bool _isMuted;
     private bool _isPlaying;
     private bool _isFullScreen;
-    private string _positionText = "00:00 / 00:00";
+    private string _elapsedText = "00:00";
+    private string _durationText = "00:00";
+    private bool _volumePopupOpen;
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public event Action? CloseRequested;
@@ -36,16 +40,20 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
     public string Title => _request.Title;
     public string Url => _request.Url;
     public bool IsImage => _request.IsImage;
-    public bool IsVideo => !_request.IsImage;
+    public bool IsAudio => _request.IsAudio;
+    public bool IsVideo => !_request.IsImage && !_request.IsAudio;
     public ICommand PlayPauseCommand { get; }
     public ICommand StopCommand { get; }
     public ICommand ToggleMuteCommand { get; }
+    public ICommand ToggleVolumePopupCommand { get; }
     public ICommand CloseCommand { get; }
     public ICommand ToggleFullScreenCommand { get; }
 
     public string Error { get => _error; private set => Set(ref _error, value); }
     public bool HasError => !string.IsNullOrEmpty(Error);
     public string ImagePath { get => _imagePath; private set => Set(ref _imagePath, value); }
+    public string CoverPath { get => _coverPath; private set => Set(ref _coverPath, value); }
+    public bool HasCover => !string.IsNullOrEmpty(CoverPath);
 
     public double Position
     {
@@ -69,7 +77,8 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
             {
                 try { _player.Volume = (int)Math.Round(v); } catch { }
             }
-            if (_isMuted && v > 0) IsMuted = false;
+            Raise(nameof(VolumeText));
+            IsMuted = v <= 0;
         }
     }
 
@@ -84,11 +93,17 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
 
     public bool IsFullScreen { get => _isFullScreen; private set { if (Set(ref _isFullScreen, value)) { Raise(nameof(FullScreenText)); Raise(nameof(ShowControls)); Raise(nameof(ShowHeader)); } } }
     public string FullScreenText => IsFullScreen ? "退出全屏" : "全屏";
-    public bool ShowControls => IsVideo && !IsFullScreen;
+    public bool ShowControls => !IsFullScreen && !IsImage;
     public bool ShowHeader => !IsFullScreen;
     public void SetFullScreen(bool value) => IsFullScreen = value;
 
-    public string PositionText { get => _positionText; private set => Set(ref _positionText, value); }
+    // 手机端播放器：当前时间 / 总时长分列进度条两侧
+    public string ElapsedText { get => _elapsedText; private set => Set(ref _elapsedText, value); }
+    public string DurationText { get => _durationText; private set => Set(ref _durationText, value); }
+
+    // 音量浮层：默认收起，点音量图标才在图标上方展开（与手机端一致）
+    public bool IsVolumePopupOpen { get => _volumePopupOpen; private set => Set(ref _volumePopupOpen, value); }
+    public string VolumeText => $"{Math.Round(Volume)}%";
 
     public PreviewViewModel(PreviewRequest request)
     {
@@ -112,6 +127,7 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
             if (_player is null) return;
             try { _player.Mute = !_player.Mute; IsMuted = _player.Mute; } catch { }
         });
+        ToggleVolumePopupCommand = new RelayCommand(() => IsVolumePopupOpen = !IsVolumePopupOpen);
         CloseCommand = new RelayCommand(() => CloseRequested?.Invoke());
         ToggleFullScreenCommand = new RelayCommand(() => IsFullScreen = !IsFullScreen);
 
@@ -134,23 +150,41 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
 
     public async Task LoadImageAsync()
     {
+        var path = await DownloadAsync(_request.Url, "image-");
+        if (path is not null) ImagePath = path;
+    }
+
+    public async Task LoadCoverAsync()
+    {
+        var path = await DownloadAsync(_request.CoverUrl, "cover-");
+        if (path is not null)
+        {
+            CoverPath = path;
+            Raise(nameof(HasCover));
+        }
+    }
+
+    private async Task<string?> DownloadAsync(string url, string prefix)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return null;
         try
         {
             using var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = true });
-            using var req = new HttpRequestMessage(HttpMethod.Get, _request.Url);
-            RefererPolicy.Apply(req, _request.Url);
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            RefererPolicy.Apply(req, url);
             using var resp = await client.SendAsync(req);
             resp.EnsureSuccessStatusCode();
             var dir = Path.Combine(Path.GetTempPath(), "vsp-preview");
             Directory.CreateDirectory(dir);
-            var path = Path.Combine(dir, Guid.NewGuid().ToString("N") + MediaUtil.GuessExtension(_request.Url, ".jpg"));
+            var path = Path.Combine(dir, prefix + Guid.NewGuid().ToString("N") + MediaUtil.GuessExtension(url, ".jpg"));
             await using (var file = File.Create(path))
                 await (await resp.Content.ReadAsStreamAsync()).CopyToAsync(file);
-            ImagePath = path;
+            return path;
         }
         catch (Exception ex)
         {
-            Error = "图片加载失败：" + ex.Message;
+            Error = (prefix == "cover-" ? "封面加载失败：" : "图片加载失败：") + ex.Message;
+            return null;
         }
     }
 
@@ -166,7 +200,8 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
             _seeking = false;
             var timeText = time > 0 ? MediaUtil.FormatDuration(time / 1000.0) : "00:00";
             var lengthText = length > 0 ? MediaUtil.FormatDuration(length / 1000.0) : "00:00";
-            PositionText = $"{timeText} / {lengthText}";
+            ElapsedText = timeText;
+            DurationText = lengthText;
             IsPlaying = _player.IsPlaying;
         }
         catch { }
