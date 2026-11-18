@@ -1,8 +1,8 @@
 {
   "platform": "desktop",
-  "version": "1.0.0",
-  "msi": "https://github.com/tang536/VSP-/releases/download/desktop-v1.0.0/VSP-Setup-v1.0.0.msi",
-  "size": 87529194,
-  "notes": "首个 Windows 桌面版：解析 / 下载队列 / 本地文件 / 存储管理，内嵌解析引擎",
-  "page": "https://github.com/tang536/VSP-/releases/tag/desktop-v1.0.0"
+  "version": "1.0.1",
+  "msi": "https://github.com/tang536/VSP-/releases/download/desktop-v1.0.1/VSP-Setup-v1.0.1.msi",
+  "size": 87529190,
+  "notes": "播放器控制栏复刻手机端：进度行 + 控制行 + 音量浮层；解析 / 下载队列 / 本地文件 / 存储管理，内嵌解析引擎",
+  "page": "https://github.com/tang536/VSP-/releases/tag/desktop-v1.0.1"
 }

@@ -19,7 +19,7 @@ PUBLISH = DESKTOP / "publish" / "win-x64"
 WIX = DESKTOP / "tools" / "wix.exe"
 OUT = DESKTOP / "dist"
 WXS = HERE / "VSPDesktop.wxs"
-VERSION = "1.0.0.0"
+VERSION = "1.0.1.0"
 UPGRADE_CODE = "A0A1D4B2-7D6C-4B8E-9F35-1234567890AB"
 NS = "http://wixtoolset.org/schemas/v4/wxs"
 UI_NS = "http://wixtoolset.org/schemas/v4/wxs/ui"
@@ -104,7 +104,12 @@ def build_wxs(files: list[Path]) -> None:
     package = ET.SubElement(wix, q("Package"), {
         "Name": "VSP解析 桌面端", "Language": "2052", "Codepage": "936",
         "Manufacturer": "VSP", "Version": VERSION,
-        "UpgradeCode": UPGRADE_CODE, "Scope": "perUserOrMachine",
+        "UpgradeCode": UPGRADE_CODE, "ProductCode": "*", "Scope": "perUserOrMachine",
+    })
+    # 版本升级时自动卸载同 UpgradeCode 的旧版，避免 1.0.0 / 1.0.1 两个入口并存。
+    ET.SubElement(package, q("MajorUpgrade"), {
+        "Schedule": "afterInstallValidate",
+        "DowngradeErrorMessage": "已安装更新版本的 VSP 桌面端，无法降级安装。",
     })
     ET.SubElement(package, q("MediaTemplate"), {"EmbedCab": "yes", "CompressionLevel": "high"})
     ET.SubElement(package, q("Icon"), {

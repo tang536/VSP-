@@ -21,7 +21,7 @@ echo [4/4] Building MSI installer...
 "%PY%" "%ROOT%packaging\make_installer.py"
 if errorlevel 1 goto :fail
 
-echo Done: %ROOT%dist\VSP-Setup-v1.0.0.msi
+echo Done: %ROOT%dist\VSP-Setup-v1.0.1.msi
 exit /b 0
 
 :fail
