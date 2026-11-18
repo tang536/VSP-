@@ -54,6 +54,23 @@ function isDirectMedia(u: string): boolean {
 }
 
 /**
+ * 速度统一格式化。vsp 引擎上报的是字节/秒的浮点数（3399260.49），
+ * 直接拼到界面上就是那串裸数字，这里换算成 3.2 MB/s 这类可读写法。
+ */
+function fmtSpeed(v: string | number | null | undefined): string {
+  const n = typeof v === 'number' ? v : Number(String(v ?? '').trim())
+  if (!v || !isFinite(n) || n <= 0) return typeof v === 'string' && v.trim() && !isFinite(Number(v)) ? v.trim() : ''
+  const units = ['B/s', 'KB/s', 'MB/s', 'GB/s']
+  let val = n
+  let i = 0
+  while (val >= 1024 && i < units.length - 1) {
+    val /= 1024
+    i++
+  }
+  return `${val.toFixed(val < 10 && i > 0 ? 1 : 0)} ${units[i]}`
+}
+
+/**
  * 先读文本再解析 JSON。
  * 以前直接 r.json()，服务端返回空响应体（引擎被杀、服务重启、请求被截断）时
  * 浏览器会抛「Unexpected end of JSON input」，界面上就是「JSON 意外结束」。
@@ -356,7 +373,7 @@ function App() {
                         {rowTask && (
                           <span className={`row-state ${rowTask.status}`}>
                             {rowTask.status === 'running' &&
-                              `${rowTask.progress.toFixed(0)}%${rowTask.speed ? ' · ' + rowTask.speed : ''}`}
+                              `${rowTask.progress.toFixed(0)}%${fmtSpeed(rowTask.speed) ? ' · ' + fmtSpeed(rowTask.speed) : ''}`}
                             {rowTask.status === 'done' && '已存入下载目录'}
                             {rowTask.status === 'error' && (rowTask.error || '失败')}
                           </span>
@@ -413,7 +430,7 @@ function App() {
                 <div className="task-info">
                   <span className="task-title" title={t.title}>{t.title}</span>
                   <span className="task-status">
-                    {t.status === 'running' && `${t.progress.toFixed(0)}% ${t.speed}`}
+                    {t.status === 'running' && `${t.progress.toFixed(0)}% ${fmtSpeed(t.speed)}`}
                     {t.status === 'done' && '完成'}
                     {t.status === 'error' && (t.error || '失败')}
                   </span>
