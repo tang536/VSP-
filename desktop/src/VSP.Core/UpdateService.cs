@@ -32,19 +32,32 @@ public sealed class UpdateService
 
     public async Task<UpdateInfo?> CheckAsync(CancellationToken ct = default)
     {
-        var candidates = new List<UpdateInfo>();
-        foreach (var url in new[] { GithubIndex, DesktopIndex, GiteeApi, GithubApi })
+        // 优先级：两边的 Release 资产 > GitHub raw 索引 > Gitee raw 索引。
+        // Gitee 的 raw 对大文件要登录（返回 403 large file require login for access），
+        // 所以只在没有别的位置可取包时才落到它。
+        var sources = new (string Url, int Rank)[]
+        {
+            (GiteeApi, 0),
+            (GithubApi, 1),
+            (GithubIndex, 2),
+            (DesktopIndex, 3),
+        };
+
+        var candidates = new List<(UpdateInfo Info, int Rank)>();
+        foreach (var (url, rank) in sources)
         {
             try
             {
                 var json = await _client.GetStringAsync(url, ct);
                 var info = Parse(url, json);
-                if (info is not null) candidates.Add(info);
+                if (info is not null) candidates.Add((info, rank));
             }
             catch { }
         }
-        return candidates.Where(i => Compare(i.Version, Version) > 0 && IsMsi(i.DownloadUrl))
-                         .OrderByDescending(i => i.Version, Comparer<string>.Create(Compare))
+        return candidates.Where(c => Compare(c.Info.Version, Version) > 0 && IsMsi(c.Info.DownloadUrl))
+                         .OrderByDescending(c => c.Info.Version, Comparer<string>.Create(Compare))
+                         .ThenBy(c => c.Rank)
+                         .Select(c => c.Info)
                          .FirstOrDefault();
     }
 
@@ -125,7 +138,33 @@ public sealed class UpdateService
         using var client = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
         client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", RefererPolicy.UserAgent);
 
-        var url = info.DownloadUrl;
+        // 主源拿不到时自动换另一个镜像再试一次（Gitee raw 对大文件会 403）。
+        var urls = new List<string> { info.DownloadUrl };
+        var name = info.DownloadUrl.Split('?')[0].Split('/').LastOrDefault() ?? "";
+        if (name.EndsWith(".msi", StringComparison.OrdinalIgnoreCase))
+        {
+            var mirror = (info.DownloadUrl.Contains("gitee", StringComparison.OrdinalIgnoreCase) ? GithubDist : GiteeDist) + name;
+            if (!urls.Contains(mirror)) urls.Add(mirror);
+        }
+
+        Exception? last = null;
+        foreach (var url in urls)
+        {
+            try
+            {
+                await DownloadOneAsync(client, url, target, progress, info, ct);
+                return;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { last = ex; }
+        }
+        throw last ?? new Exception("下载失败");
+    }
+
+    private static async Task DownloadOneAsync(HttpClient client, string startUrl, string target,
+        IProgress<double> progress, UpdateInfo info, CancellationToken ct)
+    {
+        var url = startUrl;
         for (int hop = 0; hop < 8; hop++)
         {
             using var req = new HttpRequestMessage(HttpMethod.Get, url);
