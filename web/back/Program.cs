@@ -368,7 +368,21 @@ app.MapGet("/api/proxy", async (HttpRequest request, HttpResponse response) =>
 if (Directory.Exists(wwwroot))
 {
     var fileProvider = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(wwwroot);
-    var opts = new StaticFileOptions { FileProvider = fileProvider };
+    // index.html 必须每次回源：否则浏览器继续用旧的 index.html 去加载旧 JS，
+    // 改了前端却看不到效果（表现为「修了还报同样的错」）。带哈希的 assets 可以长缓存。
+    var opts = new StaticFileOptions
+    {
+        FileProvider = fileProvider,
+        OnPrepareResponse = ctx =>
+        {
+            if (ctx.File.Name.EndsWith(".html", StringComparison.OrdinalIgnoreCase))
+            {
+                ctx.Context.Response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
+                ctx.Context.Response.Headers["Pragma"] = "no-cache";
+                ctx.Context.Response.Headers["Expires"] = "0";
+            }
+        }
+    };
     app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = fileProvider });
     app.UseStaticFiles(opts);
     // SPA fallback
@@ -380,6 +394,7 @@ if (Directory.Exists(wwwroot))
             return;
         }
         context.Response.ContentType = "text/html";
+        context.Response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
         await context.Response.SendFileAsync(Path.Combine(wwwroot, "index.html"));
     });
 }
