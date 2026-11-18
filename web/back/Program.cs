@@ -110,6 +110,10 @@ app.MapPost("/api/parse", async (ParseReq req, YtDlpRunner yt, ILoggerFactory lo
         try
         {
             var json = await VspBridge.ParseAsync(req.Url);
+            // 引擎偶发不吐出结果（进程被系统杀掉、输出被截断）时会返回空串，
+            // 直接 200 + 空响应体，前端 r.json() 会抛「Unexpected end of JSON input」。
+            if (string.IsNullOrWhiteSpace(json) || !json.TrimStart().StartsWith("{"))
+                throw new Exception("解析引擎没有返回结果，请重试");
             return Results.Text(json, "application/json");
         }
         catch (Exception ex2)

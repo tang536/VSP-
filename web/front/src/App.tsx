@@ -53,6 +53,24 @@ function isDirectMedia(u: string): boolean {
   return !!u && !/\.m3u8(\?|$)/i.test(u) && !/^https?:\/\/[^/]+\/api\/proxy/i.test(u)
 }
 
+/**
+ * 先读文本再解析 JSON。
+ * 以前直接 r.json()，服务端返回空响应体（引擎被杀、服务重启、请求被截断）时
+ * 浏览器会抛「Unexpected end of JSON input」，界面上就是「JSON 意外结束」。
+ * 这里把空响应和非 JSON 都翻译成用户能看懂、能据此操作的提示。
+ */
+async function readJson(r: Response): Promise<any> {
+  const text = await r.text()
+  if (!text.trim()) {
+    throw new Error('服务端没有返回数据（解析引擎可能超时或服务刚重启），请重试')
+  }
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new Error(text.trim().slice(0, 200))
+  }
+}
+
 function fmtDuration(s: number): string {
   if (!s) return ''
   const h = Math.floor(s / 3600)
@@ -147,17 +165,26 @@ function App() {
     setError('')
     setResult(null)
     setParsing(true)
-    try {
-      const r = await fetch(`${API}/api/parse`, {
+    const ask = () =>
+      fetch(`${API}/api/parse`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url }),
       })
-      const data = await r.json()
-      if (!r.ok) throw new Error(data.detail || '解析失败')
+    try {
+      let r = await ask()
+      let data: any
+      try {
+        data = await readJson(r)
+      } catch (first: any) {
+        // 空响应/被截断：多半是那一刻引擎没吐出结果或服务刚重启，自动重发一次
+        r = await ask()
+        data = await readJson(r)
+      }
+      if (!r.ok) throw new Error(data?.detail || '解析失败')
       setResult(data)
     } catch (e: any) {
-      setError(e.message)
+      setError(e?.message || '解析失败')
     } finally {
       setParsing(false)
     }
@@ -186,8 +213,8 @@ function App() {
           saveDir,
         }),
       })
-      const data = await r.json().catch(() => ({}))
-      if (!r.ok) throw new Error(data.detail || '下载启动失败')
+      const data = await readJson(r)
+      if (!r.ok) throw new Error(data?.detail || '下载启动失败')
       setRowTasks(m => ({ ...m, [key]: data.taskId }))
       setToast('已开始下载，进度就在这一行')
       refreshTasks()
