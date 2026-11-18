@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+    <ApplicationIcon>..\..\packaging\app.ico</ApplicationIcon>
+    <!-- The installer targets Windows x64 only; shipping three VLC runtimes triples the size. -->
+    <VlcWindowsX86Enabled>false</VlcWindowsX86Enabled>
+    <VlcWindowsArm64Enabled>false</VlcWindowsArm64Enabled>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.3" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.3" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.3" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.1.3" />
+    <PackageReference Include="LibVLCSharp.Avalonia" Version="3.10.2" />
+    <PackageReference Include="VideoLAN.LibVLC.Windows" Version="3.0.24" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AvaloniaResource Include="Assets\app.png" />
+    <ProjectReference Include="..\VSP.Core\VSP.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 与 Android / Web 端同源的解析引擎，随桌面端一起发布 -->
+    <None Include="..\..\..\apk\app\src\main\python\vsp.py" Link="python\vsp.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\..\web\back\python\vsp_cli.py" Link="python\vsp_cli.py" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

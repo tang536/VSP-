@@ -42,6 +42,16 @@ web/back/obj/
 *.user
 *.suo
 
+# ---------- Windows 桌面端 ----------
+desktop/publish/
+desktop/packaging/runtime/
+desktop/packaging/cache/
+# 桌面端更新索引与安装包要入库，其它构建产物（.wixpdb 等）忽略
+!desktop/dist/
+desktop/dist/*
+!desktop/dist/latest.json
+!desktop/dist/*.msi
+
 # ---------- Python ----------
 __pycache__/
 *.py[cod]

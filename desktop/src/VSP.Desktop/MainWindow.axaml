@@ -1,0 +1,68 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="clr-namespace:VSP.Desktop.Views"
+        xmlns:vm="clr-namespace:VSP.Desktop"
+        x:Class="VSP.Desktop.MainWindow"
+        x:DataType="vm:MainViewModel"
+        Title="VSP 解析"
+        Width="1080" Height="620" MinWidth="900" MinHeight="560"
+        WindowStartupLocation="CenterScreen"
+        Background="{DynamicResource AppBackground}">
+    <Grid RowDefinitions="56,*">
+        <!-- 顶栏：与 Web 端 topbar 同一结构（橙色 V 品牌 + 导航 + 外观） -->
+        <Border Grid.Row="0" Background="{DynamicResource Surface}"
+                BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1">
+            <Grid>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
+                    <StackPanel Orientation="Horizontal" Margin="24,0,24,0" Spacing="10" VerticalAlignment="Center">
+                        <Border Width="26" Height="26" CornerRadius="2" Background="{DynamicResource Accent}">
+                            <TextBlock Text="V" Foreground="{DynamicResource OnAccent}" FontSize="15"
+                                       FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <TextBlock Text="VSP 解析" Classes="h2" VerticalAlignment="Center" />
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Stretch">
+                        <Button Classes="nav" Classes.active="{Binding IsHome}" Command="{Binding ShowHomeCommand}">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <PathIcon Data="{StaticResource IconHome}" VerticalAlignment="Center" />
+                                <TextBlock Text="首页" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Button>
+                        <Button Classes="nav" Classes.active="{Binding IsLocal}" Command="{Binding ShowLocalCommand}">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <PathIcon Data="{StaticResource IconFolder}" VerticalAlignment="Center" />
+                                <TextBlock Text="本地文件" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Button>
+                        <Button Classes="nav" Classes.active="{Binding IsMeNav}" Command="{Binding ShowMeCommand}">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <PathIcon Data="{StaticResource IconUser}" VerticalAlignment="Center" />
+                                <TextBlock Text="我的" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
+                </StackPanel>
+
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center"
+                            Spacing="10" Margin="0,0,24,0">
+                    <TextBlock Text="v1.0.0" Classes="dim" VerticalAlignment="Center" />
+                    <Button Classes="ghost small" Command="{Binding ToggleThemeCommand}">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <PathIcon Data="{Binding ThemeIcon}" />
+                            <TextBlock Text="{Binding ThemeText}" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="1">
+            <views:HomeView DataContext="{Binding}" IsVisible="{Binding IsHome}" />
+            <views:LocalView DataContext="{Binding}" IsVisible="{Binding IsLocal}" />
+            <views:MeView DataContext="{Binding}" IsVisible="{Binding IsMePage}" />
+            <views:QueueView DataContext="{Binding}" IsVisible="{Binding IsQueuePage}" />
+            <views:StorageView DataContext="{Binding}" IsVisible="{Binding IsStoragePage}" />
+        </Grid>
+    </Grid>
+</Window>

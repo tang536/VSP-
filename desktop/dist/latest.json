@@ -1,0 +1,8 @@
+{
+  "platform": "desktop",
+  "version": "1.0.0",
+  "msi": "VSP-Setup-v1.0.0.msi",
+  "size": 87525098,
+  "notes": "首个 Windows 安装包版本",
+  "page": "https://github.com/tang536/VSP-/releases"
+}

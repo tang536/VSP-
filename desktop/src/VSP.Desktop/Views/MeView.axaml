@@ -1,0 +1,176 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:VSP.Desktop"
+             x:Class="VSP.Desktop.Views.MeView"
+             x:DataType="vm:MainViewModel"
+             Background="{DynamicResource AppBackground}">
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+        <Grid Margin="28,24" MaxWidth="1024">
+            <StackPanel Spacing="0">
+                <!-- 本地用户，对应 App 端 me 页头像卡片 -->
+                <Border Classes="card" Padding="18">
+                    <StackPanel Orientation="Horizontal" Spacing="16">
+                        <Border Width="56" Height="56" Background="{DynamicResource Accent}" CornerRadius="2">
+                            <TextBlock Text="V" FontSize="28" FontWeight="Bold" Foreground="{DynamicResource OnAccent}"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <StackPanel VerticalAlignment="Center" Spacing="3">
+                            <TextBlock Text="本地用户" Classes="h1" />
+                            <TextBlock Text="{Binding AppVersion}" Classes="sub" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- 下载：入口行，具体任务在新页面 -->
+                <TextBlock Text="下载" Classes="h2" Margin="2,24,0,8" />
+                <Border Classes="card">
+                    <Button Classes="row" Command="{Binding ShowQueueCommand}">
+                        <Grid ColumnDefinitions="Auto,*,Auto">
+                            <PathIcon Grid.Column="0" Data="{StaticResource IconQueue}"
+                                      Foreground="{DynamicResource InkDim}" VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="1" Text="下载队列" Classes="rowLabel" />
+                            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding TaskSummary}" Classes="rowValue" />
+                                <PathIcon Data="{StaticResource IconChevron}" Width="12" Height="12"
+                                          Classes="rowArrow" />
+                            </StackPanel>
+                        </Grid>
+                    </Button>
+                </Border>
+
+                <!-- 设置 -->
+                <TextBlock Text="设置" Classes="h2" Margin="2,24,0,8" />
+                <Border Classes="card">
+                    <StackPanel>
+                        <Button Classes="row" Command="{Binding OpenDownloadDirCommand}">
+                            <Grid ColumnDefinitions="Auto,*,Auto">
+                                <PathIcon Grid.Column="0" Data="{StaticResource IconFolder}"
+                                          Foreground="{DynamicResource InkDim}" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="下载目录" Classes="rowLabel" />
+                                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding DownloadDir}" Classes="rowValue" MaxWidth="420" />
+                                    <PathIcon Data="{StaticResource IconExternal}" Width="12" Height="12"
+                                              Classes="rowArrow" Margin="0" />
+                                </StackPanel>
+                            </Grid>
+                        </Button>
+
+                        <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1" />
+
+                        <Border Padding="16,0" MinHeight="50">
+                            <Grid ColumnDefinitions="Auto,*,Auto">
+                                <PathIcon Grid.Column="0" Data="{Binding ThemeIcon}"
+                                          Foreground="{DynamicResource InkDim}" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="深色模式" Classes="rowLabel" />
+                                <!-- 自绘开关：Fluent 默认是蓝色，跟品牌橙不搭，这里直接用调色板 -->
+                                <Button Grid.Column="2" Command="{Binding ToggleThemeCommand}"
+                                        Background="Transparent" BorderThickness="0" Padding="0"
+                                        VerticalAlignment="Center" Cursor="Hand">
+                                    <Panel>
+                                        <Border Width="40" Height="22" CornerRadius="11"
+                                                Background="{DynamicResource Accent}"
+                                                IsVisible="{Binding IsDarkTheme}">
+                                            <Ellipse Width="16" Height="16" Fill="{DynamicResource OnAccent}"
+                                                     HorizontalAlignment="Right" Margin="0,0,3,0" />
+                                        </Border>
+                                        <Border Width="40" Height="22" CornerRadius="11"
+                                                Background="{DynamicResource Surface2}"
+                                                BorderBrush="{DynamicResource Line}" BorderThickness="1"
+                                                IsVisible="{Binding !IsDarkTheme}">
+                                            <Ellipse Width="14" Height="14" Fill="{DynamicResource InkDim}"
+                                                     HorizontalAlignment="Left" Margin="4,0,0,0" />
+                                        </Border>
+                                    </Panel>
+                                </Button>
+                            </Grid>
+                        </Border>
+
+                        <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1" />
+
+                        <Button Classes="row" Command="{Binding ShowStorageCommand}">
+                            <Grid ColumnDefinitions="Auto,*,Auto">
+                                <PathIcon Grid.Column="0" Data="{StaticResource IconImage}"
+                                          Foreground="{DynamicResource InkDim}" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="存储空间" Classes="rowLabel" />
+                                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding StorageTotalText}" Classes="rowValue" />
+                                    <PathIcon Data="{StaticResource IconChevron}" Width="12" Height="12"
+                                              Classes="rowArrow" />
+                                </StackPanel>
+                            </Grid>
+                        </Button>
+                    </StackPanel>
+                </Border>
+
+                <!-- 关于 -->
+                <TextBlock Text="关于" Classes="h2" Margin="2,24,0,8" />
+                <Border Classes="card">
+                    <StackPanel>
+                        <Button Classes="row" Command="{Binding CheckUpdateCommand}">
+                            <Grid ColumnDefinitions="Auto,*,Auto">
+                                <PathIcon Grid.Column="0" Data="{StaticResource IconRefresh}"
+                                          Foreground="{DynamicResource InkDim}" VerticalAlignment="Center" />
+                                <StackPanel Grid.Column="1" Margin="14,0,16,0" Spacing="2" VerticalAlignment="Center">
+                                    <TextBlock Text="检查更新" FontSize="14" Foreground="{DynamicResource Ink}" />
+                                    <TextBlock Text="{Binding UpdateStatus}" Classes="sub" TextTrimming="CharacterEllipsis"
+                                               MaxLines="1" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding AppVersion}" Classes="rowValue" />
+                                    <PathIcon Data="{StaticResource IconChevron}" Width="12" Height="12"
+                                              Classes="rowArrow" />
+                                </StackPanel>
+                            </Grid>
+                        </Button>
+
+                        <ProgressBar Classes="bar" Value="{Binding UpdateProgress}" Maximum="100"
+                                     IsVisible="{Binding IsUpdating}" />
+
+                        <StackPanel Orientation="Horizontal" Spacing="8" Margin="16,0,16,12"
+                                    IsVisible="{Binding HasUpdate}">
+                            <Button Classes="primary small" Command="{Binding DownloadUpdateCommand}">
+                                <StackPanel Orientation="Horizontal" Spacing="5">
+                                    <PathIcon Data="{StaticResource IconDownload}" Width="13" Height="13" />
+                                    <TextBlock Text="下载更新" FontSize="12" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </Button>
+                        </StackPanel>
+
+                        <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1" />
+
+                        <Button Classes="row" Command="{Binding OpenGiteeCommand}">
+                            <Grid ColumnDefinitions="Auto,*,Auto">
+                                <PathIcon Grid.Column="0" Data="{StaticResource IconExternal}"
+                                          Foreground="{DynamicResource InkDim}" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="Gitee 仓库" Classes="rowLabel" />
+                                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+                                    <TextBlock Text="打开" Classes="rowValue" />
+                                    <PathIcon Data="{StaticResource IconChevron}" Width="12" Height="12"
+                                              Classes="rowArrow" />
+                                </StackPanel>
+                            </Grid>
+                        </Button>
+
+                        <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1" />
+
+                        <Button Classes="row" Command="{Binding OpenGithubCommand}">
+                            <Grid ColumnDefinitions="Auto,*,Auto">
+                                <PathIcon Grid.Column="0" Data="{StaticResource IconExternal}"
+                                          Foreground="{DynamicResource InkDim}" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="GitHub 仓库" Classes="rowLabel" />
+                                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+                                    <TextBlock Text="打开" Classes="rowValue" />
+                                    <PathIcon Data="{StaticResource IconChevron}" Width="12" Height="12"
+                                              Classes="rowArrow" />
+                                </StackPanel>
+                            </Grid>
+                        </Button>
+                    </StackPanel>
+                </Border>
+
+                <TextBlock Text="解析引擎与 App / Web 同源 · 基于 yt-dlp" Classes="dim"
+                           HorizontalAlignment="Center" Margin="0,22,0,12" />
+            </StackPanel>
+        </Grid>
+    </ScrollViewer>
+</UserControl>

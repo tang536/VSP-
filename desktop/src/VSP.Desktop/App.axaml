@@ -1,0 +1,213 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="VSP.Desktop.App">
+    <Application.Resources>
+        <!-- 与 Web 端 SVG 图标同形的 24x24 图标；PathIcon 直接引用 -->
+        <StreamGeometry x:Key="IconHome">M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z</StreamGeometry>
+        <StreamGeometry x:Key="IconQueue">M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z</StreamGeometry>
+        <StreamGeometry x:Key="IconFolder">M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z</StreamGeometry>
+        <StreamGeometry x:Key="IconUser">M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z</StreamGeometry>
+        <StreamGeometry x:Key="IconSun">M12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zM2 13h2c.55 0 1-.45 1-1s-.45-1-1-1H2c-.55 0-1 .45-1 1s.45 1 1 1zm18 0h2c.55 0 1-.45 1-1s-.45-1-1-1h-2c-.55 0-1 .45-1 1s.45 1 1 1zM11 2v2c0 .55.45 1 1 1s1-.45 1-1V2c0-.55-.45-1-1-1s-1 .45-1 1zm0 18v2c0 .55.45 1 1 1s1-.45 1-1v-2c0-.55-.45-1-1-1s-1 .45-1 1zM5.99 4.58c-.39-.39-1.03-.39-1.41 0-.39.39-.39 1.03 0 1.41l1.06 1.06c.39.39 1.03.39 1.41 0s.39-1.03 0-1.41L5.99 4.58zm12.37 12.37c-.39-.39-1.03-.39-1.41 0-.39.39-.39 1.03 0 1.41l1.06 1.06c.39.39 1.03.39 1.41 0 .39-.39.39-1.03 0-1.41l-1.06-1.06zm1.06-10.96c.39-.39.39-1.03 0-1.41-.39-.39-1.03-.39-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06zM7.05 18.36c.39-.39.39-1.03 0-1.41-.39-.39-1.03-.39-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06z</StreamGeometry>
+        <StreamGeometry x:Key="IconMoon">M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z</StreamGeometry>
+        <StreamGeometry x:Key="IconSearch">M15.5 14h-.79l-.28-.27a6.5 6.5 0 1 0-.7.7l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0A4.5 4.5 0 1 1 14 9.5 4.5 4.5 0 0 1 9.5 14z</StreamGeometry>
+        <StreamGeometry x:Key="IconClose">M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z</StreamGeometry>
+        <StreamGeometry x:Key="IconRefresh">M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z</StreamGeometry>
+        <StreamGeometry x:Key="IconDownload">M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z</StreamGeometry>
+        <StreamGeometry x:Key="IconPlay">M8 5v14l11-7z</StreamGeometry>
+        <StreamGeometry x:Key="IconTrash">M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z</StreamGeometry>
+        <StreamGeometry x:Key="IconExternal">M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z</StreamGeometry>
+        <StreamGeometry x:Key="IconImage">M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z</StreamGeometry>
+        <StreamGeometry x:Key="IconBack">M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z</StreamGeometry>
+        <StreamGeometry x:Key="IconChevron">M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z</StreamGeometry>
+    </Application.Resources>
+    <Application.Styles>
+        <FluentTheme />
+
+        <!-- 与 Web 端 App.css / Android 端一致的品牌样式，颜色全部走 DynamicResource，切换主题即时生效 -->
+        <Style Selector="TextBlock.h1">
+            <Setter Property="FontSize" Value="20" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="{DynamicResource Ink}" />
+        </Style>
+        <Style Selector="TextBlock.h2">
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="{DynamicResource Ink}" />
+        </Style>
+        <Style Selector="TextBlock.sub">
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Foreground" Value="{DynamicResource InkDim}" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+        <Style Selector="TextBlock.dim">
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Foreground" Value="{DynamicResource InkDim}" />
+        </Style>
+        <Style Selector="TextBlock.accent">
+            <Setter Property="Foreground" Value="{DynamicResource Accent}" />
+        </Style>
+
+        <Style Selector="Border.card">
+            <Setter Property="Background" Value="{DynamicResource Surface}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource Line}" />
+            <Setter Property="BorderThickness" Value="1" />
+        </Style>
+        <Style Selector="Border.chip">
+            <Setter Property="Background" Value="{DynamicResource Surface2}" />
+            <Setter Property="CornerRadius" Value="2" />
+            <Setter Property="Padding" Value="3,8" />
+        </Style>
+        <Style Selector="Border.error-box">
+            <Setter Property="Background" Value="{DynamicResource DangerSoft}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource Danger}" />
+            <Setter Property="BorderThickness" Value="3,0,0,0" />
+            <Setter Property="Padding" Value="12,10" />
+        </Style>
+
+        <Style Selector="Button.primary">
+            <Setter Property="Background" Value="{DynamicResource Accent}" />
+            <Setter Property="Foreground" Value="{DynamicResource OnAccent}" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="CornerRadius" Value="2" />
+            <Setter Property="Height" Value="42" />
+            <Setter Property="Padding" Value="22,0" />
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Cursor" Value="Hand" />
+        </Style>
+        <Style Selector="Button.primary:pointerover /template/ ContentPresenter">
+            <Setter Property="Background" Value="{DynamicResource AccentPress}" />
+        </Style>
+        <Style Selector="Button.primary:disabled /template/ ContentPresenter">
+            <Setter Property="Background" Value="{DynamicResource Surface2}" />
+            <Setter Property="Foreground" Value="{DynamicResource InkDim}" />
+        </Style>
+        <Style Selector="Button.primary.small">
+            <Setter Property="Height" Value="30" />
+            <Setter Property="Padding" Value="14,0" />
+            <Setter Property="FontSize" Value="13" />
+        </Style>
+
+        <Style Selector="Button.ghost">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="{DynamicResource Ink}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource Line}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="2" />
+            <Setter Property="Height" Value="32" />
+            <Setter Property="Padding" Value="14,0" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="Cursor" Value="Hand" />
+        </Style>
+        <Style Selector="Button.ghost:pointerover /template/ ContentPresenter">
+            <Setter Property="BorderBrush" Value="{DynamicResource InkDim}" />
+        </Style>
+        <Style Selector="Button.ghost.small">
+            <Setter Property="Height" Value="28" />
+            <Setter Property="Padding" Value="10,0" />
+            <Setter Property="FontSize" Value="12" />
+        </Style>
+
+        <Style Selector="Button.nav">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="{DynamicResource InkDim}" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0,0,0,2" />
+            <Setter Property="Padding" Value="16,18" />
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="Cursor" Value="Hand" />
+        </Style>
+        <Style Selector="Button.nav.active">
+            <Setter Property="Foreground" Value="{DynamicResource Accent}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource Accent}" />
+        </Style>
+
+        <Style Selector="Button.tab">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="{DynamicResource InkDim}" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0,0,0,2" />
+            <Setter Property="Padding" Value="18,10" />
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="Cursor" Value="Hand" />
+        </Style>
+        <Style Selector="Button.tab.active">
+            <Setter Property="Foreground" Value="{DynamicResource Ink}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource Accent}" />
+        </Style>
+
+        <!-- 设置项整行：必须显式 Stretch，否则 Fluent 的 Button 会收缩到内容宽度，
+             右侧取值就贴到标题上（"下载队列暂无任务"那种粘连） -->
+        <Style Selector="Button.row">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="CornerRadius" Value="0" />
+            <Setter Property="Padding" Value="16,0" />
+            <Setter Property="MinHeight" Value="50" />
+            <Setter Property="HorizontalAlignment" Value="Stretch" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Cursor" Value="Hand" />
+        </Style>
+        <Style Selector="Button.row:pointerover /template/ ContentPresenter">
+            <Setter Property="Background" Value="{DynamicResource Surface2}" />
+        </Style>
+        <Style Selector="Button.row:pressed /template/ ContentPresenter">
+            <Setter Property="Background" Value="{DynamicResource Surface2}" />
+        </Style>
+
+        <!-- 设置项行内文字：左侧标题、右侧取值 -->
+        <Style Selector="TextBlock.rowLabel">
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="Foreground" Value="{DynamicResource Ink}" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Margin" Value="14,0,16,0" />
+        </Style>
+        <Style Selector="TextBlock.rowValue">
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Foreground" Value="{DynamicResource InkDim}" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+        </Style>
+        <Style Selector="TextBlock.rowArrow">
+            <Setter Property="Foreground" Value="{DynamicResource InkDim}" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Margin" Value="6,0,0,0" />
+        </Style>
+
+        <Style Selector="TextBox.url">            <Setter Property="Background" Value="{DynamicResource Surface}" />
+            <Setter Property="Foreground" Value="{DynamicResource Ink}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource Line}" />
+            <Setter Property="Height" Value="42" />
+            <Setter Property="FontSize" Value="15" />
+            <Setter Property="CornerRadius" Value="2" />
+        </Style>
+        <Style Selector="ProgressBar.bar">
+            <Setter Property="Height" Value="4" />
+            <Setter Property="Foreground" Value="{DynamicResource Accent}" />
+            <Setter Property="Background" Value="{DynamicResource Surface2}" />
+        </Style>
+
+        <!-- 所有按钮内容垂直居中，避免文字贴在按钮上沿 -->
+        <Style Selector="Button">
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+        </Style>
+        <Style Selector="PathIcon">
+            <Setter Property="Width" Value="16" />
+            <Setter Property="Height" Value="16" />
+        </Style>
+        <Style Selector="Button.nav PathIcon">
+            <Setter Property="Foreground" Value="{DynamicResource InkDim}" />
+        </Style>
+        <Style Selector="Button.nav.active PathIcon">
+            <Setter Property="Foreground" Value="{DynamicResource Accent}" />
+        </Style>
+        <Style Selector="Button.primary PathIcon">
+            <Setter Property="Foreground" Value="{DynamicResource OnAccent}" />
+        </Style>
+        <Style Selector="Button.ghost PathIcon">
+            <Setter Property="Foreground" Value="{DynamicResource InkDim}" />
+        </Style>
+    </Application.Styles>
+</Application>

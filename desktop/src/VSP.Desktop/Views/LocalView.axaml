@@ -1,0 +1,58 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:VSP.Desktop"
+             x:Class="VSP.Desktop.Views.LocalView"
+             x:DataType="vm:MainViewModel"
+             Background="{DynamicResource AppBackground}">
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+        <Grid Margin="28,24" MaxWidth="1024">
+            <StackPanel>
+            <Grid ColumnDefinitions="*,Auto,Auto">
+                <StackPanel Spacing="4">
+                    <TextBlock Text="本地文件" Classes="h1" />
+                    <TextBlock Text="{Binding DownloadDir}" Classes="sub" />
+                </StackPanel>
+                <Button Grid.Column="1" Classes="ghost" Margin="0,0,8,0" Command="{Binding OpenDownloadDirCommand}">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <PathIcon Data="{StaticResource IconFolder}" />
+                        <TextBlock Text="打开目录" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+                <Button Grid.Column="2" Classes="ghost" Command="{Binding RefreshLocalCommand}">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <PathIcon Data="{StaticResource IconRefresh}" />
+                        <TextBlock Text="刷新" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+            </Grid>
+
+            <TextBlock Text="{Binding LocalSummary}" Classes="dim" Margin="0,18,0,8" />
+            <TextBlock Text="下载目录里还没有媒体文件" Classes="dim" HorizontalAlignment="Center" Margin="0,60,0,0"
+                       IsVisible="{Binding HasNoLocal}" />
+
+            <ItemsControl ItemsSource="{Binding LocalItems}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="vm:LocalItemViewModel">
+                        <Border Classes="card" Padding="14,12" Margin="0,0,0,6">
+                            <Grid ColumnDefinitions="*,Auto,Auto,Auto" ColumnSpacing="14">
+                                <TextBlock Grid.Column="0" Text="{Binding Name}" Classes="h2"
+                                           TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="{Binding SizeText}" Classes="dim" Width="110"
+                                           TextAlignment="Right" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="2" Text="{Binding ModifiedText}" Classes="dim" Width="130"
+                                           TextAlignment="Right" VerticalAlignment="Center" />
+                                <Button Grid.Column="3" Classes="ghost small" Command="{Binding PreviewCommand}">
+                                    <StackPanel Orientation="Horizontal" Spacing="4">
+                                        <PathIcon Data="{StaticResource IconPlay}" Width="12" Height="12" />
+                                        <TextBlock Text="预览" FontSize="12" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </Button>
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </StackPanel>
+        </Grid>
+    </ScrollViewer>
+</UserControl>

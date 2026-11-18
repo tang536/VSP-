@@ -1,0 +1,160 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:VSP.Desktop"
+             xmlns:views="clr-namespace:VSP.Desktop.Views"
+             x:Class="VSP.Desktop.Views.HomeView"
+             x:DataType="vm:MainViewModel"
+             Background="{DynamicResource AppBackground}">
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+        <Grid Margin="28,24" MaxWidth="1024">
+            <StackPanel Spacing="0">
+                <!-- 与 Web 首页一致的解析框：按钮固定在右侧，输入框自适应 -->
+                <DockPanel LastChildFill="True">
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Spacing="8" Margin="8,0,0,0">
+                        <Button Classes="primary" Command="{Binding ParseCommand}">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <PathIcon Data="{StaticResource IconSearch}" VerticalAlignment="Center" />
+                                <TextBlock Text="解析" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Button>
+                        <Button Classes="ghost" Height="42" Command="{Binding ClearCommand}">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <PathIcon Data="{StaticResource IconClose}" VerticalAlignment="Center" />
+                                <TextBlock Text="清空" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
+                    <TextBox x:Name="UrlBox" Classes="url" Text="{Binding Url}"
+                             PlaceholderText="粘贴视频 / 图片 / 音频页面链接，回车解析"
+                             VerticalContentAlignment="Center" KeyDown="UrlBox_KeyDown" />
+                </DockPanel>
+
+                <StackPanel Orientation="Horizontal" Spacing="8" Margin="2,10,0,0" IsVisible="{Binding IsBusy}">
+                    <views:Spinner Width="16" Height="16" Brush="{DynamicResource Accent}" VerticalAlignment="Center" />
+                    <TextBlock Text="正在解析…" FontSize="13" Foreground="{DynamicResource Accent}"
+                               VerticalAlignment="Center" />
+                </StackPanel>
+                <TextBlock Text="{Binding Status}" Classes="sub" Margin="0,10,0,0"
+                           Foreground="{DynamicResource Danger}" IsVisible="{Binding IsErrorStatus}" />
+                <TextBlock Text="{Binding Status}" Classes="sub" Margin="0,10,0,0"
+                           IsVisible="{Binding IsInfoStatus}" />
+
+                <!-- 结果信息：封面 + 标题 + 上传者/时长 chip + 简介，对应 Web 的 .meta -->
+                <Border Classes="card" Padding="18" Margin="0,20,0,0" IsVisible="{Binding HasResult}">
+                    <Grid ColumnDefinitions="200,*" ColumnSpacing="20">
+                        <Border Grid.Column="0" Width="200" Height="112" Background="{DynamicResource Surface2}">
+                            <Image Source="{Binding CoverPath}" Stretch="UniformToFill" />
+                        </Border>
+                        <StackPanel Grid.Column="1" Spacing="8" VerticalAlignment="Center">
+                            <TextBlock Text="{Binding ResultTitle}" Classes="h1" TextWrapping="Wrap" />
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Border Classes="chip" IsVisible="{Binding HasUploader}">
+                                    <TextBlock Text="{Binding ResultUploader}" Classes="dim" />
+                                </Border>
+                                <Border Classes="chip" IsVisible="{Binding HasDuration}">
+                                    <TextBlock Text="{Binding ResultDurationText}" Classes="dim" />
+                                </Border>
+                            </StackPanel>
+                            <TextBlock Text="{Binding ResultDescription}" Classes="sub" MaxLines="2"
+                                       TextTrimming="CharacterEllipsis" IsVisible="{Binding HasDescription}" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <!-- 分类 Tab：视频 (n) / 音频 (n) / 图片 (n) -->
+                <StackPanel Orientation="Horizontal" Margin="0,20,0,0" IsVisible="{Binding HasResult}">
+                    <Button Classes="tab" Classes.active="{Binding IsVideoTab}" Content="{Binding VideoTabLabel}"
+                            Command="{Binding SelectTabCommand}" CommandParameter="0" />
+                    <Button Classes="tab" Classes.active="{Binding IsAudioTab}" Content="{Binding AudioTabLabel}"
+                            Command="{Binding SelectTabCommand}" CommandParameter="1" />
+                    <Button Classes="tab" Classes.active="{Binding IsImageTab}" Content="{Binding ImageTabLabel}"
+                            Command="{Binding SelectTabCommand}" CommandParameter="2" />
+                    <TextBlock Text="{Binding FormatCountText}" Classes="dim" VerticalAlignment="Center" Margin="12,0,0,0" />
+                </StackPanel>
+
+                <!-- 格式行：清晰度 / 编码信息 / 大小 / 预览下载；行内显示下载进度 -->
+                <ItemsControl ItemsSource="{Binding CurrentFormats}" Margin="0,8,0,0" IsVisible="{Binding HasResult}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:FormatItemViewModel">
+                            <Border Padding="12,10" BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1">
+                                <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="150,*,110,190" ColumnSpacing="12">
+                                    <TextBlock Grid.Column="0" Text="{Binding Quality}" Classes="h2" VerticalAlignment="Center" />
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                        <Border Classes="chip" IsVisible="{Binding HasContainer}">
+                                            <TextBlock Text="{Binding Container}" FontSize="12" Foreground="{DynamicResource Ink}" />
+                                        </Border>
+                                        <Border Classes="chip" IsVisible="{Binding HasVideoCodec}">
+                                            <TextBlock Text="{Binding VideoCodec}" FontSize="12" Foreground="{DynamicResource Ink}" />
+                                        </Border>
+                                        <Border Classes="chip" IsVisible="{Binding HasAudioCodec}">
+                                            <TextBlock Text="{Binding AudioCodec}" FontSize="12" Foreground="{DynamicResource Ink}" />
+                                        </Border>
+                                        <Border Classes="chip" IsVisible="{Binding HasBitrate}">
+                                            <TextBlock Text="{Binding Bitrate}" FontSize="12" Foreground="{DynamicResource Ink}" />
+                                        </Border>
+                                        <Border Classes="chip" IsVisible="{Binding HasResolution}">
+                                            <TextBlock Text="{Binding Resolution}" FontSize="12" Foreground="{DynamicResource Ink}" />
+                                        </Border>
+                                        <TextBlock Text="{Binding RowStateText}" Classes="dim" Margin="6,0,0,0"
+                                                   VerticalAlignment="Center" IsVisible="{Binding HasRowTask}" />
+                                    </StackPanel>
+                                    <TextBlock Grid.Column="2" Text="{Binding Size}" Classes="dim"
+                                               HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                    <StackPanel Grid.Column="3" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+                                        <Button Classes="ghost small" Command="{Binding PreviewCommand}"
+                                                IsVisible="{Binding CanPreviewAndDownload}">
+                                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                                <PathIcon Data="{StaticResource IconPlay}" Width="13" Height="13" />
+                                                <TextBlock Text="预览" FontSize="12" VerticalAlignment="Center" />
+                                            </StackPanel>
+                                        </Button>
+                                        <Button Classes="ghost small" Command="{Binding CancelRowCommand}"
+                                                IsVisible="{Binding IsRowRunning}">
+                                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                                <PathIcon Data="{StaticResource IconClose}" Width="13" Height="13" />
+                                                <TextBlock Text="取消" FontSize="12" VerticalAlignment="Center" />
+                                            </StackPanel>
+                                        </Button>
+                                        <Button Classes="primary small" Command="{Binding DownloadCommand}"
+                                                IsVisible="{Binding CanPreviewAndDownload}">
+                                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                                <PathIcon Data="{StaticResource IconDownload}" Width="13" Height="13" />
+                                                <TextBlock Text="下载" FontSize="12" VerticalAlignment="Center" />
+                                            </StackPanel>
+                                        </Button>
+                                        <Button Classes="ghost small" Command="{Binding DeleteRowCommand}"
+                                                IsVisible="{Binding CanDeleteRow}">
+                                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                                <PathIcon Data="{StaticResource IconTrash}" Width="13" Height="13" />
+                                                <TextBlock Text="删除" FontSize="12" VerticalAlignment="Center" />
+                                            </StackPanel>
+                                        </Button>
+                                    </StackPanel>
+                                    <ProgressBar Grid.Row="1" Grid.ColumnSpan="4" Classes="bar" Height="2"
+                                                 Value="{Binding RowProgress}" Maximum="100" Margin="0,8,0,0"
+                                                 IsVisible="{Binding IsRowRunning}" />
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <!-- 最近解析：手机端的历史入口 -->
+                <StackPanel Margin="0,28,0,0" IsVisible="{Binding HasRecent}">
+                    <TextBlock Text="最近解析" Classes="h2" Margin="0,0,0,10" />
+                    <ItemsControl ItemsSource="{Binding RecentItems}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:RecentItemViewModel">
+                                <Button Content="{Binding Url}" Command="{Binding UseCommand}"
+                                        Background="Transparent" Foreground="{DynamicResource InkDim}"
+                                        BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1"
+                                        CornerRadius="0" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
+                                        FontSize="12" Padding="10,8" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </StackPanel>
+        </Grid>
+    </ScrollViewer>
+</UserControl>

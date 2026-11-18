@@ -1,0 +1,6 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/VSP.Core/VSP.Core.csproj" />
+    <Project Path="src/VSP.Desktop/VSP.Desktop.csproj" />
+  </Folder>
+</Solution>
