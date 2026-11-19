@@ -1,11 +1,52 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 内置浏览器页：地址栏 + WebView + 悬浮资源面板。
-     资源面板默认折叠成底部一条，点标题展开列出当前网页嗅探到的媒体直链。 -->
+<!-- 内置浏览器独立页面：返回栏 + 地址栏 + WebView + 可拖动悬浮资源窗。
+     悬浮窗在嗅探到资源时自动弹出，可拖动、可收成小圆钮、可关闭删除。 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
     android:tag="bg">
+
+    <!-- 返回栏 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="#171a21"
+        android:tag="card"
+        android:paddingStart="10dp"
+        android:paddingEnd="16dp">
+        <ImageButton
+            android:id="@+id/browser_back"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:src="@drawable/ic_back"
+            android:tag="icon"
+            android:scaleType="fitCenter"
+            android:padding="9dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="返回" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="内置浏览器"
+            android:textColor="#e8eaed"
+            android:tag="text"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+        <View
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="沙箱模式"
+            android:textColor="#8b909a"
+            android:tag="dim"
+            android:textSize="11sp" />
+    </LinearLayout>
 
     <!-- 播放器：浏览器里打开视频时挂到这里 -->
     <FrameLayout
@@ -13,7 +54,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content" />
 
-    <!-- 地址栏 -->
+    <!-- 地址栏：仅接受 http(s)，搜索图标触发 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -22,7 +63,7 @@
         android:background="#171a21"
         android:tag="card"
         android:paddingStart="10dp"
-        android:paddingEnd="8dp"
+        android:paddingEnd="10dp"
         android:paddingTop="8dp"
         android:paddingBottom="8dp">
 
@@ -31,7 +72,7 @@
             android:layout_width="0dp"
             android:layout_height="42dp"
             android:layout_weight="1"
-            android:hint="输入网址，如 https://example.com"
+            android:hint="输入 http(s) 网址或搜索词"
             android:textColorHint="#8b909a"
             android:textColor="#e8eaed"
             android:background="#0f1115"
@@ -39,35 +80,22 @@
             android:paddingStart="12dp"
             android:paddingEnd="12dp"
             android:singleLine="true"
+            android:imeOptions="actionSearch"
             android:inputType="textUri" />
 
-        <TextView
-            android:id="@+id/browser_go"
-            android:layout_width="wrap_content"
-            android:layout_height="42dp"
-            android:gravity="center"
-            android:paddingStart="12dp"
-            android:paddingEnd="12dp"
-            android:text="前往"
-            android:textColor="#ffffff"
-            android:tag="accent_bg"
-            android:background="#f97316"
-            android:textSize="13sp" />
-
         <ImageButton
-            android:id="@+id/browser_clear"
+            android:id="@+id/browser_go"
             android:layout_width="42dp"
             android:layout_height="42dp"
-            android:layout_marginStart="4dp"
-            android:src="@drawable/ic_delete"
-            android:tag="icon"
+            android:layout_marginStart="6dp"
+            android:src="@drawable/ic_search"
             android:scaleType="fitCenter"
-            android:padding="11dp"
-            android:background="?android:attr/selectableItemBackgroundBorderless"
-            android:contentDescription="清空浏览数据" />
+            android:padding="10dp"
+            android:background="#f97316"
+            android:contentDescription="搜索" />
     </LinearLayout>
 
-    <!-- 网页区 + 悬浮资源面板 -->
+    <!-- 网页区 + 悬浮资源窗 -->
     <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
@@ -88,16 +116,19 @@
             android:visibility="gone"
             style="?android:attr/progressBarStyleHorizontal" />
 
-        <!-- 悬浮资源面板：底部一条，可展开 -->
+        <!-- 可拖动资源浮窗：嗅探到资源自动弹出 -->
         <LinearLayout
-            android:id="@+id/browser_res_panel"
-            android:layout_width="match_parent"
+            android:id="@+id/browser_res_float"
+            android:layout_width="292dp"
             android:layout_height="wrap_content"
-            android:layout_gravity="bottom"
+            android:layout_gravity="top|end"
+            android:layout_marginTop="10dp"
+            android:layout_marginEnd="10dp"
             android:orientation="vertical"
             android:background="#171a21"
             android:tag="card"
-            android:elevation="8dp">
+            android:elevation="10dp"
+            android:visibility="gone">
 
             <LinearLayout
                 android:id="@+id/browser_res_header"
@@ -105,12 +136,14 @@
                 android:layout_height="42dp"
                 android:orientation="horizontal"
                 android:gravity="center_vertical"
-                android:paddingStart="14dp"
-                android:paddingEnd="14dp">
+                android:paddingStart="10dp"
+                android:paddingEnd="6dp"
+                android:background="#1f232c"
+                android:tag="soft">
 
                 <ImageView
-                    android:layout_width="18dp"
-                    android:layout_height="18dp"
+                    android:layout_width="16dp"
+                    android:layout_height="16dp"
                     android:src="@drawable/ic_video"
                     android:tag="accent_icon"
                     android:scaleType="fitCenter" />
@@ -120,28 +153,40 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:layout_marginStart="8dp"
+                    android:layout_marginStart="7dp"
                     android:text="可下载资源 (0)"
                     android:textColor="#e8eaed"
                     android:tag="text"
-                    android:textSize="13sp" />
-
-                <TextView
-                    android:id="@+id/browser_res_toggle"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="展开 ↑"
-                    android:textColor="#f97316"
-                    android:tag="accent"
                     android:textSize="12sp"
-                    android:padding="8dp" />
+                    android:singleLine="true" />
+
+                <ImageButton
+                    android:id="@+id/browser_res_hide"
+                    android:layout_width="30dp"
+                    android:layout_height="30dp"
+                    android:src="@drawable/ic_chevron"
+                    android:tag="icon"
+                    android:scaleType="fitCenter"
+                    android:padding="7dp"
+                    android:background="?android:attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="收起" />
+
+                <ImageButton
+                    android:id="@+id/browser_res_close"
+                    android:layout_width="30dp"
+                    android:layout_height="30dp"
+                    android:src="@drawable/ic_close"
+                    android:tag="danger_icon"
+                    android:scaleType="fitCenter"
+                    android:padding="7dp"
+                    android:background="?android:attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="删除资源" />
             </LinearLayout>
 
             <androidx.recyclerview.widget.RecyclerView
                 android:id="@+id/browser_res_list"
                 android:layout_width="match_parent"
                 android:layout_height="220dp"
-                android:visibility="gone"
                 android:scrollbars="vertical" />
 
             <TextView
@@ -151,11 +196,32 @@
                 android:text="浏览网页时自动嗅探可下载的视频 / 音频"
                 android:textColor="#8b909a"
                 android:tag="dim"
-                android:textSize="12sp"
+                android:textSize="11sp"
                 android:gravity="center"
-                android:paddingTop="4dp"
-                android:paddingBottom="12dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="10dp"
                 android:visibility="gone" />
         </LinearLayout>
+
+        <!-- 收起后的小圆钮：点一下重新展开浮窗 -->
+        <TextView
+            android:id="@+id/browser_res_fab"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|end"
+            android:layout_marginTop="10dp"
+            android:layout_marginEnd="10dp"
+            android:background="#f97316"
+            android:textColor="#ffffff"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:gravity="center"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:paddingTop="9dp"
+            android:paddingBottom="9dp"
+            android:elevation="10dp"
+            android:visibility="gone"
+            android:text="资源 0" />
     </FrameLayout>
 </LinearLayout>
