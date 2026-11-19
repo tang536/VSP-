@@ -985,37 +985,15 @@ public class MainActivity extends Activity {
             ui.post(() -> downloadBrowserResource(res));
         });
 
-        // ---------- 地址栏：只认 http(s)，输入时过滤掉其他字符 ----------
-        browserUrl.addTextChangedListener(new android.text.TextWatcher() {
-            boolean editing = false;
-            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
-            @Override public void onTextChanged(CharSequence s, int a, int b, int c) { }
-            @Override public void afterTextChanged(android.text.Editable e) {
-                if (editing) return;
-                String raw = e.toString();
-                // 只保留网址合法字符：字母数字与 :/?&=#%._+~-@ 以及空格（搜索词）
-                StringBuilder sb = new StringBuilder(raw.length());
-                for (int i = 0; i < raw.length(); i++) {
-                    char ch = raw.charAt(i);
-                    if (Character.isLetterOrDigit(ch)
-                            || ":/?&=#%._+~-@ ".indexOf(ch) >= 0) sb.append(ch);
-                }
-                String clean = sb.toString();
-                if (!clean.equals(raw)) {
-                    editing = true;
-                    int pos = Math.min(browserUrl.getSelectionStart(), clean.length());
-                    browserUrl.setText(clean);
-                    browserUrl.setSelection(pos);
-                    editing = false;
-                }
-            }
-        });
+        // ---------- 地址栏：网址直接打开，其它当搜索词走搜索引擎 ----------
+        // 不再做逐字符过滤：中文搜索词（如「广西大学」）必须能完整输入。
+        // 危险协议由 normalizeBrowserUrl + handleBrowserNavigation 两道闸统一拦截。
         Runnable go = () -> {
             String input = browserUrl.getText().toString().trim();
             if (input.isEmpty()) return;
             String url = normalizeBrowserUrl(input);
             if (url == null) {
-                Toast.makeText(this, "仅支持 http(s) 网址", Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, "请输入网址或搜索词", Toast.LENGTH_SHORT).show();
                 return;
             }
             dismissKeyboard();
@@ -1026,7 +1004,7 @@ public class MainActivity extends Activity {
             go.run();
             return true;
         });
-        pageBrowser.findViewById(R.id.browser_back).setOnClickListener(v -> switchPage(PAGE_ME));
+        // 顶部返回栏已移除，返回浏览器页用系统返回键/手势（onBackPressed 里回「我的」）
 
         // ---------- 资源浮窗 ----------
         browserResAdapter = new BrowserResAdapter();
@@ -1262,12 +1240,24 @@ public class MainActivity extends Activity {
         @Override public int getItemCount() { return browserResources.size(); }
     }
 
-    /** 把用户输入补成完整 URL；非 http(s) 返回 null（拦截危险协议） */
+    /**
+     * 把用户输入补成可直接导航的 http(s) URL：
+     * - http(s) 开头：原样返回；
+     * - 形如域名（含点、无空白无冒号）：补 https://；
+     * - 其余（含中文的搜索词，如「广西大学」）：拼成 Bing 搜索，最终仍是 https，符合沙箱白名单。
+     * 危险协议不会直达 —— 搜索词只被编码进查询参数，不会被当成 URL 执行。
+     */
     private String normalizeBrowserUrl(String input) {
         String s = input.trim();
-        if (s.startsWith("http://") || s.startsWith("https://")) return s;
-        if (s.contains(".") && !s.contains(" ")) return "https://" + s;
-        return null;
+        if (s.isEmpty()) return null;
+        String low = s.toLowerCase(java.util.Locale.ROOT);
+        if (low.startsWith("http://") || low.startsWith("https://")) return s;
+        if (s.contains(".") && !s.contains(" ") && !s.contains(":")) return "https://" + s;
+        try {
+            return "https://www.bing.com/search?q=" + java.net.URLEncoder.encode(s, "UTF-8");
+        } catch (Exception e) {
+            return "https://www.bing.com/search?q=" + s.replace(" ", "%20");
+        }
     }
 
     /** 导航总闸：只放行 http(s)，其余（intent/market/tel/file/javascript/data…）一律拦截 */

@@ -7,46 +7,7 @@
     android:orientation="vertical"
     android:tag="bg">
 
-    <!-- 返回栏 -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="48dp"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:background="#171a21"
-        android:tag="card"
-        android:paddingStart="10dp"
-        android:paddingEnd="16dp">
-        <ImageButton
-            android:id="@+id/browser_back"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
-            android:src="@drawable/ic_back"
-            android:tag="icon"
-            android:scaleType="fitCenter"
-            android:padding="9dp"
-            android:background="?android:attr/selectableItemBackgroundBorderless"
-            android:contentDescription="返回" />
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="内置浏览器"
-            android:textColor="#e8eaed"
-            android:tag="text"
-            android:textSize="16sp"
-            android:textStyle="bold" />
-        <View
-            android:layout_width="0dp"
-            android:layout_height="1dp"
-            android:layout_weight="1" />
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="沙箱模式"
-            android:textColor="#8b909a"
-            android:tag="dim"
-            android:textSize="11sp" />
-    </LinearLayout>
+    <!-- 顶部返回栏已移除：浏览器页只保留地址栏 + 网页 + 资源浮窗，返回用系统返回键/手势 -->
 
     <!-- 播放器：浏览器里打开视频时挂到这里 -->
     <FrameLayout
