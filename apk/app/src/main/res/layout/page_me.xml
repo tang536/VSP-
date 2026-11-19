@@ -113,6 +113,44 @@
                     android:textSize="12sp" />
             </LinearLayout>
 
+            <!-- 内置浏览器：独立页面，沙箱 WebView + 实时资源嗅探 -->
+            <LinearLayout
+                android:id="@+id/row_browser"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="#171a21"
+                android:tag="card"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:layout_marginBottom="18dp"
+                android:clickable="true"
+                android:focusable="true">
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:src="@drawable/ic_browser"
+                    android:tag="icon"
+                    android:scaleType="fitCenter" />
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="内置浏览器"
+                    android:textColor="#e8eaed"
+                    android:tag="text"
+                    android:textSize="14sp"
+                    android:layout_marginStart="12dp" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="打开 ›"
+                    android:textColor="#8b909a"
+                    android:tag="dim"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
             <!-- 设置 -->
             <TextView
                 android:layout_width="wrap_content"

@@ -223,12 +223,13 @@ public class MainActivity extends Activity {
     private EditText browserUrl;
     private ProgressBar browserProgress;
     private RecyclerView browserResList;
-    private TextView browserResTitle, browserResToggle, browserResEmpty;
-    private View browserResPanel, browserResHeader;
+    private TextView browserResTitle, browserResEmpty, browserResFab;
+    private View browserResFloat, browserResHeader, browserResHide, browserResClose;
     /** 当前网页嗅探到的媒体直链，去重保序 */
     private final List<BrowserResource> browserResources = new ArrayList<>();
     private BrowserResAdapter browserResAdapter;
-    private boolean browserResExpanded = false;
+    /** 浮窗是否被用户主动关闭；关闭后嗅探到新资源会重新弹出 */
+    private boolean browserResDismissed = false;
     /** 本页已嗅探过的 URL，避免 shouldInterceptRequest 重复刷列表 */
     private final java.util.Set<String> browserSeen = java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
     private volatile long browserNavToken = 0;
@@ -754,6 +755,7 @@ public class MainActivity extends Activity {
         updateVersion.setText("v" + versionName());
 
         pageMe.findViewById(R.id.row_queue).setOnClickListener(v -> switchPage(PAGE_QUEUE));
+        pageMe.findViewById(R.id.row_browser).setOnClickListener(v -> switchPage(PAGE_BROWSER));
         View rowDir = pageMe.findViewById(R.id.row_dir);
         rowDir.setOnClickListener(v -> openDir());
         rowDir.setOnLongClickListener(v -> {
@@ -868,10 +870,12 @@ public class MainActivity extends Activity {
         browserProgress = pageBrowser.findViewById(R.id.browser_progress);
         browserResList = pageBrowser.findViewById(R.id.browser_res_list);
         browserResTitle = pageBrowser.findViewById(R.id.browser_res_title);
-        browserResToggle = pageBrowser.findViewById(R.id.browser_res_toggle);
         browserResEmpty = pageBrowser.findViewById(R.id.browser_res_empty);
-        browserResPanel = pageBrowser.findViewById(R.id.browser_res_panel);
+        browserResFloat = pageBrowser.findViewById(R.id.browser_res_float);
         browserResHeader = pageBrowser.findViewById(R.id.browser_res_header);
+        browserResHide = pageBrowser.findViewById(R.id.browser_res_hide);
+        browserResClose = pageBrowser.findViewById(R.id.browser_res_close);
+        browserResFab = pageBrowser.findViewById(R.id.browser_res_fab);
 
         // ---------- WebView 沙箱加固 ----------
         android.webkit.WebSettings ws = browserView.getSettings();
@@ -919,6 +923,7 @@ public class MainActivity extends Activity {
                 browserSeen.clear();
                 ui.post(() -> {
                     if (token != browserNavToken) return;
+                    browserResDismissed = false;
                     clearBrowserResources();
                     browserUrl.setText(url);
                     browserProgress.setVisibility(View.VISIBLE);
@@ -980,13 +985,37 @@ public class MainActivity extends Activity {
             ui.post(() -> downloadBrowserResource(res));
         });
 
-        // ---------- 地址栏 ----------
+        // ---------- 地址栏：只认 http(s)，输入时过滤掉其他字符 ----------
+        browserUrl.addTextChangedListener(new android.text.TextWatcher() {
+            boolean editing = false;
+            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
+            @Override public void onTextChanged(CharSequence s, int a, int b, int c) { }
+            @Override public void afterTextChanged(android.text.Editable e) {
+                if (editing) return;
+                String raw = e.toString();
+                // 只保留网址合法字符：字母数字与 :/?&=#%._+~-@ 以及空格（搜索词）
+                StringBuilder sb = new StringBuilder(raw.length());
+                for (int i = 0; i < raw.length(); i++) {
+                    char ch = raw.charAt(i);
+                    if (Character.isLetterOrDigit(ch)
+                            || ":/?&=#%._+~-@ ".indexOf(ch) >= 0) sb.append(ch);
+                }
+                String clean = sb.toString();
+                if (!clean.equals(raw)) {
+                    editing = true;
+                    int pos = Math.min(browserUrl.getSelectionStart(), clean.length());
+                    browserUrl.setText(clean);
+                    browserUrl.setSelection(pos);
+                    editing = false;
+                }
+            }
+        });
         Runnable go = () -> {
             String input = browserUrl.getText().toString().trim();
             if (input.isEmpty()) return;
             String url = normalizeBrowserUrl(input);
             if (url == null) {
-                Toast.makeText(this, "请输入 http(s) 网址", Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, "仅支持 http(s) 网址", Toast.LENGTH_SHORT).show();
                 return;
             }
             dismissKeyboard();
@@ -997,18 +1026,71 @@ public class MainActivity extends Activity {
             go.run();
             return true;
         });
-        pageBrowser.findViewById(R.id.browser_clear).setOnClickListener(v -> clearBrowserData());
+        pageBrowser.findViewById(R.id.browser_back).setOnClickListener(v -> switchPage(PAGE_ME));
 
-        // ---------- 资源面板 ----------
+        // ---------- 资源浮窗 ----------
         browserResAdapter = new BrowserResAdapter();
         browserResList.setLayoutManager(new LinearLayoutManager(this));
         browserResList.setAdapter(browserResAdapter);
-        View.OnClickListener toggle = v -> setBrowserResExpanded(!browserResExpanded);
-        browserResHeader.setOnClickListener(toggle);
-        browserResToggle.setOnClickListener(toggle);
+        // 收起成小圆钮
+        browserResHide.setOnClickListener(v -> collapseBrowserRes());
+        // 关闭并删除已嗅探资源
+        browserResClose.setOnClickListener(v -> {
+            browserResDismissed = true;
+            clearBrowserResources();
+            browserResFloat.setVisibility(View.GONE);
+            browserResFab.setVisibility(View.GONE);
+        });
+        // 小圆钮点一下重新展开
+        browserResFab.setOnClickListener(v -> {
+            browserResDismissed = false;
+            showBrowserRes();
+        });
+        // 拖动浮窗：只响应标题栏，避免和列表滚动冲突
+        makeBrowserResDraggable(browserResHeader, browserResFloat);
+        makeBrowserResDraggable(browserResFab, browserResFab);
 
         // 默认打开一个导航起始页，避免空白
         browserView.loadUrl("https://www.bing.com");
+    }
+
+    /** 让浮窗（或小圆钮）随触摸拖动，限制在网页区范围内 */
+    private void makeBrowserResDraggable(View handle, final View target) {
+        handle.setOnTouchListener(new View.OnTouchListener() {
+            int startX, startY;
+            float originX, originY;
+            boolean moved = false;
+            @Override public boolean onTouch(View v, android.view.MotionEvent ev) {
+                switch (ev.getAction()) {
+                    case android.view.MotionEvent.ACTION_DOWN:
+                        startX = (int) ev.getRawX();
+                        startY = (int) ev.getRawY();
+                        originX = target.getX();
+                        originY = target.getY();
+                        moved = false;
+                        // 返回 false：不吞掉点击， ImageButton 子控件照常可点
+                        return false;
+                    case android.view.MotionEvent.ACTION_MOVE:
+                        if (!moved && Math.abs(ev.getRawX() - startX) < 6
+                                && Math.abs(ev.getRawY() - startY) < 6) return false;
+                        moved = true;
+                        android.view.ViewParent parent = target.getParent();
+                        if (!(parent instanceof View)) return true;
+                        View p = (View) parent;
+                        float nx = originX + (ev.getRawX() - startX);
+                        float ny = originY + (ev.getRawY() - startY);
+                        nx = Math.max(0, Math.min(nx, p.getWidth() - target.getWidth()));
+                        ny = Math.max(0, Math.min(ny, p.getHeight() - target.getHeight()));
+                        target.setX(nx);
+                        target.setY(ny);
+                        return true;
+                    case android.view.MotionEvent.ACTION_UP:
+                        return moved; // 拖动过就吞掉抬手，避免误触发点击
+                    default:
+                        return moved;
+                }
+            }
+        });
     }
 
     /** 媒体资源 URL / MIME 分类：像视频/音频就返回条目，否则 null。 */
@@ -1069,6 +1151,8 @@ public class MainActivity extends Activity {
             browserResources.add(res);
             if (browserResources.size() > 60) browserResources.remove(0);
             refreshBrowserResUi();
+            // 嗅探到资源自动弹出浮窗（用户主动关闭前）
+            if (!browserResDismissed) showBrowserRes();
         });
     }
 
@@ -1079,17 +1163,30 @@ public class MainActivity extends Activity {
 
     private void refreshBrowserResUi() {
         if (browserResTitle == null) return;
-        browserResTitle.setText("可下载资源 (" + browserResources.size() + ")");
-        boolean empty = browserResources.isEmpty();
+        int n = browserResources.size();
+        browserResTitle.setText("可下载资源 (" + n + ")");
+        browserResFab.setText("资源 " + n);
+        boolean empty = n == 0;
         browserResEmpty.setVisibility(empty ? View.VISIBLE : View.GONE);
-        browserResList.setVisibility(!empty && browserResExpanded ? View.VISIBLE : View.GONE);
-        browserResAdapter.notifyDataSetChanged();
+        browserResList.setVisibility(empty ? View.GONE : View.VISIBLE);
+        if (browserResAdapter != null) browserResAdapter.notifyDataSetChanged();
+        if (empty) {
+            browserResFloat.setVisibility(View.GONE);
+            browserResFab.setVisibility(View.GONE);
+        }
     }
 
-    private void setBrowserResExpanded(boolean expanded) {
-        browserResExpanded = expanded;
-        browserResToggle.setText(expanded ? "收起 ↓" : "展开 ↑");
-        browserResList.setVisibility(expanded && !browserResources.isEmpty() ? View.VISIBLE : View.GONE);
+    /** 展开资源浮窗并收起小圆钮 */
+    private void showBrowserRes() {
+        if (browserResFloat == null || browserResources.isEmpty()) return;
+        browserResFloat.setVisibility(View.VISIBLE);
+        browserResFab.setVisibility(View.GONE);
+    }
+
+    /** 收起成小圆钮，资源仍在，可随时点开 */
+    private void collapseBrowserRes() {
+        browserResFloat.setVisibility(View.GONE);
+        if (!browserResources.isEmpty()) browserResFab.setVisibility(View.VISIBLE);
     }
 
     /** 页面加载完后读取源码里的 <video src>/<source>/<a href>，补充嗅探（纯字符串处理，不注入 JS 桥） */
@@ -1129,28 +1226,6 @@ public class MainActivity extends Activity {
                 ui.post(() -> Toast.makeText(this, "下载失败：" + friendlyError(e), Toast.LENGTH_SHORT).show());
             }
         }, "vsp-browser-dl").start();
-    }
-
-    /** 一键清空浏览数据：Cookie / 缓存 / 历史 / 嗅探列表 */
-    private void clearBrowserData() {
-        try {
-            browserView.clearCache(true);
-            browserView.clearHistory();
-            browserView.clearFormData();
-            android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
-            if (Build.VERSION.SDK_INT >= 21) {
-                cm.removeAllCookies(value -> ui.post(() ->
-                        Toast.makeText(this, "浏览数据已清空", Toast.LENGTH_SHORT).show()));
-            } else {
-                cm.removeAllCookie();
-                Toast.makeText(this, "浏览数据已清空", Toast.LENGTH_SHORT).show();
-            }
-        } catch (Throwable t) {
-            Toast.makeText(this, "清理失败：" + t.getMessage(), Toast.LENGTH_SHORT).show();
-        }
-        browserSeen.clear();
-        clearBrowserResources();
-        browserUrl.setText("");
     }
 
     /** 浏览器资源列表适配器 */
@@ -1460,7 +1535,6 @@ public class MainActivity extends Activity {
 
     private void bindGlobal() {
         findViewById(R.id.tab_home).setOnClickListener(v -> switchPage(PAGE_HOME));
-        findViewById(R.id.tab_browser).setOnClickListener(v -> switchPage(PAGE_BROWSER));
         findViewById(R.id.tab_local).setOnClickListener(v -> switchPage(PAGE_LOCAL));
         findViewById(R.id.tab_me).setOnClickListener(v -> switchPage(PAGE_ME));
         btnHistory.setOnClickListener(v -> showHistory());
@@ -1672,9 +1746,6 @@ public class MainActivity extends Activity {
             case "tab_home":
                 setActiveColor(v, currentPage == PAGE_HOME);
                 break;
-            case "tab_browser":
-                setActiveColor(v, currentPage == PAGE_BROWSER);
-                break;
             case "tab_local":
                 setActiveColor(v, currentPage == PAGE_LOCAL);
                 break;
@@ -1702,8 +1773,6 @@ public class MainActivity extends Activity {
     private void refreshTabColors() {
         setActiveColor(findViewById(R.id.tab_home_icon), currentPage == PAGE_HOME);
         setActiveColor(findViewById(R.id.tab_home_text), currentPage == PAGE_HOME);
-        setActiveColor(findViewById(R.id.tab_browser_icon), currentPage == PAGE_BROWSER);
-        setActiveColor(findViewById(R.id.tab_browser_text), currentPage == PAGE_BROWSER);
         setActiveColor(findViewById(R.id.tab_local_icon), currentPage == PAGE_LOCAL);
         setActiveColor(findViewById(R.id.tab_local_text), currentPage == PAGE_LOCAL);
         setActiveColor(findViewById(R.id.tab_me_icon), currentPage == PAGE_ME);
@@ -1739,9 +1808,10 @@ public class MainActivity extends Activity {
         pageScan.setVisibility(page == PAGE_SCAN ? View.VISIBLE : View.GONE);
         pageBrowser.setVisibility(page == PAGE_BROWSER ? View.VISIBLE : View.GONE);
 
-        // 最高级页面（首页 / 浏览器 / 本地 / 我的）才显示 VSP 解析标题栏与底部标签；
+        // 最高级页面（首页 / 本地 / 我的）才显示 VSP 解析标题栏与底部标签；
+        // 浏览器已从主标签改为「我的」里的独立页面，自带返回栏，不显示底栏；
         // 历史图标只出现在首页，⋯ 只出现在本地；子页面只保留自己的返回栏。
-        boolean topLevel = (page == PAGE_HOME || page == PAGE_LOCAL || page == PAGE_ME || page == PAGE_BROWSER);
+        boolean topLevel = (page == PAGE_HOME || page == PAGE_LOCAL || page == PAGE_ME);
         topBar.setVisibility(topLevel ? View.VISIBLE : View.GONE);
         btnHistory.setVisibility(page == PAGE_HOME ? View.VISIBLE : View.GONE);
         btnMore.setVisibility(page == PAGE_LOCAL ? View.VISIBLE : View.GONE);
@@ -1774,9 +1844,10 @@ public class MainActivity extends Activity {
             exitSelection();
             return;
         }
-        // 浏览器页：网页能回退就回退，否则回首页
-        if (currentPage == PAGE_BROWSER && browserView != null && browserView.canGoBack()) {
-            browserView.goBack();
+        // 浏览器独立页：网页能回退就回退，否则退回「我的」
+        if (currentPage == PAGE_BROWSER) {
+            if (browserView != null && browserView.canGoBack()) browserView.goBack();
+            else switchPage(PAGE_ME);
             return;
         }
         if (currentPage == PAGE_QUEUE || currentPage == PAGE_STORAGE) {
@@ -1791,7 +1862,7 @@ public class MainActivity extends Activity {
             switchPage(PAGE_LOCAL);
             return;
         }
-        if (currentPage == PAGE_ME || currentPage == PAGE_LOCAL || currentPage == PAGE_BROWSER) {
+        if (currentPage == PAGE_ME || currentPage == PAGE_LOCAL) {
             switchPage(PAGE_HOME);
             return;
         }
