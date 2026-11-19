@@ -2310,3 +2310,45 @@ def format_has_audio(url, format_id):
     except Exception:
         pass
     return True
+
+
+# ---------------------------------------------------------------- 沙箱浏览器辅助
+#
+# 内置浏览器用 shouldInterceptRequest 被动嗅探直链；页面加载完后再抓一次 HTML
+# 补漏（<video>/<source>/<a href> 里写死的直链）。这里只做「读字符串 + 正则」，
+# 不执行任何网页 JS，也不向网页暴露 Python/Java 对象，避免双向桥带来的攻击面。
+
+_BROWSER_MEDIA_RE = re.compile(
+    r'https?://[^\s"\'\\<>\u4e00-\u9fff]+?\.(?:m3u8|mpd|mp4|m4v|webm|flv|mov|mkv|ts'
+    r'|mp3|m4a|aac|flac|wav|ogg|opus)'
+    r'(?:\?[^\s"\'\\<>\u4e00-\u9fff]*)?', re.I)
+_BROWSER_REL_RE = re.compile(
+    r'["\'](/(?!/)[^"\'\s<>]+?\.(?:m3u8|mpd|mp4|m4v|webm|flv|mov|mkv|ts'
+    r'|mp3|m4a|aac|flac|wav|ogg|opus))(\?[^"\']*)?["\']', re.I)
+
+
+def fetch_html(url, referer=""):
+    """抓取网页 HTML 给浏览器嗅探用；失败返回空串，绝不让异常冒到 Java。"""
+    try:
+        return _fetch(url, referer or url)
+    except Exception:
+        return ""
+
+
+def scan_media_json(html, base=""):
+    """从 HTML 文本里扫出媒体直链，返回 JSON 数组字符串（含相对地址拼接）。"""
+    found = []
+    try:
+        text = _unescape(html or "")
+        for m in _BROWSER_MEDIA_RE.finditer(text):
+            u = m.group(0)
+            if u not in found:
+                found.append(u)
+        if base:
+            for m in _BROWSER_REL_RE.finditer(text):
+                u = urllib.parse.urljoin(base, m.group(1) + (m.group(2) or ""))
+                if u not in found:
+                    found.append(u)
+    except Exception:
+        pass
+    return json.dumps(found, ensure_ascii=False)

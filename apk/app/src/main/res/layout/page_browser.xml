@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 内置浏览器页：地址栏 + WebView + 悬浮资源面板。
+     资源面板默认折叠成底部一条，点标题展开列出当前网页嗅探到的媒体直链。 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:tag="bg">
+
+    <!-- 播放器：浏览器里打开视频时挂到这里 -->
+    <FrameLayout
+        android:id="@+id/player_slot"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+
+    <!-- 地址栏 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="#171a21"
+        android:tag="card"
+        android:paddingStart="10dp"
+        android:paddingEnd="8dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp">
+
+        <EditText
+            android:id="@+id/browser_url"
+            android:layout_width="0dp"
+            android:layout_height="42dp"
+            android:layout_weight="1"
+            android:hint="输入网址，如 https://example.com"
+            android:textColorHint="#8b909a"
+            android:textColor="#e8eaed"
+            android:background="#0f1115"
+            android:tag="input"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:singleLine="true"
+            android:inputType="textUri" />
+
+        <TextView
+            android:id="@+id/browser_go"
+            android:layout_width="wrap_content"
+            android:layout_height="42dp"
+            android:gravity="center"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:text="前往"
+            android:textColor="#ffffff"
+            android:tag="accent_bg"
+            android:background="#f97316"
+            android:textSize="13sp" />
+
+        <ImageButton
+            android:id="@+id/browser_clear"
+            android:layout_width="42dp"
+            android:layout_height="42dp"
+            android:layout_marginStart="4dp"
+            android:src="@drawable/ic_delete"
+            android:tag="icon"
+            android:scaleType="fitCenter"
+            android:padding="11dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="清空浏览数据" />
+    </LinearLayout>
+
+    <!-- 网页区 + 悬浮资源面板 -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <WebView
+            android:id="@+id/browser_webview"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <ProgressBar
+            android:id="@+id/browser_progress"
+            android:layout_width="match_parent"
+            android:layout_height="3dp"
+            android:layout_gravity="top"
+            android:indeterminate="false"
+            android:max="100"
+            android:visibility="gone"
+            style="?android:attr/progressBarStyleHorizontal" />
+
+        <!-- 悬浮资源面板：底部一条，可展开 -->
+        <LinearLayout
+            android:id="@+id/browser_res_panel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:orientation="vertical"
+            android:background="#171a21"
+            android:tag="card"
+            android:elevation="8dp">
+
+            <LinearLayout
+                android:id="@+id/browser_res_header"
+                android:layout_width="match_parent"
+                android:layout_height="42dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp">
+
+                <ImageView
+                    android:layout_width="18dp"
+                    android:layout_height="18dp"
+                    android:src="@drawable/ic_video"
+                    android:tag="accent_icon"
+                    android:scaleType="fitCenter" />
+
+                <TextView
+                    android:id="@+id/browser_res_title"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="8dp"
+                    android:text="可下载资源 (0)"
+                    android:textColor="#e8eaed"
+                    android:tag="text"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/browser_res_toggle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="展开 ↑"
+                    android:textColor="#f97316"
+                    android:tag="accent"
+                    android:textSize="12sp"
+                    android:padding="8dp" />
+            </LinearLayout>
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/browser_res_list"
+                android:layout_width="match_parent"
+                android:layout_height="220dp"
+                android:visibility="gone"
+                android:scrollbars="vertical" />
+
+            <TextView
+                android:id="@+id/browser_res_empty"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="浏览网页时自动嗅探可下载的视频 / 音频"
+                android:textColor="#8b909a"
+                android:tag="dim"
+                android:textSize="12sp"
+                android:gravity="center"
+                android:paddingTop="4dp"
+                android:paddingBottom="12dp"
+                android:visibility="gone" />
+        </LinearLayout>
+    </FrameLayout>
+</LinearLayout>

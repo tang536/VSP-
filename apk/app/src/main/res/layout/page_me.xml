@@ -192,6 +192,48 @@
                     android:checked="true" />
             </LinearLayout>
 
+            <!-- 一键静音：打开后 VSP 内所有声音强制为 0，不受系统音量影响 -->
+            <LinearLayout
+                android:id="@+id/row_silent"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="#171a21"
+                android:tag="card"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:layout_marginBottom="1px">
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:src="@drawable/ic_volume"
+                    android:tag="icon"
+                    android:scaleType="fitCenter" />
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="一键静音"
+                    android:textColor="#e8eaed"
+                    android:tag="text"
+                    android:textSize="14sp"
+                    android:layout_marginStart="12dp" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="始终静音，无视系统音量"
+                    android:textColor="#8b909a"
+                    android:tag="dim"
+                    android:textSize="10sp"
+                    android:layout_marginEnd="8dp" />
+                <Switch
+                    android:id="@+id/silent_switch"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:checked="false" />
+            </LinearLayout>
+
             <LinearLayout
                 android:id="@+id/row_storage"
                 android:layout_width="match_parent"

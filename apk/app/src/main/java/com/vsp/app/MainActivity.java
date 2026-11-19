@@ -125,7 +125,8 @@ public class MainActivity extends Activity {
     private static final int PAGE_FILES = 5;
     private static final int PAGE_VIDEOS = 6;
     private static final int PAGE_SCAN = 7;
-    private static final int PAGE_COUNT = 8;
+    private static final int PAGE_BROWSER = 8;
+    private static final int PAGE_COUNT = 9;
 
     // 多选归属：首页=批量下载；下载中 / 已完成两段队列各自独立选择
     private static final int SEL_ACTIVE = 10;
@@ -183,7 +184,7 @@ public class MainActivity extends Activity {
     private int currentPage = PAGE_HOME;
     private Palette P;
 
-    private View root, pageHome, pageMe, pageQueue, pageLocal, pageStorage, pageFiles, pageVideos, pageScan;
+    private View root, pageHome, pageMe, pageQueue, pageLocal, pageStorage, pageFiles, pageVideos, pageScan, pageBrowser;
     private View topBar, btnHistory, btnMore, bottomTab, selectionBar, playerPanel;
     /** 每个页面各有一个 player_slot，全 app 唯一的播放器在打开预览时挂到当前页。 */
     private final FrameLayout[] playerSlots = new FrameLayout[PAGE_COUNT];
@@ -207,12 +208,40 @@ public class MainActivity extends Activity {
     private File avatarFile;
     private TextView dirPath, queueSummary, updateVersion;
     private ProgressBar updateProgress;
-    private Switch themeSwitch;
+    private Switch themeSwitch, silentSwitch;
+    /** 一键静音：开启后 VSP 内所有播放器音量强制为 0，不受系统音量影响 */
+    private boolean silentMode = false;
+    private boolean suppressSilentSwitch = false;
     private volatile boolean checkingUpdate = false;
     private String latestApkUrl = "", latestVersion = "", latestNotes = "", latestDate = "",
             latestSource = "github";
     private long latestSize = 0L;
     private boolean repoEmpty = false;
+
+    // 内置浏览器（沙箱 WebView + 实时资源嗅探）
+    private android.webkit.WebView browserView;
+    private EditText browserUrl;
+    private ProgressBar browserProgress;
+    private RecyclerView browserResList;
+    private TextView browserResTitle, browserResToggle, browserResEmpty;
+    private View browserResPanel, browserResHeader;
+    /** 当前网页嗅探到的媒体直链，去重保序 */
+    private final List<BrowserResource> browserResources = new ArrayList<>();
+    private BrowserResAdapter browserResAdapter;
+    private boolean browserResExpanded = false;
+    /** 本页已嗅探过的 URL，避免 shouldInterceptRequest 重复刷列表 */
+    private final java.util.Set<String> browserSeen = java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
+    private volatile long browserNavToken = 0;
+
+    /** 浏览网页时嗅探到的一条可下载媒体资源 */
+    private static final class BrowserResource {
+        final String url;
+        final String name;
+        final boolean video;
+        BrowserResource(String url, String name, boolean video) {
+            this.url = url; this.name = name; this.video = video;
+        }
+    }
 
     // 下载队列：同页展示「下载中」与「已完成」两段
     private RecyclerView downloadingList, taskList;
@@ -254,7 +283,9 @@ public class MainActivity extends Activity {
     // 图片模式的缩略图条与底部操作
     private View playerImgBar, playerSeekWrap, playerImgActions;
     private View playerCtrlRow, playerBottom;
-    private ImageView playerOrient;
+    private ImageView playerOrient, playerDownload;
+    /** 当前观看的是网络直链（浏览器 / 解析预览），可显示下载按钮 */
+    private boolean watchCanDownload = false;
     // 视频预览态：时长 / 分辨率 + 全屏播放按钮；音量浮层（竖排）
     private View playerInlineBar, playerVolumePop;
     private TextView playerInlineMeta, playerFullBtn;
@@ -537,6 +568,7 @@ public class MainActivity extends Activity {
             prefs = getSharedPreferences(PREF, MODE_PRIVATE);
             recentPrefs = getSharedPreferences(RECENT_KEY, MODE_PRIVATE);
             darkMode = prefs.getBoolean("dark_mode", true);
+            silentMode = prefs.getBoolean("silent_mode", false);
             P = darkMode ? Palette.dark() : Palette.light();
             // 启动时清一次缩略图缓存：旧版本按 1000px 存过一批，堆到几十上百 MB
             new Thread(this::trimThumbDir, "vsp-trim-thumbs").start();
@@ -552,6 +584,7 @@ public class MainActivity extends Activity {
             pageFiles = getLayoutInflater().inflate(R.layout.page_files, null);
             pageVideos = getLayoutInflater().inflate(R.layout.page_videos, null);
             pageScan = getLayoutInflater().inflate(R.layout.page_scan, null);
+            pageBrowser = getLayoutInflater().inflate(R.layout.page_browser, null);
             FrameLayout content = findViewById(R.id.content);
             content.addView(pageHome);
             content.addView(pageMe);
@@ -561,6 +594,7 @@ public class MainActivity extends Activity {
             content.addView(pageFiles);
             content.addView(pageVideos);
             content.addView(pageScan);
+            content.addView(pageBrowser);
             topBar = findViewById(R.id.top_bar);
             btnHistory = findViewById(R.id.btn_history);
             btnMore = findViewById(R.id.btn_more);
@@ -575,6 +609,7 @@ public class MainActivity extends Activity {
             playerSlots[PAGE_LOCAL] = pageLocal.findViewById(R.id.player_slot);
             playerSlots[PAGE_FILES] = pageFiles.findViewById(R.id.player_slot);
             playerSlots[PAGE_VIDEOS] = pageVideos.findViewById(R.id.player_slot);
+            playerSlots[PAGE_BROWSER] = pageBrowser.findViewById(R.id.player_slot);
 
             bindHome();
             bindMe();
@@ -584,6 +619,7 @@ public class MainActivity extends Activity {
             bindScan();
             bindFiles();
             bindStorage();
+            bindBrowser();
             bindPlayer();
             bindGlobal();
 
@@ -728,6 +764,22 @@ public class MainActivity extends Activity {
         themeSwitch.setOnCheckedChangeListener((b, checked) -> {
             if (!suppressThemeSwitch) setDarkMode(checked);
         });
+        // 一键静音：持久化 + 立即作用到当前播放器
+        silentSwitch = pageMe.findViewById(R.id.silent_switch);
+        suppressSilentSwitch = true;
+        silentSwitch.setChecked(silentMode);
+        suppressSilentSwitch = false;
+        if (Build.VERSION.SDK_INT >= 23) {
+            try {
+                silentSwitch.setThumbTintList(ColorStateList.valueOf(P.accent));
+                silentSwitch.setTrackTintList(ColorStateList.valueOf(P.divider));
+            } catch (Throwable ignored) {
+            }
+        }
+        pageMe.findViewById(R.id.row_silent).setOnClickListener(v -> setSilentMode(!silentMode));
+        silentSwitch.setOnCheckedChangeListener((b, checked) -> {
+            if (!suppressSilentSwitch) setSilentMode(checked);
+        });
         pageMe.findViewById(R.id.row_storage).setOnClickListener(v -> switchPage(PAGE_STORAGE));
         pageMe.findViewById(R.id.row_update).setOnClickListener(v -> checkUpdate());
         avatar.setOnClickListener(v -> showAvatarViewer());
@@ -798,6 +850,363 @@ public class MainActivity extends Activity {
         btnClearCache.setOnClickListener(v -> clearCache());
         btnClearAll.setOnClickListener(v -> clearAllDownloads());
         pageStorage.findViewById(R.id.row_files).setOnClickListener(v -> switchPage(PAGE_FILES));
+    }
+
+    /**
+     * 内置浏览器（沙箱 WebView）。
+     *
+     * 隔离原则：网页只是「不可信内容」，绝不能借 VSP 触达手机本地。
+     * - 禁用 file:// / content:// 访问，禁用 JS 自动开窗，禁用自动下载；
+     * - 导航只放行 http(s)，intent/market/tel 等拉起外部 App 的协议一律拦截；
+     * - 下载请求不交给系统 DownloadManager，转成我们自己的安全队列；
+     * - Cookie / 缓存独立在 app 私有目录，一键可清空；
+     * - shouldInterceptRequest 被动嗅探媒体直链（不执行网页 JS 注入，避免双向桥）。
+     */
+    private void bindBrowser() {
+        browserView = pageBrowser.findViewById(R.id.browser_webview);
+        browserUrl = pageBrowser.findViewById(R.id.browser_url);
+        browserProgress = pageBrowser.findViewById(R.id.browser_progress);
+        browserResList = pageBrowser.findViewById(R.id.browser_res_list);
+        browserResTitle = pageBrowser.findViewById(R.id.browser_res_title);
+        browserResToggle = pageBrowser.findViewById(R.id.browser_res_toggle);
+        browserResEmpty = pageBrowser.findViewById(R.id.browser_res_empty);
+        browserResPanel = pageBrowser.findViewById(R.id.browser_res_panel);
+        browserResHeader = pageBrowser.findViewById(R.id.browser_res_header);
+
+        // ---------- WebView 沙箱加固 ----------
+        android.webkit.WebSettings ws = browserView.getSettings();
+        ws.setJavaScriptEnabled(true);
+        ws.setAllowFileAccess(false);                       // 禁止 file://
+        ws.setAllowContentAccess(false);                    // 禁止 content://
+        ws.setJavaScriptCanOpenWindowsAutomatically(false); // 禁止 window.open 弹窗
+        ws.setGeolocationEnabled(false);                    // 不给定位
+        ws.setSaveFormData(false);
+        ws.setDomStorageEnabled(false);                     // 不持久化 DOM 存储
+        ws.setDatabaseEnabled(false);
+        ws.setMediaPlaybackRequiresUserGesture(true);       // 禁止网页自动播放声音
+        ws.setCacheMode(android.webkit.WebSettings.LOAD_NO_CACHE);
+        ws.setUseWideViewPort(true);
+        ws.setLoadWithOverviewMode(true);
+        ws.setBuiltInZoomControls(true);
+        ws.setDisplayZoomControls(false);
+        ws.setSupportZoom(true);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try { ws.setSafeBrowsingEnabled(true); } catch (Throwable ignored) { }
+        }
+        // 独立的 UserAgent，标注是 VSP 沙箱浏览器
+        try {
+            String ua = ws.getUserAgentString() + " VSPBrowser/1.0 (sandboxed)";
+            ws.setUserAgentString(ua);
+        } catch (Throwable ignored) { }
+        browserView.setVerticalScrollBarEnabled(true);
+        browserView.setHorizontalScrollBarEnabled(false);
+
+        browserView.setWebViewClient(new android.webkit.WebViewClient() {
+            // 新版（API 24+）：高版本系统会走这个重载
+            @Override
+            public boolean shouldOverrideUrlLoading(android.webkit.WebView view,
+                                                    android.webkit.WebResourceRequest request) {
+                return handleBrowserNavigation(request.getUrl().toString());
+            }
+            // 旧版兜底
+            @Override
+            public boolean shouldOverrideUrlLoading(android.webkit.WebView view, String url) {
+                return handleBrowserNavigation(url);
+            }
+            @Override
+            public void onPageStarted(android.webkit.WebView view, String url, android.graphics.Bitmap favicon) {
+                long token = ++browserNavToken;
+                browserSeen.clear();
+                ui.post(() -> {
+                    if (token != browserNavToken) return;
+                    clearBrowserResources();
+                    browserUrl.setText(url);
+                    browserProgress.setVisibility(View.VISIBLE);
+                });
+            }
+            @Override
+            public void onPageFinished(android.webkit.WebView view, String url) {
+                ui.post(() -> {
+                    browserProgress.setVisibility(View.GONE);
+                    applyBrowserSilent(); // 静音模式下压住网页视频
+                });
+                // 页面加载完后补充嗅探 DOM 里的 <video>/<audio>/<a> 直链（纯读取，不注入桥）
+                scanPageHtml(view, url);
+            }
+            @Override
+            public void onReceivedError(android.webkit.WebView view, int code, String desc, String failingUrl) {
+                ui.post(() -> browserProgress.setVisibility(View.GONE));
+            }
+
+            /**
+             * 被动嗅探：每个网络请求进来时看 URL / MIME 像不像媒体，
+             * 只记录直链，返回 null 表示不拦截、网页照常加载。
+             */
+            @Override
+            public android.webkit.WebResourceResponse shouldInterceptRequest(android.webkit.WebView view,
+                                                                             android.webkit.WebResourceRequest request) {
+                try {
+                    String url = request.getUrl().toString();
+                    String mime = request.getRequestHeaders() != null
+                            ? request.getRequestHeaders().get("Accept") : null;
+                    BrowserResource res = classifyBrowserResource(url, mime);
+                    if (res != null) offerBrowserResource(res);
+                } catch (Throwable ignored) { }
+                return null;
+            }
+        });
+
+        browserView.setWebChromeClient(new android.webkit.WebChromeClient() {
+            @Override
+            public void onProgressChanged(android.webkit.WebView view, int progress) {
+                ui.post(() -> {
+                    browserProgress.setVisibility(progress >= 100 ? View.GONE : View.VISIBLE);
+                    browserProgress.setProgress(progress);
+                });
+            }
+            @Override
+            public void onReceivedTitle(android.webkit.WebView view, String title) {
+                // 标题不抢占地址栏，地址栏始终显示当前 URL
+            }
+        });
+
+        // 拦截下载：不让网页把 APK / 任意文件塞进公共存储，转成我们自己的安全队列
+        browserView.setDownloadListener((url, userAgent, contentDisposition, mimeType, length) -> {
+            BrowserResource res = classifyBrowserResource(url, mimeType);
+            if (res == null) {
+                ui.post(() -> Toast.makeText(this, "已拦截不安全的下载请求", Toast.LENGTH_SHORT).show());
+                return;
+            }
+            ui.post(() -> downloadBrowserResource(res));
+        });
+
+        // ---------- 地址栏 ----------
+        Runnable go = () -> {
+            String input = browserUrl.getText().toString().trim();
+            if (input.isEmpty()) return;
+            String url = normalizeBrowserUrl(input);
+            if (url == null) {
+                Toast.makeText(this, "请输入 http(s) 网址", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            dismissKeyboard();
+            browserView.loadUrl(url);
+        };
+        pageBrowser.findViewById(R.id.browser_go).setOnClickListener(v -> go.run());
+        browserUrl.setOnEditorActionListener((v, actionId, event) -> {
+            go.run();
+            return true;
+        });
+        pageBrowser.findViewById(R.id.browser_clear).setOnClickListener(v -> clearBrowserData());
+
+        // ---------- 资源面板 ----------
+        browserResAdapter = new BrowserResAdapter();
+        browserResList.setLayoutManager(new LinearLayoutManager(this));
+        browserResList.setAdapter(browserResAdapter);
+        View.OnClickListener toggle = v -> setBrowserResExpanded(!browserResExpanded);
+        browserResHeader.setOnClickListener(toggle);
+        browserResToggle.setOnClickListener(toggle);
+
+        // 默认打开一个导航起始页，避免空白
+        browserView.loadUrl("https://www.bing.com");
+    }
+
+    /** 媒体资源 URL / MIME 分类：像视频/音频就返回条目，否则 null。 */
+    private static final String[] MEDIA_EXTS = {
+            ".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi", ".flv", ".wmv", ".ts",
+            ".m3u8", ".mpd", ".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".opus"
+    };
+    private BrowserResource classifyBrowserResource(String url, String hintMime) {
+        if (url == null) return null;
+        try {
+            String low = url.toLowerCase(java.util.Locale.ROOT);
+            int q = low.indexOf('?');
+            String path = q > 0 ? low.substring(0, q) : low;
+            boolean video = false, audio = false;
+            for (String ext : MEDIA_EXTS) {
+                if (path.endsWith(ext)) {
+                    if (ext.equals(".m3u8") || ext.equals(".mpd") || ext.equals(".mp4")
+                            || ext.equals(".mkv") || ext.equals(".webm") || ext.equals(".mov")
+                            || ext.equals(".m4v") || ext.equals(".avi") || ext.equals(".flv")
+                            || ext.equals(".wmv") || ext.equals(".ts")) video = true;
+                    else audio = true;
+                    break;
+                }
+            }
+            // MIME 兜底（CDN 直链常无扩展名）
+            if (!video && !audio && hintMime != null) {
+                String m = hintMime.toLowerCase(java.util.Locale.ROOT);
+                if (m.startsWith("video/") || m.contains("mpegurl") || m.contains("dash+xml")) video = true;
+                else if (m.startsWith("audio/")) audio = true;
+            }
+            if (!video && !audio) return null;
+            // 过滤明显不是媒体的：favicon、logo、小图标
+            if (path.contains("favicon") || path.contains("logo") || path.contains("icon")) return null;
+            String name = mediaNameFromUrl(url);
+            return new BrowserResource(url, name, video);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private String mediaNameFromUrl(String url) {
+        try {
+            String p = android.net.Uri.parse(url).getLastPathSegment();
+            if (p == null || p.isEmpty()) return "媒体资源";
+            return android.net.Uri.decode(p);
+        } catch (Throwable t) {
+            return "媒体资源";
+        }
+    }
+
+    /** 从后台线程调用，切回 UI 线程去重入列 */
+    private void offerBrowserResource(BrowserResource res) {
+        if (res == null || res.url == null) return;
+        if (!browserSeen.add(res.url)) return;
+        ui.post(() -> {
+            // 二次去重（UI 线程），并限制最多 60 条，防止长页面刷爆
+            for (BrowserResource b : browserResources) if (b.url.equals(res.url)) return;
+            browserResources.add(res);
+            if (browserResources.size() > 60) browserResources.remove(0);
+            refreshBrowserResUi();
+        });
+    }
+
+    private void clearBrowserResources() {
+        browserResources.clear();
+        refreshBrowserResUi();
+    }
+
+    private void refreshBrowserResUi() {
+        if (browserResTitle == null) return;
+        browserResTitle.setText("可下载资源 (" + browserResources.size() + ")");
+        boolean empty = browserResources.isEmpty();
+        browserResEmpty.setVisibility(empty ? View.VISIBLE : View.GONE);
+        browserResList.setVisibility(!empty && browserResExpanded ? View.VISIBLE : View.GONE);
+        browserResAdapter.notifyDataSetChanged();
+    }
+
+    private void setBrowserResExpanded(boolean expanded) {
+        browserResExpanded = expanded;
+        browserResToggle.setText(expanded ? "收起 ↓" : "展开 ↑");
+        browserResList.setVisibility(expanded && !browserResources.isEmpty() ? View.VISIBLE : View.GONE);
+    }
+
+    /** 页面加载完后读取源码里的 <video src>/<source>/<a href>，补充嗅探（纯字符串处理，不注入 JS 桥） */
+    private void scanPageHtml(android.webkit.WebView view, String pageUrl) {
+        final String tokenUrl = pageUrl;
+        new Thread(() -> {
+            try {
+                if (!pyReady) return;
+                String html = py.getModule("vsp").callAttr("fetch_html", tokenUrl).toString();
+                if (html == null || html.isEmpty()) return;
+                org.json.JSONArray arr = new org.json.JSONArray(
+                        py.getModule("vsp").callAttr("scan_media_json", html, tokenUrl).toString());
+                for (int i = 0; i < arr.length(); i++) {
+                    String u = arr.optString(i, "");
+                    if (u.isEmpty()) continue;
+                    BrowserResource r = classifyBrowserResource(u, null);
+                    if (r != null) offerBrowserResource(r);
+                }
+            } catch (Throwable ignored) { }
+        }, "vsp-browser-scan").start();
+    }
+
+    /** 下载浏览器嗅探到的资源：直链走 vsp 的 url: 前缀机制，复用下载队列 */
+    private void downloadBrowserResource(BrowserResource res) {
+        if (!pyReady) {
+            Toast.makeText(this, "正在初始化，请稍候…", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new Thread(() -> {
+            try {
+                py.getModule("vsp").callAttr("start_download", res.url, "url:" + res.url,
+                        res.name, "", false);
+                lastTasksJson = "";
+                refreshTasks();
+                ui.post(() -> Toast.makeText(this, "已加入下载队列：" + res.name, Toast.LENGTH_SHORT).show());
+            } catch (Exception e) {
+                ui.post(() -> Toast.makeText(this, "下载失败：" + friendlyError(e), Toast.LENGTH_SHORT).show());
+            }
+        }, "vsp-browser-dl").start();
+    }
+
+    /** 一键清空浏览数据：Cookie / 缓存 / 历史 / 嗅探列表 */
+    private void clearBrowserData() {
+        try {
+            browserView.clearCache(true);
+            browserView.clearHistory();
+            browserView.clearFormData();
+            android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
+            if (Build.VERSION.SDK_INT >= 21) {
+                cm.removeAllCookies(value -> ui.post(() ->
+                        Toast.makeText(this, "浏览数据已清空", Toast.LENGTH_SHORT).show()));
+            } else {
+                cm.removeAllCookie();
+                Toast.makeText(this, "浏览数据已清空", Toast.LENGTH_SHORT).show();
+            }
+        } catch (Throwable t) {
+            Toast.makeText(this, "清理失败：" + t.getMessage(), Toast.LENGTH_SHORT).show();
+        }
+        browserSeen.clear();
+        clearBrowserResources();
+        browserUrl.setText("");
+    }
+
+    /** 浏览器资源列表适配器 */
+    private class BrowserResAdapter extends RecyclerView.Adapter<BrowserResAdapter.VH> {
+        class VH extends RecyclerView.ViewHolder {
+            ImageView kind;
+            TextView name, url, download;
+            VH(View v) {
+                super(v);
+                kind = v.findViewById(R.id.br_kind);
+                name = v.findViewById(R.id.br_name);
+                url = v.findViewById(R.id.br_url);
+                download = v.findViewById(R.id.br_download);
+            }
+        }
+        @Override public VH onCreateViewHolder(ViewGroup parent, int viewType) {
+            return new VH(getLayoutInflater().inflate(R.layout.item_browser_res, parent, false));
+        }
+        @Override public void onBindViewHolder(VH h, int pos) {
+            BrowserResource r = browserResources.get(pos);
+            h.kind.setImageResource(r.video ? R.drawable.ic_video : R.drawable.ic_audio);
+            h.kind.setColorFilter(P.accent);
+            h.name.setText(r.name);
+            h.url.setText(r.url);
+            applyThemeToTree(h.itemView);
+            h.itemView.setOnClickListener(v -> {
+                // 点击条目：用全屏播放器打开直链（顺带下载）
+                previewPageUrl = "https://browser.local/";
+                previewFormatId = "";   // 不复用上一次解析的清晰度，下载走 url: 直链
+                openPlayer(r.url, r.video ? TYPE_VIDEO : TYPE_AUDIO, r.name, false, null, -1, null);
+            });
+            h.download.setOnClickListener(v -> downloadBrowserResource(r));
+        }
+        @Override public int getItemCount() { return browserResources.size(); }
+    }
+
+    /** 把用户输入补成完整 URL；非 http(s) 返回 null（拦截危险协议） */
+    private String normalizeBrowserUrl(String input) {
+        String s = input.trim();
+        if (s.startsWith("http://") || s.startsWith("https://")) return s;
+        if (s.contains(".") && !s.contains(" ")) return "https://" + s;
+        return null;
+    }
+
+    /** 导航总闸：只放行 http(s)，其余（intent/market/tel/file/javascript/data…）一律拦截 */
+    private boolean handleBrowserNavigation(String url) {
+        if (url == null) return true;
+        String low = url.toLowerCase(java.util.Locale.ROOT).trim();
+        if (low.startsWith("http://") || low.startsWith("https://")) {
+            browserUrl.setText(url);
+            return false; // 由 WebView 自己加载
+        }
+        // about:blank 允许（起始空白页）
+        if (low.equals("about:blank")) return false;
+        Toast.makeText(this, "已拦截不安全的跳转：" + low.split(":")[0] + ":", Toast.LENGTH_SHORT).show();
+        return true; // 拦截
     }
 
     private void bindPlayer() {
@@ -970,16 +1379,23 @@ public class MainActivity extends Activity {
             public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
                 if (!fromUser) return;
                 showPlayerOverlay();
+                // 一键静音：拖音量条不改实际输出，始终静音
+                if (silentMode) {
+                    s.setProgress(0);
+                    playerVolumeVal.setText("静音");
+                    Toast.makeText(MainActivity.this, "一键静音开启中，无法调节音量", Toast.LENGTH_SHORT).show();
+                    return;
+                }
                 playVolume = progress / 100f;
                 playerVolumeVal.setText(progress + "%");
                 if (exoActive && exoPlayer != null) {
                     try {
-                        exoPlayer.setVolume(playVolume);
+                        exoPlayer.setVolume(effectiveVolume());
                     } catch (Throwable ignored) {
                     }
                 } else if (currentMp != null) {
                     try {
-                        currentMp.setVolume(playVolume, playVolume);
+                        currentMp.setVolume(effectiveVolume(), effectiveVolume());
                     } catch (Throwable ignored) {
                     }
                 }
@@ -994,10 +1410,57 @@ public class MainActivity extends Activity {
             public void onStopTrackingTouch(SeekBar s) {
             }
         });
+
+        // 下载当前正在观看的网络媒体：优先用解析条目的 formatId，否则用直链 url: 机制
+        playerDownload = playerPanel.findViewById(R.id.player_download);
+        playerDownload.setOnClickListener(v -> downloadCurrentWatch());
+    }
+
+    private void downloadCurrentWatch() {
+        if (!pyReady) {
+            Toast.makeText(this, "正在初始化，请稍候…", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        final String source = watchSource;
+        if (source == null || (!source.startsWith("http://") && !source.startsWith("https://"))) {
+            Toast.makeText(this, "本地文件无需下载", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        final String title = watchTitle == null || watchTitle.isEmpty()
+                ? mediaNameFromUrl(source) : watchTitle;
+        new Thread(() -> {
+            try {
+                // 解析预览：formatId 复用原始清晰度；浏览器直链：url: 前缀走通用下载器
+                String fmtId = "url:" + source;
+                JSONObject fmt = findCurrentPreviewFormat();
+                if (fmt != null && !fmt.optString("formatId", "").isEmpty()) {
+                    fmtId = fmt.optString("formatId");
+                }
+                boolean merge = fmt != null && fmt.optBoolean("needsMerge", false);
+                py.getModule("vsp").callAttr("start_download",
+                        previewPageUrl != null && previewPageUrl.startsWith("http") ? previewPageUrl : source,
+                        fmtId, title, currentThumb == null ? "" : currentThumb, merge);
+                lastTasksJson = "";
+                refreshTasks();
+                ui.post(() -> Toast.makeText(this, "已加入下载队列 · 我的 → 下载队列", Toast.LENGTH_SHORT).show());
+            } catch (Exception e) {
+                ui.post(() -> Toast.makeText(this, "下载失败：" + friendlyError(e), Toast.LENGTH_SHORT).show());
+            }
+        }, "vsp-watch-dl").start();
+    }
+
+    /** 从解析结果里找当前预览条目对应的 format，复用其清晰度 id */
+    private JSONObject findCurrentPreviewFormat() {
+        if (previewFormatId == null || previewFormatId.isEmpty()) return null;
+        for (JSONObject f : currentFormats) {
+            if (previewFormatId.equals(f.optString("formatId", ""))) return f;
+        }
+        return null;
     }
 
     private void bindGlobal() {
         findViewById(R.id.tab_home).setOnClickListener(v -> switchPage(PAGE_HOME));
+        findViewById(R.id.tab_browser).setOnClickListener(v -> switchPage(PAGE_BROWSER));
         findViewById(R.id.tab_local).setOnClickListener(v -> switchPage(PAGE_LOCAL));
         findViewById(R.id.tab_me).setOnClickListener(v -> switchPage(PAGE_ME));
         btnHistory.setOnClickListener(v -> showHistory());
@@ -1034,6 +1497,64 @@ public class MainActivity extends Activity {
         applyTheme();
     }
 
+    /** 一键静音开关：写入偏好并立刻把当前播放器的音量压到 0（或恢复） */
+    private void setSilentMode(boolean on) {
+        if (silentMode == on) return;
+        silentMode = on;
+        prefs.edit().putBoolean("silent_mode", on).apply();
+        suppressSilentSwitch = true;
+        if (silentSwitch != null) silentSwitch.setChecked(on);
+        suppressSilentSwitch = false;
+        // 立刻作用到所有在播的播放器
+        applySilentNow();
+        Toast.makeText(this, on ? "已开启一键静音：VSP 始终静音" : "已关闭一键静音", Toast.LENGTH_SHORT).show();
+    }
+
+    /** 实际生效音量：静音模式恒为 0，否则用播放器音量条的值 */
+    private float effectiveVolume() {
+        return silentMode ? 0f : playVolume;
+    }
+
+    /** 把静音状态应用到当前所有播放器 + 浏览器网页视频 + 音量条 UI */
+    private void applySilentNow() {
+        float v = effectiveVolume();
+        try {
+            if (exoActive && exoPlayer != null) exoPlayer.setVolume(v);
+        } catch (Throwable ignored) {
+        }
+        try {
+            if (currentMp != null) currentMp.setVolume(v, v);
+        } catch (Throwable ignored) {
+        }
+        try {
+            if (audioPlayer != null) audioPlayer.setVolume(v, v);
+        } catch (Throwable ignored) {
+        }
+        // 音量条：静音时归零并禁用；恢复时回到之前的 playVolume
+        if (playerVolume != null) {
+            int pct = silentMode ? 0 : Math.round(playVolume * 100);
+            playerVolume.setProgress(pct);
+            playerVolume.setEnabled(!silentMode);
+        }
+        if (playerVolumeVal != null) {
+            playerVolumeVal.setText(silentMode ? "静音" : (Math.round(playVolume * 100) + "%"));
+        }
+        // 网页里的 <video>/<audio>：注入静音脚本（纯设置媒体元素，不碰网页逻辑）
+        applyBrowserSilent();
+    }
+
+    /** 向当前网页注入脚本，把所有媒体元素静音；静音开关切换 / 页面加载完调用 */
+    private void applyBrowserSilent() {
+        if (browserView == null) return;
+        try {
+            String js = "(function(){var vs=document.querySelectorAll('video,audio');"
+                    + "for(var i=0;i<vs.length;i++){vs[i].muted=" + (silentMode ? "true" : "false")
+                    + ";vs[i].volume=" + (silentMode ? "0" : "1") + ";}return vs.length;})()";
+            browserView.evaluateJavascript(js, null);
+        } catch (Throwable ignored) {
+        }
+    }
+
     private void applyTheme() {
         if (P == null || root == null) return;
         getWindow().setStatusBarColor(P.card);
@@ -1049,6 +1570,10 @@ public class MainActivity extends Activity {
             try {
                 themeSwitch.setThumbTintList(ColorStateList.valueOf(P.accent));
                 themeSwitch.setTrackTintList(ColorStateList.valueOf(P.divider));
+                if (silentSwitch != null) {
+                    silentSwitch.setThumbTintList(ColorStateList.valueOf(P.accent));
+                    silentSwitch.setTrackTintList(ColorStateList.valueOf(P.divider));
+                }
             } catch (Throwable ignored) {
             }
         }
@@ -1147,6 +1672,9 @@ public class MainActivity extends Activity {
             case "tab_home":
                 setActiveColor(v, currentPage == PAGE_HOME);
                 break;
+            case "tab_browser":
+                setActiveColor(v, currentPage == PAGE_BROWSER);
+                break;
             case "tab_local":
                 setActiveColor(v, currentPage == PAGE_LOCAL);
                 break;
@@ -1174,6 +1702,8 @@ public class MainActivity extends Activity {
     private void refreshTabColors() {
         setActiveColor(findViewById(R.id.tab_home_icon), currentPage == PAGE_HOME);
         setActiveColor(findViewById(R.id.tab_home_text), currentPage == PAGE_HOME);
+        setActiveColor(findViewById(R.id.tab_browser_icon), currentPage == PAGE_BROWSER);
+        setActiveColor(findViewById(R.id.tab_browser_text), currentPage == PAGE_BROWSER);
         setActiveColor(findViewById(R.id.tab_local_icon), currentPage == PAGE_LOCAL);
         setActiveColor(findViewById(R.id.tab_local_text), currentPage == PAGE_LOCAL);
         setActiveColor(findViewById(R.id.tab_me_icon), currentPage == PAGE_ME);
@@ -1207,10 +1737,11 @@ public class MainActivity extends Activity {
         pageFiles.setVisibility(page == PAGE_FILES ? View.VISIBLE : View.GONE);
         pageVideos.setVisibility(page == PAGE_VIDEOS ? View.VISIBLE : View.GONE);
         pageScan.setVisibility(page == PAGE_SCAN ? View.VISIBLE : View.GONE);
+        pageBrowser.setVisibility(page == PAGE_BROWSER ? View.VISIBLE : View.GONE);
 
-        // 最高级页面（首页 / 本地 / 我的）才显示 VSP 解析标题栏与底部标签；
+        // 最高级页面（首页 / 浏览器 / 本地 / 我的）才显示 VSP 解析标题栏与底部标签；
         // 历史图标只出现在首页，⋯ 只出现在本地；子页面只保留自己的返回栏。
-        boolean topLevel = (page == PAGE_HOME || page == PAGE_LOCAL || page == PAGE_ME);
+        boolean topLevel = (page == PAGE_HOME || page == PAGE_LOCAL || page == PAGE_ME || page == PAGE_BROWSER);
         topBar.setVisibility(topLevel ? View.VISIBLE : View.GONE);
         btnHistory.setVisibility(page == PAGE_HOME ? View.VISIBLE : View.GONE);
         btnMore.setVisibility(page == PAGE_LOCAL ? View.VISIBLE : View.GONE);
@@ -1224,6 +1755,7 @@ public class MainActivity extends Activity {
             scanStatus.setText("尚未扫描");
             scanCount.setText("点下方「开始扫描」扫描手机里的视频、音频和图片");
         }
+        if (page == PAGE_BROWSER) applyBrowserSilent();
     }
 
     private void switchTab(String tab) {
@@ -1242,6 +1774,11 @@ public class MainActivity extends Activity {
             exitSelection();
             return;
         }
+        // 浏览器页：网页能回退就回退，否则回首页
+        if (currentPage == PAGE_BROWSER && browserView != null && browserView.canGoBack()) {
+            browserView.goBack();
+            return;
+        }
         if (currentPage == PAGE_QUEUE || currentPage == PAGE_STORAGE) {
             switchPage(PAGE_ME);
             return;
@@ -1254,7 +1791,7 @@ public class MainActivity extends Activity {
             switchPage(PAGE_LOCAL);
             return;
         }
-        if (currentPage == PAGE_ME || currentPage == PAGE_LOCAL) {
+        if (currentPage == PAGE_ME || currentPage == PAGE_LOCAL || currentPage == PAGE_BROWSER) {
             switchPage(PAGE_HOME);
             return;
         }
@@ -2361,6 +2898,14 @@ public class MainActivity extends Activity {
         final boolean isNetworkVideo = type == TYPE_VIDEO && !local && !isContent
                 && source != null && source.startsWith("http");
         exoActive = isNetworkVideo;
+        // 网络媒体（解析预览 / 浏览器直链）显示下载按钮；本地 / content 不显示
+        watchCanDownload = !local && !isContent && source != null
+                && (source.startsWith("http://") || source.startsWith("https://"));
+        if (playerDownload != null) {
+            playerDownload.setVisibility(watchCanDownload ? View.VISIBLE : View.GONE);
+        }
+        // 每次打开播放器都应用一键静音，确保新播放器实例也是静音
+        applySilentNow();
         if (fmt != null) {
             previewFormatId = fmt.optString("formatId", previewFormatId);
         }
@@ -2571,7 +3116,7 @@ public class MainActivity extends Activity {
             exoPlayer.addListener(exoListener);
             exoPlayer.setMediaSource(playSource);
             exoPlayer.setPlayWhenReady(true);
-            exoPlayer.setVolume(playVolume);
+            exoPlayer.setVolume(effectiveVolume());
             try {
                 exoPlayer.setPlaybackParameters(new PlaybackParameters(SPEEDS[speedIndex]));
             } catch (Throwable ignored) {
@@ -4580,7 +5125,7 @@ public class MainActivity extends Activity {
         float speed = SPEEDS[speedIndex];
         if (exoActive && exoPlayer != null) {
             try {
-                exoPlayer.setVolume(playVolume);
+                exoPlayer.setVolume(effectiveVolume());
             } catch (Throwable ignored) {
             }
             try {
@@ -4591,7 +5136,7 @@ public class MainActivity extends Activity {
         }
         if (mp == null) return;
         try {
-            mp.setVolume(playVolume, playVolume);
+            mp.setVolume(effectiveVolume(), effectiveVolume());
         } catch (Throwable ignored) {
         }
         // 1.0x 时不要碰 PlaybackParams：部分机型只要调过一次
@@ -4608,7 +5153,7 @@ public class MainActivity extends Activity {
             android.media.PlaybackParams params = new android.media.PlaybackParams();
             params.setSpeed(SPEEDS[speedIndex]);
             mp.setPlaybackParams(params);
-            mp.setVolume(playVolume, playVolume);
+            mp.setVolume(effectiveVolume(), effectiveVolume());
         } catch (Throwable ignored) {
         }
     }
