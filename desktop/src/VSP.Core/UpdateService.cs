@@ -2,7 +2,8 @@ using System.Text.Json;
 
 namespace VSP.Core;
 
-public sealed record UpdateInfo(string Version, string DownloadUrl, string PageUrl, string Notes, long Size);
+public sealed record UpdateInfo(string Version, string DownloadUrl, string PageUrl, string Notes, long Size,
+    IReadOnlyList<string>? Mirrors = null);
 
 /// <summary>
 /// Desktop-only update lookup. This deliberately never reads the App's apk/dist/latest.json:
@@ -11,13 +12,15 @@ public sealed record UpdateInfo(string Version, string DownloadUrl, string PageU
 /// </summary>
 public sealed class UpdateService
 {
-    public const string Version = "1.1.1";
+    public const string Version = "1.1.2";
     private const string GithubApi = "https://api.github.com/repos/tang536/VSP-/releases/latest";
     private const string GiteeApi = "https://gitee.com/api/v5/repos/tang-rongqiang/VSP/releases/latest";
     private const string DesktopIndex = "https://gitee.com/tang-rongqiang/VSP/raw/main/desktop/dist/latest.json";
     private const string GithubIndex = "https://raw.githubusercontent.com/tang536/VSP-/main/desktop/dist/latest.json";
     private const string GiteeDist = "https://gitee.com/tang-rongqiang/VSP/raw/main/desktop/dist/";
     private const string GithubDist = "https://raw.githubusercontent.com/tang536/VSP-/main/desktop/dist/";
+    private const string GithubRelease = "https://github.com/tang536/VSP-/releases/download/";
+    private const string GiteeRelease = "https://gitee.com/tang-rongqiang/VSP/releases/download/";
     private const string GithubPage = "https://github.com/tang536/VSP-/releases";
     public const string PageUrl = GithubPage;
 
@@ -101,16 +104,28 @@ public sealed class UpdateService
 
             // App 的 APK release 没有任何 .msi 资产，走不到下面，天然被排除。
             string download = "";
+            var mirrors = new List<string>();
             if (root.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
             {
                 foreach (var a in assets.EnumerateArray())
                 {
                     var name = Str(a, "name");
                     var url = Str(a, "browser_download_url");
-                    if (name.EndsWith(".msi", StringComparison.OrdinalIgnoreCase) || IsMsi(url))
-                    { download = url; break; }
+                    if ((name.EndsWith(".msi", StringComparison.OrdinalIgnoreCase) || IsMsi(url)) &&
+                        !string.IsNullOrWhiteSpace(url) && !mirrors.Contains(url, StringComparer.OrdinalIgnoreCase))
+                        mirrors.Add(url);
                 }
             }
+            // 索引里可显式列出镜像（不同 CDN / 不同平台 Release），全部纳入候选。
+            if (root.TryGetProperty("mirrors", out var mir) && mir.ValueKind == JsonValueKind.Array)
+                foreach (var m in mir.EnumerateArray())
+                    if (m.ValueKind == JsonValueKind.String)
+                    {
+                        var u = m.GetString() ?? "";
+                        if (!string.IsNullOrWhiteSpace(u) && !mirrors.Contains(u, StringComparer.OrdinalIgnoreCase))
+                            mirrors.Add(u);
+                    }
+            if (mirrors.Count > 0) download = mirrors[0];
             if (string.IsNullOrEmpty(download)) download = msiField;
             if (string.IsNullOrEmpty(download) || !IsMsi(download)) return null;
 
@@ -119,12 +134,14 @@ public sealed class UpdateService
                 // 相对文件名按「索引所在的 dist 目录」补全，GitHub / Gitee 两个源都能直接下。
                 var prefix = source == GithubIndex ? GithubDist : GiteeDist;
                 download = prefix + download.TrimStart('/');
+                mirrors = mirrors.Select(m => m.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+                    ? m : prefix + m.TrimStart('/')).ToList();
             }
 
             // 桌面版发布页与 App 发布页分开。
             var page = Str(root, "page");
             if (string.IsNullOrWhiteSpace(page)) page = GithubPage;
-            return new UpdateInfo(tag, download, page, Str(root, "notes"), (long)Num(root, "size"));
+            return new UpdateInfo(tag, download, page, Str(root, "notes"), (long)Num(root, "size"), mirrors);
         }
         catch { return null; }
     }
@@ -148,34 +165,102 @@ public sealed class UpdateService
         return 0;
     }
 
-    public async Task DownloadAsync(UpdateInfo info, string target, IProgress<double> progress, CancellationToken ct)
+    public async Task DownloadAsync(UpdateInfo info, string target, IProgress<double> progress,
+        IProgress<string>? status, CancellationToken ct)
     {
+        var name = info.DownloadUrl.Split('?')[0].Split('/').LastOrDefault() ?? "";
+        var ver = info.Version.TrimStart('v', 'V');
+        var candidates = new List<string>();
+        void Add(string u) { if (!string.IsNullOrWhiteSpace(u) && !candidates.Contains(u, StringComparer.OrdinalIgnoreCase)) candidates.Add(u); }
+        Add(info.DownloadUrl);
+        if (info.Mirrors is not null) foreach (var m in info.Mirrors) Add(m);
+        if (name.EndsWith(".msi", StringComparison.OrdinalIgnoreCase))
+        {
+            // GitHub / Gitee 桌面版 Release 同名资产 + 两个 raw 目录，全部作为候选源。
+            Add(GithubRelease + "desktop-v" + ver + "/" + name);
+            Add(GiteeRelease + "desktop-v" + ver + "/" + name);
+            Add(GithubDist + name);
+            Add(GiteeDist + name);
+        }
+
+        // 下载前并发测速：各源取前 256KB 计算速率，按快到慢排序。
+        status?.Report("正在测速，自动选择最快的下载源…");
+        using var probeClient = new HttpClient(new HttpClientHandler
+        {
+            AllowAutoRedirect = true,
+            AutomaticDecompression = System.Net.DecompressionMethods.All
+        }) { Timeout = TimeSpan.FromSeconds(12) };
+        probeClient.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", RefererPolicy.UserAgent);
+
+        var probes = await Task.WhenAll(candidates.Select(async url =>
+        {
+            var speed = await ProbeSpeedAsync(probeClient, url, ct);
+            return (Url: url, Speed: speed);
+        }));
+        var ok = probes.Where(p => p.Speed > 0).OrderByDescending(p => p.Speed).ToList();
+        var ranked = ok.Select(p => p.Url)
+            .Concat(probes.Where(p => p.Speed <= 0).Select(p => p.Url)).ToList();
+        if (ranked.Count == 0) throw new Exception("没有可用的下载源");
+        status?.Report(ok.Count > 0
+            ? $"已选最快源：{Friendly(ok[0].Url)}（{ok[0].Speed:F1} MB/s），开始下载…"
+            : "测速未完成，按默认顺序下载…");
+
         using var handler = new HttpClientHandler { AllowAutoRedirect = false };
         using var client = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
         client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", RefererPolicy.UserAgent);
 
-        // 主源拿不到时自动换另一个镜像再试一次（Gitee raw 对大文件会 403）。
-        var urls = new List<string> { info.DownloadUrl };
-        var name = info.DownloadUrl.Split('?')[0].Split('/').LastOrDefault() ?? "";
-        if (name.EndsWith(".msi", StringComparison.OrdinalIgnoreCase))
-        {
-            var mirror = (info.DownloadUrl.Contains("gitee", StringComparison.OrdinalIgnoreCase) ? GithubDist : GiteeDist) + name;
-            if (!urls.Contains(mirror)) urls.Add(mirror);
-        }
-
         Exception? last = null;
-        foreach (var url in urls)
+        foreach (var url in ranked)
         {
+            ct.ThrowIfCancellationRequested();
             try
             {
+                status?.Report($"正在从 {Friendly(url)} 下载…");
                 await DownloadOneAsync(client, url, target, progress, info, ct);
                 return;
             }
             catch (OperationCanceledException) { throw; }
-            catch (Exception ex) { last = ex; }
+            catch (Exception ex)
+            {
+                last = ex;
+                status?.Report($"{Friendly(url)} 下载失败，自动切换下一个源…");
+            }
         }
         throw last ?? new Exception("下载失败");
     }
+
+    /// <summary>取一小段数据测算该源速度；不支持 Range 的源读够即断开，不会下载整包。</summary>
+    private static async Task<double> ProbeSpeedAsync(HttpClient client, string url, CancellationToken ct)
+    {
+        const int limit = 262144;
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            req.Headers.TryAddWithoutValidation("Range", "bytes=0-" + (limit - 1));
+            using var resp = await client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
+            var code = (int)resp.StatusCode;
+            if (code >= 400) return -1;
+            await using var s = await resp.Content.ReadAsStreamAsync(ct);
+            var buf = new byte[16384];
+            long got = 0;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (got < limit)
+            {
+                var n = await s.ReadAsync(buf.AsMemory(0, (int)Math.Min(buf.Length, limit - got)), ct);
+                if (n <= 0) break;
+                got += n;
+            }
+            sw.Stop();
+            if (got < 8192 || sw.Elapsed.TotalSeconds <= 0) return -1;
+            return got / 1024.0 / 1024.0 / sw.Elapsed.TotalSeconds;
+        }
+        catch { return -1; }
+    }
+
+    private static string Friendly(string url) =>
+        url.Contains("gitee", StringComparison.OrdinalIgnoreCase) ? "Gitee 镜像"
+        : url.Contains("github", StringComparison.OrdinalIgnoreCase) ? "GitHub"
+        : "备用源";
 
     private static async Task DownloadOneAsync(HttpClient client, string startUrl, string target,
         IProgress<double> progress, UpdateInfo info, CancellationToken ct)
