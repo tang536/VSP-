@@ -7,4 +7,9 @@
     <InvariantGlobalization>false</InvariantGlobalization>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- 局域网远程控制需要截屏；桌面端仅 Windows x64 发布 -->
+    <PackageReference Include="System.Drawing.Common" Version="10.0.0" />
+  </ItemGroup>
+
 </Project>

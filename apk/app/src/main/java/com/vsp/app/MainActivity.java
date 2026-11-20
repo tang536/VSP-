@@ -25,6 +25,7 @@ import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.media.MediaPlayer;
+import android.media.projection.MediaProjectionManager;
 import android.media.ThumbnailUtils;
 import android.net.Uri;
 import android.os.Build;
@@ -35,6 +36,7 @@ import android.os.Looper;
 import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.provider.Settings;
+import android.util.Base64;
 import android.util.Log;
 import android.util.Size;
 import android.view.MotionEvent;
@@ -126,7 +128,8 @@ public class MainActivity extends Activity {
     private static final int PAGE_VIDEOS = 6;
     private static final int PAGE_SCAN = 7;
     private static final int PAGE_BROWSER = 8;
-    private static final int PAGE_COUNT = 9;
+    private static final int PAGE_LAN = 9;
+    private static final int PAGE_COUNT = 10;
 
     // 多选归属：首页=批量下载；下载中 / 已完成两段队列各自独立选择
     private static final int SEL_ACTIVE = 10;
@@ -140,6 +143,8 @@ public class MainActivity extends Activity {
     private static final int REQ_SCAN_TREE = 1002;
     private static final int REQ_MEDIA_PERM = 1003;
     private static final int REQ_NOTIF_PERM = 1004;
+    private static final int REQ_LAN_PROJECTION = 1005;
+    private static final int REQ_LAN_UPLOAD = 1006;
     private static final int SCAN_MAX = 1500;
     private static final int RECENT_MAX = 8;
     private static final String PREF = "vsp_prefs";
@@ -184,8 +189,20 @@ public class MainActivity extends Activity {
     private int currentPage = PAGE_HOME;
     private Palette P;
 
-    private View root, pageHome, pageMe, pageQueue, pageLocal, pageStorage, pageFiles, pageVideos, pageScan, pageBrowser;
+    private View root, pageHome, pageMe, pageQueue, pageLocal, pageStorage, pageFiles, pageVideos, pageScan, pageBrowser, pageLan;
     private View topBar, btnHistory, btnMore, bottomTab, selectionBar, playerPanel;
+
+    // 局域网互传与远控
+    private LanCore lan;
+    private LinearLayout lanDevicesBox, lanFileList;
+    private View lanNoDevices, lanOps, lanFileBar, lanControlPanel;
+    private TextView lanStatusText, lanLocalIpText, lanSelectedName, lanBreadcrumbText;
+    private ImageView lanScreen;
+    private LanCore.Device lanSelected;
+    private final java.util.Stack<String> lanDirStack = new java.util.Stack<>();
+    private boolean lanControlling = false;
+    private final Handler lanScreenHandler = new Handler(Looper.getMainLooper());
+    private Runnable lanScreenTask;
     /** 每个页面各有一个 player_slot，全 app 唯一的播放器在打开预览时挂到当前页。 */
     private final FrameLayout[] playerSlots = new FrameLayout[PAGE_COUNT];
 
@@ -603,6 +620,7 @@ public class MainActivity extends Activity {
             pageVideos = getLayoutInflater().inflate(R.layout.page_videos, null);
             pageScan = getLayoutInflater().inflate(R.layout.page_scan, null);
             pageBrowser = getLayoutInflater().inflate(R.layout.page_browser, null);
+            pageLan = getLayoutInflater().inflate(R.layout.page_lan, null);
             FrameLayout content = findViewById(R.id.content);
             content.addView(pageHome);
             content.addView(pageMe);
@@ -613,6 +631,7 @@ public class MainActivity extends Activity {
             content.addView(pageVideos);
             content.addView(pageScan);
             content.addView(pageBrowser);
+            content.addView(pageLan);
             topBar = findViewById(R.id.top_bar);
             btnHistory = findViewById(R.id.btn_history);
             btnMore = findViewById(R.id.btn_more);
@@ -628,6 +647,7 @@ public class MainActivity extends Activity {
             playerSlots[PAGE_FILES] = pageFiles.findViewById(R.id.player_slot);
             playerSlots[PAGE_VIDEOS] = pageVideos.findViewById(R.id.player_slot);
             playerSlots[PAGE_BROWSER] = pageBrowser.findViewById(R.id.player_slot);
+            playerSlots[PAGE_LAN] = pageLan.findViewById(R.id.player_slot);
 
             bindHome();
             bindMe();
@@ -638,6 +658,7 @@ public class MainActivity extends Activity {
             bindFiles();
             bindStorage();
             bindBrowser();
+            bindLan();
             bindPlayer();
             bindGlobal();
 
@@ -775,6 +796,7 @@ public class MainActivity extends Activity {
 
         pageMe.findViewById(R.id.row_queue).setOnClickListener(v -> switchPage(PAGE_QUEUE));
         pageMe.findViewById(R.id.row_browser).setOnClickListener(v -> switchPage(PAGE_BROWSER));
+        pageMe.findViewById(R.id.row_lan).setOnClickListener(v -> { ensureLan(); switchPage(PAGE_LAN); });
         View rowDir = pageMe.findViewById(R.id.row_dir);
         rowDir.setOnClickListener(v -> openDir());
         rowDir.setOnLongClickListener(v -> {
@@ -1463,6 +1485,231 @@ public class MainActivity extends Activity {
         return true; // 拦截
     }
 
+    // ---------------- 局域网互传与远控 ----------------
+
+    private void ensureLan() {
+        if (lan != null) return;
+        File share = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+        if (share == null) share = new File(getFilesDir(), "lan-share");
+        lan = new LanCore(this, share, android.os.Build.MODEL, new LanCore.Callback() {
+            @Override public void onDevicesChanged() { renderLanDevices(); }
+            @Override public void onStatus(String text) { if (lanStatusText != null) lanStatusText.setText(text); }
+        });
+        lan.start();
+        if (lanLocalIpText != null) lanLocalIpText.setText("本机地址：" + lan.getLocalIp());
+    }
+
+    private void bindLan() {
+        lanDevicesBox = (LinearLayout) pageLan.findViewById(R.id.lan_devices);
+        lanNoDevices = pageLan.findViewById(R.id.lan_no_devices);
+        lanOps = pageLan.findViewById(R.id.lan_ops);
+        lanFileBar = pageLan.findViewById(R.id.lan_file_bar);
+        lanFileList = (LinearLayout) pageLan.findViewById(R.id.lan_file_list);
+        lanControlPanel = pageLan.findViewById(R.id.lan_control_panel);
+        lanStatusText = pageLan.findViewById(R.id.lan_status);
+        lanLocalIpText = pageLan.findViewById(R.id.lan_local_ip);
+        lanSelectedName = pageLan.findViewById(R.id.lan_selected_name);
+        lanBreadcrumbText = pageLan.findViewById(R.id.lan_breadcrumb);
+        lanScreen = pageLan.findViewById(R.id.lan_screen);
+
+        pageLan.findViewById(R.id.lan_back).setOnClickListener(v -> switchPage(PAGE_ME));
+        pageLan.findViewById(R.id.lan_dir_up).setOnClickListener(v -> {
+            if (!lanDirStack.isEmpty()) { lanDirStack.pop(); refreshLanFiles(); }
+        });
+        pageLan.findViewById(R.id.lan_btn_files).setOnClickListener(v -> {
+            lanControlPanel.setVisibility(View.GONE);
+            stopLanControlLoop();
+            showLanFiles(true);
+            refreshLanFiles();
+        });
+        pageLan.findViewById(R.id.lan_btn_upload).setOnClickListener(v -> pickLanUpload());
+        pageLan.findViewById(R.id.lan_btn_control).setOnClickListener(v -> startLanControl());
+        pageLan.findViewById(R.id.lan_control_stop).setOnClickListener(v -> {
+            stopLanControlLoop();
+            lanControlPanel.setVisibility(View.GONE);
+            showLanFiles(true);
+        });
+        pageLan.findViewById(R.id.lan_key_back).setOnClickListener(v -> sendLanKey("back"));
+        pageLan.findViewById(R.id.lan_key_home).setOnClickListener(v -> sendLanKey("home"));
+        pageLan.findViewById(R.id.lan_key_recent).setOnClickListener(v -> sendLanKey("recent"));
+        pageLan.findViewById(R.id.lan_enable_control).setOnClickListener(v -> requestProjection());
+        pageLan.findViewById(R.id.lan_open_accessibility).setOnClickListener(v -> {
+            try { startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)); }
+            catch (Throwable t) { Toast.makeText(this, "无法打开无障碍设置", Toast.LENGTH_SHORT).show(); }
+        });
+
+        // 远控画面触摸：点击 / 滑动归一化坐标发给对方
+        lanScreen.setOnTouchListener((v, event) -> {
+            if (lan == null || lanSelected == null || !lanControlling) return false;
+            float x = Math.max(0f, Math.min(1f, event.getX() / v.getWidth()));
+            float y = Math.max(0f, Math.min(1f, event.getY() / v.getHeight()));
+            if (event.getAction() == MotionEvent.ACTION_UP) {
+                try {
+                    JSONObject o = new JSONObject();
+                    o.put("a", "tap"); o.put("x", x); o.put("y", y);
+                    lan.input(lanSelected, o);
+                } catch (Throwable ignored) { }
+            }
+            return true;
+        });
+    }
+
+    private void renderLanDevices() {
+        if (lan == null) return;
+        lanDevicesBox.removeAllViews();
+        java.util.List<LanCore.Device> list = lan.getDevices();
+        lanNoDevices.setVisibility(list.isEmpty() ? View.VISIBLE : View.GONE);
+        for (LanCore.Device d : list) {
+            View row = getLayoutInflater().inflate(R.layout.item_lan_device, lanDevicesBox, false);
+            ((TextView) row.findViewById(R.id.ld_name)).setText(d.name);
+            ((TextView) row.findViewById(R.id.ld_ip)).setText(d.ip + (d.isAndroid() ? " · 手机" : " · 电脑"));
+            row.setOnClickListener(v -> {
+                lanSelected = d;
+                lanDirStack.clear();
+                lanSelectedName.setText("已连接：" + d.name);
+                lanOps.setVisibility(View.VISIBLE);
+                showLanFiles(true);
+                refreshLanFiles();
+            });
+            lanDevicesBox.addView(row);
+        }
+    }
+
+    private void showLanFiles(boolean show) {
+        lanFileBar.setVisibility(show ? View.VISIBLE : View.GONE);
+        lanFileList.setVisibility(show ? View.VISIBLE : View.GONE);
+    }
+
+    private void refreshLanFiles() {
+        if (lan == null || lanSelected == null) return;
+        lanFileList.removeAllViews();
+        String dir = lanDirStack.isEmpty() ? "" : b64(joinLanDir());
+        lanBreadcrumbText.setText(lanDirStack.isEmpty() ? "共享目录" : "共享目录 / " + joinLanDir());
+        java.util.List<LanCore.FileEntry> files = lan.listRemote(lanSelected, dir);
+        for (LanCore.FileEntry f : files) {
+            View row = getLayoutInflater().inflate(R.layout.item_lan_file, lanFileList, false);
+            ((TextView) row.findViewById(R.id.lf_name)).setText(f.name + (f.dir ? "/" : ""));
+            ((TextView) row.findViewById(R.id.lf_size)).setText(f.dir ? "" : formatSize(f.size));
+            final LanCore.FileEntry ref = f;
+            row.setOnClickListener(v -> {
+                if (ref.dir) { lanDirStack.push(ref.name); refreshLanFiles(); }
+                else downloadLanFile(ref);
+            });
+            lanFileList.addView(row);
+        }
+        if (files.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("（空目录或读取失败）");
+            empty.setTextColor(0xFF8B909A);
+            empty.setTextSize(12);
+            empty.setPadding(0, 12, 0, 12);
+            lanFileList.addView(empty);
+        }
+    }
+
+    private void downloadLanFile(LanCore.FileEntry f) {
+        if (lan == null || lanSelected == null) return;
+        Toast.makeText(this, "正在接收 " + f.name + "…", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            File dest = new File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), f.name);
+            boolean ok = lan.download(lanSelected, f, dest, null);
+            ui.post(() -> {
+                Toast.makeText(this, ok ? "已接收：" + f.name : "接收失败", Toast.LENGTH_SHORT).show();
+                if (ok) refreshStorage();
+            });
+        }, "lan-dl").start();
+    }
+
+    private void pickLanUpload() {
+        if (lan == null || lanSelected == null) return;
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        try { startActivityForResult(intent, REQ_LAN_UPLOAD); }
+        catch (Throwable t) { Toast.makeText(this, "无法打开文件选择器", Toast.LENGTH_SHORT).show(); }
+    }
+
+    private void startLanControl() {
+        if (lan == null || lanSelected == null) return;
+        if (lanSelected.isAndroid()) {
+            Toast.makeText(this, "控制手机需对方开启屏幕共享与无障碍服务", Toast.LENGTH_LONG).show();
+        }
+        lanControlling = true;
+        lanControlPanel.setVisibility(View.VISIBLE);
+        showLanFiles(false);
+        stopLanControlLoop();
+        lanScreenTask = new Runnable() {
+            @Override public void run() {
+                if (!lanControlling || lan == null || lanSelected == null) return;
+                byte[] shot = lan.screen(lanSelected);
+                if (shot != null && shot.length > 0) {
+                    try {
+                        android.graphics.Bitmap bmp = android.graphics.BitmapFactory.decodeByteArray(shot, 0, shot.length);
+                        if (bmp != null) lanScreen.setImageBitmap(bmp);
+                    } catch (Throwable ignored) { }
+                } else if (!lanSelected.isAndroid()) {
+                    lanStatusText.setText("远控画面等待中…");
+                }
+                lanScreenHandler.postDelayed(this, 700);
+            }
+        };
+        lanScreenHandler.post(lanScreenTask);
+    }
+
+    private void stopLanControlLoop() {
+        lanControlling = false;
+        if (lanScreenTask != null) { lanScreenHandler.removeCallbacks(lanScreenTask); lanScreenTask = null; }
+    }
+
+    private void sendLanKey(String key) {
+        if (lan == null || lanSelected == null) return;
+        new Thread(() -> {
+            try {
+                JSONObject o = new JSONObject(); o.put("a", "key"); o.put("k", key);
+                lan.input(lanSelected, o);
+            } catch (Throwable ignored) { }
+        }, "lan-key").start();
+    }
+
+    private void requestProjection() {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.LOLLIPOP) return;
+        try {
+            MediaProjectionManager mpm = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+            startActivityForResult(mpm.createScreenCaptureIntent(), REQ_LAN_PROJECTION);
+        } catch (Throwable t) { Toast.makeText(this, "无法申请屏幕共享", Toast.LENGTH_SHORT).show(); }
+    }
+
+    private String joinLanDir() {
+        StringBuilder s = new StringBuilder();
+        for (String p : lanDirStack) { if (s.length() > 0) s.append("/"); s.append(p); }
+        return s.toString();
+    }
+
+    private static String b64(String s) {
+        return Base64.encodeToString(s.getBytes(java.nio.charset.StandardCharsets.UTF_8), Base64.NO_WRAP);
+    }
+
+    private String lanFileName(Uri uri) {
+        String name = null;
+        try {
+            android.database.Cursor c = getContentResolver().query(uri, null, null, null, null);
+            if (c != null && c.moveToFirst()) {
+                int idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
+                if (idx >= 0) name = c.getString(idx);
+                c.close();
+            }
+        } catch (Throwable ignored) { }
+        if (name == null || name.isEmpty()) name = "file-" + System.currentTimeMillis();
+        return name.replace("/", "_").replace("\\", "_");
+    }
+
+    private static String formatSize(long n) {
+        if (n < 1024) return n + " B";
+        if (n < 1024 * 1024) return String.format(Locale.CHINA, "%.1f KB", n / 1024.0);
+        return String.format(Locale.CHINA, "%.1f MB", n / 1024.0 / 1024.0);
+    }
+
     private void bindPlayer() {
         playerVideo = playerPanel.findViewById(R.id.player_video);
         playerExo = playerPanel.findViewById(R.id.player_exo);
@@ -1987,6 +2234,7 @@ public class MainActivity extends Activity {
         pageVideos.setVisibility(page == PAGE_VIDEOS ? View.VISIBLE : View.GONE);
         pageScan.setVisibility(page == PAGE_SCAN ? View.VISIBLE : View.GONE);
         pageBrowser.setVisibility(page == PAGE_BROWSER ? View.VISIBLE : View.GONE);
+        pageLan.setVisibility(page == PAGE_LAN ? View.VISIBLE : View.GONE);
 
         // 最高级页面（首页 / 本地 / 我的）才显示 VSP 解析标题栏与底部标签；
         // 浏览器已从主标签改为「我的」里的独立页面，自带返回栏，不显示底栏；
@@ -2030,7 +2278,7 @@ public class MainActivity extends Activity {
             else switchPage(PAGE_ME);
             return;
         }
-        if (currentPage == PAGE_QUEUE || currentPage == PAGE_STORAGE) {
+        if (currentPage == PAGE_QUEUE || currentPage == PAGE_STORAGE || currentPage == PAGE_LAN) {
             switchPage(PAGE_ME);
             return;
         }
@@ -2145,6 +2393,45 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_LAN_PROJECTION) {
+            if (resultCode == RESULT_OK && data != null && lan != null) {
+                lan.startProjection(resultCode, data);
+                Toast.makeText(this, "屏幕共享已开启，电脑现在可以查看并控制本手机", Toast.LENGTH_LONG).show();
+            } else {
+                Toast.makeText(this, "已取消屏幕共享授权", Toast.LENGTH_SHORT).show();
+            }
+            return;
+        }
+        if (requestCode == REQ_LAN_UPLOAD) {
+            if (resultCode == RESULT_OK && data != null && lan != null && lanSelected != null) {
+                java.util.List<Uri> uris = new java.util.ArrayList<>();
+                if (data.getClipData() != null) {
+                    for (int i = 0; i < data.getClipData().getItemCount(); i++)
+                        uris.add(data.getClipData().getItemAt(i).getUri());
+                } else if (data.getData() != null) uris.add(data.getData());
+                final LanCore.Device target = lanSelected;
+                new Thread(() -> {
+                    int ok = 0;
+                    for (Uri u : uris) {
+                        String name = lanFileName(u);
+                        try {
+                            java.io.InputStream in = getContentResolver().openInputStream(u);
+                            if (in == null) continue;
+                            java.io.File tmp = new java.io.File(getCacheDir(), name);
+                            java.io.FileOutputStream fos = new java.io.FileOutputStream(tmp);
+                            byte[] buf = new byte[16384]; int n;
+                            while ((n = in.read(buf)) > 0) fos.write(buf, 0, n);
+                            fos.close(); in.close();
+                            if (lan.upload(target, tmp)) ok++;
+                            tmp.delete();
+                        } catch (Throwable ignored) { }
+                    }
+                    final int sent = ok;
+                    ui.post(() -> { Toast.makeText(this, "已发送 " + sent + " 个文件", Toast.LENGTH_SHORT).show(); refreshLanFiles(); });
+                }, "lan-upload").start();
+            }
+            return;
+        }
         if (requestCode == REQ_SCAN_TREE) {
             if (resultCode == RESULT_OK && data != null && data.getData() != null) {
                 Uri tree = data.getData();
@@ -7997,6 +8284,8 @@ public class MainActivity extends Activity {
         updateDialog = null;
         if (taskPoller != null) taskPoller.shutdownNow();
         if (swipePool != null) swipePool.shutdownNow();
+        stopLanControlLoop();
+        if (lan != null) { try { lan.stop(); } catch (Throwable ignored) { } lan = null; }
         ui.removeCallbacksAndMessages(null);
         stopPlayer();
     }

@@ -300,12 +300,43 @@ public sealed class MainViewModel : BindableBase
     public ICommand OpenGiteeCommand { get; }
     public ICommand OpenGithubCommand { get; }
 
+    // ---------------- 局域网互传与远控 ----------------
+    private LanService? _lan;
+    public ObservableCollection<LanDevice> LanDevices { get; } = [];
+    public ObservableCollection<LanFileEntry> LanRemoteFiles { get; } = [];
+    public LanDevice? SelectedLanDevice { get => _selectedLan; set { if (Set(ref _selectedLan, value)) { _lanDirStack.Clear(); _ = RefreshLanFilesAsync(); Raise(nameof(HasSelectedLanDevice)); Raise(nameof(LanBreadcrumb)); } } }
+    private LanDevice? _selectedLan;
+    public bool HasSelectedLanDevice => _selectedLan is not null;
+    public string LanLocalIp => _lan?.LocalIp ?? "启动中…";
+    public string LanStatus { get => _lanStatus; private set => Set(ref _lanStatus, value); }
+    private string _lanStatus = "正在发现附近设备…";
+    public string LanBreadcrumb => _lanDirStack.Count == 0 ? "共享目录" : "共享目录 / " + string.Join(" / ", _lanDirStack);
+    private readonly Stack<string> _lanDirStack = new();
+    public bool LanBusy { get => _lanBusy; private set => Set(ref _lanBusy, value); }
+    private bool _lanBusy;
+    /// <summary>远控画面：由 LanView 把字节转成 Bitmap 显示。</summary>
+    public byte[]? LanScreenBytes { get => _lanScreenBytes; private set => Set(ref _lanScreenBytes, value); }
+    private byte[]? _lanScreenBytes;
+    public bool IsRemoteControlling { get => _remoteCtl; private set => Set(ref _remoteCtl, value); }
+    private bool _remoteCtl;
+    public ICommand ShowLanCommand { get; }
+    public ICommand SelectLanDeviceCommand { get; }
+    public ICommand LanOpenDirCommand { get; }
+    public ICommand LanBackDirCommand { get; }
+    public ICommand LanDownloadCommand { get; }
+    public ICommand LanUploadCommand { get; }
+    public ICommand LanStartControlCommand { get; }
+    public ICommand LanStopControlCommand { get; }
+    public ICommand LanTapCommand { get; }
+    public ICommand LanKeyCommand { get; }
+
     public bool IsHome => _page == 0;
     public bool IsLocal => _page == 1;
     public bool IsMePage => _page == 2;
     public bool IsQueuePage => _page == 3;
     public bool IsStoragePage => _page == 4;
     public bool IsPreviewPage => _page == 5;
+    public bool IsLanPage => _page == 6;
     public bool IsMeNav => _page >= 2 && _page != 5;
     private int _page;
     private int _returnPage;
@@ -343,6 +374,19 @@ public sealed class MainViewModel : BindableBase
         OpenGiteeCommand = new RelayCommand(() => LocalLibrary.OpenUrl("https://gitee.com/tang-rongqiang/VSP"));
         OpenGithubCommand = new RelayCommand(() => LocalLibrary.OpenUrl("https://github.com/tang536/VSP-"));
 
+        // 局域网互传与远控
+        ShowLanCommand = new RelayCommand(() => { Go(6); RefreshLanDevices(); });
+        SelectLanDeviceCommand = new RelayCommand(p => { if (p is LanDevice d) SelectedLanDevice = d; });
+        LanOpenDirCommand = new RelayCommand(p => { if (p is LanFileEntry e && e.IsDir) { _lanDirStack.Push(DecodeLan(e.Path)!); _ = RefreshLanFilesAsync(); Raise(nameof(LanBreadcrumb)); } });
+        LanBackDirCommand = new RelayCommand(() => { if (_lanDirStack.Count > 0) { _lanDirStack.Pop(); _ = RefreshLanFilesAsync(); Raise(nameof(LanBreadcrumb)); } });
+        LanDownloadCommand = new RelayCommand(p => { if (p is LanFileEntry e && !e.IsDir) _ = DownloadLanAsync(e); });
+        LanUploadCommand = new RelayCommand(() => _ = UploadLanAsync());
+        LanStartControlCommand = new RelayCommand(() => _ = StartLanControlAsync());
+        LanStopControlCommand = new RelayCommand(StopLanControl);
+        LanTapCommand = new RelayCommand(p => _ = LanTapAsync(p));
+        LanKeyCommand = new RelayCommand(p => _ = LanSendKeyAsync(p?.ToString() ?? ""));
+        StartLan();
+
         _services.Downloads.Tasks.CollectionChanged += (_, _) =>
         {
             RebuildTasks();
@@ -369,7 +413,7 @@ public sealed class MainViewModel : BindableBase
         _page = page;
         Raise(nameof(IsHome)); Raise(nameof(IsLocal)); Raise(nameof(IsMePage));
         Raise(nameof(IsQueuePage)); Raise(nameof(IsStoragePage)); Raise(nameof(IsMeNav));
-        Raise(nameof(IsPreviewPage));
+        Raise(nameof(IsPreviewPage)); Raise(nameof(IsLanPage));
     }
 
     private void RaiseTabs()
@@ -672,5 +716,140 @@ public sealed class MainViewModel : BindableBase
         }
         catch (Exception ex) { UpdateStatus = "下载失败：" + ex.Message; }
         finally { IsUpdating = false; }
+    }
+
+    // ---------------- 局域网互传与远控实现 ----------------
+
+    private void StartLan()
+    {
+        try
+        {
+            _lan = new LanService(Environment.MachineName, DownloadDir);
+            _lan.DevicesChanged += () => Dispatch(() => RefreshLanDevices());
+            _lan.Start();
+            Dispatch(() => { Raise(nameof(LanLocalIp)); LanStatus = $"本机 {LanLocalIp} · 正在发现附近设备…"; });
+        }
+        catch (Exception ex)
+        {
+            Dispatch(() => LanStatus = "局域网服务启动失败：" + ex.Message);
+        }
+    }
+
+    private void RefreshLanDevices()
+    {
+        if (_lan is null) return;
+        var list = _lan.Devices;
+        // 增量同步，避免重复添加
+        for (var i = LanDevices.Count - 1; i >= 0; i--)
+            if (!list.Any(d => d.Id == LanDevices[i].Id)) LanDevices.RemoveAt(i);
+        foreach (var d in list)
+            if (!LanDevices.Any(x => x.Id == d.Id)) LanDevices.Add(d);
+        LanStatus = list.Count == 0
+            ? $"本机 {LanLocalIp} · 未发现设备，请确保两端在同一 Wi-Fi"
+            : $"本机 {LanLocalIp} · 发现 {list.Count} 台设备";
+    }
+
+    private async Task RefreshLanFilesAsync()
+    {
+        LanRemoteFiles.Clear();
+        if (_lan is null || SelectedLanDevice is null) return;
+        LanBusy = true;
+        LanStatus = "正在读取对方文件…";
+        try
+        {
+            var dir = _lanDirStack.Count == 0 ? "" : EncodeLan(string.Join("/", _lanDirStack));
+            var files = await _lan.ListRemoteAsync(SelectedLanDevice, dir);
+            foreach (var f in files) LanRemoteFiles.Add(f);
+            LanStatus = $"已连接 {SelectedLanDevice.Name} · {files.Count} 项";
+        }
+        catch (Exception ex) { LanStatus = "读取失败：" + ex.Message; }
+        finally { LanBusy = false; }
+    }
+
+    private async Task DownloadLanAsync(LanFileEntry entry)
+    {
+        if (_lan is null || SelectedLanDevice is null) return;
+        LanBusy = true;
+        LanStatus = $"正在接收 {entry.Name}…";
+        try
+        {
+            var local = Path.Combine(DownloadDir, entry.Name);
+            var ok = await _lan.DownloadAsync(SelectedLanDevice, entry, local,
+                new Progress<double>(p => LanStatus = $"正在接收 {entry.Name} · {p:P0}"));
+            LanStatus = ok ? $"已接收：{entry.Name}" : "接收失败";
+            if (ok) RefreshLocal();
+        }
+        finally { LanBusy = false; }
+    }
+
+    private async Task UploadLanAsync()
+    {
+        if (_lan is null || SelectedLanDevice is null) return;
+        var lifetime = Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime;
+        if (lifetime?.MainWindow?.StorageProvider is not { } storage) return;
+        var files = await storage.OpenFilePickerAsync(new FilePickerOpenOptions { AllowMultiple = true, Title = "选择要发送的文件" });
+        var paths = files.Select(f => f.TryGetLocalPath()).Where(p => !string.IsNullOrEmpty(p)).ToList();
+        if (paths.Count == 0) return;
+        LanBusy = true;
+        try
+        {
+            foreach (var path in paths)
+            {
+                LanStatus = $"正在发送 {Path.GetFileName(path!)}…";
+                var ok = await _lan.UploadAsync(SelectedLanDevice, path!);
+                LanStatus = ok ? $"已发送：{Path.GetFileName(path!)}" : "发送失败";
+            }
+            await RefreshLanFilesAsync();
+        }
+        finally { LanBusy = false; }
+    }
+
+    private async Task StartLanControlAsync()
+    {
+        if (_lan is null || SelectedLanDevice is null) return;
+        IsRemoteControlling = true;
+        LanStatus = $"远控中：{SelectedLanDevice.Name}";
+        while (IsRemoteControlling && SelectedLanDevice is not null)
+        {
+            var bytes = await _lan.GetScreenAsync(SelectedLanDevice);
+            if (bytes is not null) Dispatch(() => LanScreenBytes = bytes);
+            await Task.Delay(600);
+        }
+    }
+
+    private void StopLanControl()
+    {
+        IsRemoteControlling = false;
+        Dispatch(() => LanScreenBytes = null);
+        LanStatus = "已停止远控";
+    }
+
+    private async Task LanTapAsync(object? p)
+    {
+        if (_lan is null || SelectedLanDevice is null) return;
+        // p 为 (double x, double y) 归一化坐标，由 LanView 传入
+        if (p is not ValueTuple<double, double> xy) return;
+        await _lan.SendInputAsync(SelectedLanDevice, new { a = "tap", x = xy.Item1, y = xy.Item2 });
+    }
+
+    private async Task LanSendKeyAsync(string key)
+    {
+        if (_lan is null || SelectedLanDevice is null) return;
+        await _lan.SendInputAsync(SelectedLanDevice, new { a = "key", k = key });
+    }
+
+    private static string EncodeLan(string s) => Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(s));
+    private static string? DecodeLan(string? s)
+    {
+        if (string.IsNullOrEmpty(s)) return null;
+        try { return System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(s)); } catch { return null; }
+    }
+
+    private static void Dispatch(Action a)
+    {
+        var app = Application.Current;
+        if (app is null) { a(); return; }
+        var disp = Avalonia.Threading.Dispatcher.UIThread;
+        if (disp.CheckAccess()) a(); else disp.Invoke(a);
     }
 }

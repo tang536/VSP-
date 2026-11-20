@@ -151,6 +151,44 @@
                     android:textSize="12sp" />
             </LinearLayout>
 
+            <!-- 互传与远控：局域网设备直连，不耗流量 -->
+            <LinearLayout
+                android:id="@+id/row_lan"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="#171a21"
+                android:tag="card"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:layout_marginBottom="18dp"
+                android:clickable="true"
+                android:focusable="true">
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:src="@drawable/ic_share"
+                    android:tag="icon"
+                    android:scaleType="fitCenter" />
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="互传与远控"
+                    android:textColor="#e8eaed"
+                    android:tag="text"
+                    android:textSize="14sp"
+                    android:layout_marginStart="12dp" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="局域网直连 ›"
+                    android:textColor="#8b909a"
+                    android:tag="dim"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
             <!-- 设置 -->
             <TextView
                 android:layout_width="wrap_content"
@@ -354,7 +392,7 @@
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="VSP 解析 v1.4 · yt-dlp + 本地封装"
+                android:text="全能工具箱 v1.3 · yt-dlp + 局域网互传远控"
                 android:textColor="#8b909a"
                 android:tag="dim"
                 android:textSize="11sp"

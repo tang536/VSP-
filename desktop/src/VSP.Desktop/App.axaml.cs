@@ -31,18 +31,19 @@ public partial class App : Application
 
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
+            // 开发期验收：--shot <目录> 会依次渲染各页截图后退出，跳过进场动画。
+            var args = Environment.GetCommandLineArgs();
+            var shotIdx = Array.IndexOf(args, "--shot");
+
             var vm = new MainViewModel(Services);
             var window = new MainWindow { DataContext = vm };
             desktop.MainWindow = window;
             desktop.Exit += (_, _) => Services.Dispose();
 
-            // 开发期验收：--shot <目录> 会依次渲染各页截图后退出。
-            var args = Environment.GetCommandLineArgs();
-            var idx = Array.IndexOf(args, "--shot");
-            if (idx >= 0)
+            if (shotIdx >= 0)
             {
-                var dir = idx + 1 < args.Length && !args[idx + 1].StartsWith("--")
-                    ? args[idx + 1]
+                var dir = shotIdx + 1 < args.Length && !args[shotIdx + 1].StartsWith("--")
+                    ? args[shotIdx + 1]
                     : Path.Combine(AppContext.BaseDirectory, "shots");
                 window.Opened += async (_, _) =>
                 {
@@ -50,9 +51,25 @@ public partial class App : Application
                     catch (Exception ex) { Console.WriteLine("shot failed: " + ex); }
                     desktop.Shutdown();
                 };
+                window.Show();
+            }
+            else
+            {
+                // 冷启动进场动画：先显示 Splash，播完后再显示主窗口。
+                var splash = new SplashWindow();
+                splash.Show();
+                _ = ShowMainWindowAsync(desktop, splash, window);
             }
         }
         base.OnFrameworkInitializationCompleted();
+    }
+
+    private static async System.Threading.Tasks.Task ShowMainWindowAsync(
+        IClassicDesktopStyleApplicationLifetime desktop, SplashWindow splash, MainWindow window)
+    {
+        await splash.PlayAsync();
+        window.Show();
+        try { splash.Close(); } catch { /* 进场窗关闭失败不影响主窗 */ }
     }
 
     /// <summary>

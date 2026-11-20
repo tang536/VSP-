@@ -21,6 +21,23 @@
                     </StackPanel>
                 </Border>
 
+                <!-- 互传与远控：局域网设备直连，不耗流量 -->
+                <TextBlock Text="互联" Classes="h2" Margin="2,18,0,8" />
+                <Border Classes="card">
+                    <Button Classes="row" Command="{Binding ShowLanCommand}">
+                        <Grid ColumnDefinitions="Auto,*,Auto">
+                            <PathIcon Grid.Column="0" Data="{StaticResource IconFolder}"
+                                      Foreground="{DynamicResource InkDim}" VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="1" Text="互传与远控" Classes="rowLabel" />
+                            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding LanLocalIp}" Classes="rowValue" MaxWidth="240" />
+                                <PathIcon Data="{StaticResource IconChevron}" Width="12" Height="12"
+                                          Classes="rowArrow" />
+                            </StackPanel>
+                        </Grid>
+                    </Button>
+                </Border>
+
                 <!-- 下载：入口行，具体任务在新页面 -->
                 <TextBlock Text="下载" Classes="h2" Margin="2,24,0,8" />
                 <Border Classes="card">

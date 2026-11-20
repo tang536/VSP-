@@ -19,7 +19,7 @@ PUBLISH = DESKTOP / "publish" / "win-x64"
 WIX = DESKTOP / "tools" / "wix.exe"
 OUT = DESKTOP / "dist"
 WXS = HERE / "VSPDesktop.wxs"
-VERSION = "1.0.1.0"
+VERSION = "1.1.0.0"
 UPGRADE_CODE = "A0A1D4B2-7D6C-4B8E-9F35-1234567890AB"
 NS = "http://wixtoolset.org/schemas/v4/wxs"
 UI_NS = "http://wixtoolset.org/schemas/v4/wxs/ui"
@@ -102,14 +102,14 @@ def add_tree(parent: ET.Element, files: list[Path]) -> list[str]:
 def build_wxs(files: list[Path]) -> None:
     wix = ET.Element(q("Wix"))
     package = ET.SubElement(wix, q("Package"), {
-        "Name": "VSP解析 桌面端", "Language": "2052", "Codepage": "936",
-        "Manufacturer": "VSP", "Version": VERSION,
+        "Name": "全能工具箱 桌面端", "Language": "2052", "Codepage": "936",
+        "Manufacturer": "全能工具箱", "Version": VERSION,
         "UpgradeCode": UPGRADE_CODE, "ProductCode": "*", "Scope": "perUserOrMachine",
     })
     # 版本升级时自动卸载同 UpgradeCode 的旧版，避免 1.0.0 / 1.0.1 两个入口并存。
     ET.SubElement(package, q("MajorUpgrade"), {
         "Schedule": "afterInstallValidate",
-        "DowngradeErrorMessage": "已安装更新版本的 VSP 桌面端，无法降级安装。",
+        "DowngradeErrorMessage": "已安装更新版本的全能工具箱桌面端，无法降级安装。",
     })
     ET.SubElement(package, q("MediaTemplate"), {"EmbedCab": "yes", "CompressionLevel": "high"})
     ET.SubElement(package, q("Icon"), {
@@ -121,7 +121,7 @@ def build_wxs(files: list[Path]) -> None:
     })
 
     feature = ET.SubElement(package, q("Feature"), {
-        "Id": "Main", "Title": "VSP解析", "Level": "1",
+        "Id": "Main", "Title": "全能工具箱", "Level": "1",
     })
     ET.SubElement(feature, q("ComponentGroupRef"), {"Id": "AppFiles"})
 
@@ -135,14 +135,14 @@ def build_wxs(files: list[Path]) -> None:
         "Id": "Shortcuts", "Guid": guid_for("shortcuts"),
     })
     ET.SubElement(shortcuts, q("Shortcut"), {
-        "Id": "DesktopShortcut", "Directory": "DesktopFolder", "Name": "VSP解析",
+        "Id": "DesktopShortcut", "Directory": "DesktopFolder", "Name": "全能工具箱",
         "Target": "[INSTALLFOLDER]VSP.Desktop.exe", "WorkingDirectory": "INSTALLFOLDER",
-        "Icon": "AppIcon", "Description": "VSP 视频解析与下载",
+        "Icon": "AppIcon", "Description": "全能工具箱 · 解析 / 下载 / 互传 / 远控",
     })
     ET.SubElement(shortcuts, q("Shortcut"), {
-        "Id": "StartMenuShortcut", "Directory": "ProgramMenuFolder", "Name": "VSP解析",
+        "Id": "StartMenuShortcut", "Directory": "ProgramMenuFolder", "Name": "全能工具箱",
         "Target": "[INSTALLFOLDER]VSP.Desktop.exe", "WorkingDirectory": "INSTALLFOLDER",
-        "Icon": "AppIcon", "Description": "VSP 视频解析与下载",
+        "Icon": "AppIcon", "Description": "全能工具箱 · 解析 / 下载 / 互传 / 远控",
     })
     ET.SubElement(shortcuts, q("RegistryValue"), {
         "Root": "HKCU", "Key": r"Software\VSP\VSPDesktop", "Name": "Installed",
@@ -168,7 +168,7 @@ def main() -> None:
     print(f"[installer] {len(files)} files from {PUBLISH}")
     build_wxs(files)
     OUT.mkdir(parents=True, exist_ok=True)
-    msi = OUT / f"VSP-Setup-v{VERSION.rsplit('.', 1)[0]}.msi"
+    msi = OUT / f"Toolbox-Setup-v{VERSION.rsplit('.', 1)[0]}.msi"
     cmd = [str(WIX), "build", str(WXS), "-arch", "x64",
            "-ext", "WixToolset.UI.wixext", "-o", str(msi)]
     print("[installer] " + " ".join(cmd))
