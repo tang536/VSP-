@@ -29,7 +29,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="18dp"
-            android:text="VSP 解析"
+            android:text="全能工具箱"
             android:textColor="#e8eaed"
             android:textSize="19sp"
             android:textStyle="bold"
@@ -40,7 +40,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:text="视频 · 图片 · 音频 一站式解析"
+            android:text="解析 · 下载 · 互传 · 远控 一站式工具"
             android:textColor="#71767f"
             android:textSize="12sp" />
     </LinearLayout>

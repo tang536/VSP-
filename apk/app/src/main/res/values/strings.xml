@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">VSP 解析</string>
+    <string name="app_name">全能工具箱</string>
+    <string name="lan_accessibility_desc">允许「全能工具箱」在局域网远控时模拟点击与滑动，仅在您主动开启远程控制时生效。</string>
 </resources>

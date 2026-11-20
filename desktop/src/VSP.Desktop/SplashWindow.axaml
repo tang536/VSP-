@@ -1,0 +1,79 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="VSP.Desktop.SplashWindow"
+        Title="全能工具箱"
+        Width="460" Height="330"
+        WindowStartupLocation="CenterScreen"
+        CanResize="False"
+        ShowInTaskbar="False"
+        WindowDecorations="None"
+        Background="#0F1115">
+    <Border x:Name="Root"
+            Background="#0F1115"
+            BorderBrush="#2A2E38"
+            BorderThickness="1">
+        <Border.Transitions>
+            <Transitions>
+                <DoubleTransition Property="Opacity" Duration="0:0:0.34" />
+            </Transitions>
+        </Border.Transitions>
+        <Grid RowDefinitions="*,Auto,*">
+            <StackPanel Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="0">
+                <Image x:Name="SplashIcon"
+                       Source="avares://VSP.Desktop/Assets/app.png"
+                       Width="104" Height="104"
+                       HorizontalAlignment="Center"
+                       Opacity="0">
+                    <Image.Transitions>
+                        <Transitions>
+                            <DoubleTransition Property="Opacity" Duration="0:0:0.45" />
+                        </Transitions>
+                    </Image.Transitions>
+                </Image>
+
+                <TextBlock x:Name="SplashName"
+                           Text="全能工具箱"
+                           FontSize="21" FontWeight="Bold"
+                           Foreground="#E8EAED"
+                           LetterSpacing="1.2"
+                           HorizontalAlignment="Center"
+                           Margin="0,18,0,0"
+                           Opacity="0">
+                    <TextBlock.Transitions>
+                        <Transitions>
+                            <DoubleTransition Property="Opacity" Duration="0:0:0.4" />
+                        </Transitions>
+                    </TextBlock.Transitions>
+                </TextBlock>
+
+                <TextBlock x:Name="SplashTip"
+                           Text="解析 · 下载 · 互传 · 远控 一站式工具"
+                           FontSize="12"
+                           Foreground="#8B909A"
+                           HorizontalAlignment="Center"
+                           Margin="0,8,0,0"
+                           Opacity="0">
+                    <TextBlock.Transitions>
+                        <Transitions>
+                            <DoubleTransition Property="Opacity" Duration="0:0:0.4" />
+                        </Transitions>
+                    </TextBlock.Transitions>
+                </TextBlock>
+
+                <ProgressBar x:Name="SplashBar"
+                             IsIndeterminate="True"
+                             Width="220" Height="4"
+                             HorizontalAlignment="Center"
+                             Margin="0,30,0,0"
+                             Foreground="#F97316"
+                             Opacity="0">
+                    <ProgressBar.Transitions>
+                        <Transitions>
+                            <DoubleTransition Property="Opacity" Duration="0:0:0.3" />
+                        </Transitions>
+                    </ProgressBar.Transitions>
+                </ProgressBar>
+            </StackPanel>
+        </Grid>
+    </Border>
+</Window>

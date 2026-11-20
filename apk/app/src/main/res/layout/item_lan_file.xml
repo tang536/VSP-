@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:background="#171a21"
+    android:tag="card"
+    android:padding="12dp"
+    android:layout_marginBottom="6dp"
+    android:clickable="true"
+    android:focusable="true">
+    <ImageView
+        android:layout_width="18dp"
+        android:layout_height="18dp"
+        android:src="@drawable/ic_folder"
+        android:tag="icon"
+        android:scaleType="fitCenter" />
+    <TextView
+        android:id="@+id/lf_name"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:text="文件名"
+        android:textColor="#e8eaed"
+        android:tag="text"
+        android:textSize="13sp"
+        android:layout_marginStart="10dp" />
+    <TextView
+        android:id="@+id/lf_size"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text=""
+        android:tag="dim"
+        android:textSize="11sp" />
+</LinearLayout>

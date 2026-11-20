@@ -4,7 +4,7 @@
         xmlns:vm="clr-namespace:VSP.Desktop"
         x:Class="VSP.Desktop.MainWindow"
         x:DataType="vm:MainViewModel"
-        Title="VSP 解析"
+        Title="全能工具箱"
         Width="1080" Height="620" MinWidth="900" MinHeight="560"
         WindowStartupLocation="CenterScreen"
         Background="{DynamicResource AppBackground}">
@@ -20,7 +20,7 @@
                             <TextBlock Text="V" Foreground="{DynamicResource OnAccent}" FontSize="15"
                                        FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Border>
-                        <TextBlock Text="VSP 解析" Classes="h2" VerticalAlignment="Center" />
+                        <TextBlock Text="全能工具箱" Classes="h2" VerticalAlignment="Center" />
                     </StackPanel>
 
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Stretch">
@@ -53,7 +53,7 @@
                             <TextBlock Text="历史解析" VerticalAlignment="Center" />
                         </StackPanel>
                     </Button>
-                    <TextBlock Text="v1.0.0" Classes="dim" VerticalAlignment="Center" />
+                    <TextBlock Text="{Binding AppVersion}" Classes="dim" VerticalAlignment="Center" />
                     <Button Classes="ghost small" Command="{Binding ToggleThemeCommand}">
                         <StackPanel Orientation="Horizontal" Spacing="6">
                             <PathIcon Data="{Binding ThemeIcon}" />
@@ -70,6 +70,7 @@
             <views:MeView DataContext="{Binding}" IsVisible="{Binding IsMePage}" />
             <views:QueueView DataContext="{Binding}" IsVisible="{Binding IsQueuePage}" />
             <views:StorageView DataContext="{Binding}" IsVisible="{Binding IsStoragePage}" />
+            <views:LanView DataContext="{Binding}" IsVisible="{Binding IsLanPage}" />
             <Panel IsVisible="{Binding IsPreviewPage}">
                 <views:PreviewView DataContext="{Binding Preview}" />
             </Panel>

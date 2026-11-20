@@ -1,0 +1,282 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 互传与远控：局域网设备直连，全程走局域网 IP，不耗流量 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:tag="bg">
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scrollbars="none">
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <!-- 播放器挂载点 -->
+            <FrameLayout
+                android:id="@+id/player_slot"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content" />
+
+            <!-- 返回 -->
+            <LinearLayout
+                android:id="@+id/lan_back"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:clickable="true"
+                android:focusable="true">
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:src="@drawable/ic_back"
+                    android:tag="icon" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="返回"
+                    android:tag="text"
+                    android:textSize="15sp"
+                    android:layout_marginStart="4dp" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="互传与远控"
+                android:textColor="#e8eaed"
+                android:textSize="20sp"
+                android:textStyle="bold"
+                android:layout_marginTop="6dp" />
+            <TextView
+                android:id="@+id/lan_status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="正在发现附近设备…"
+                android:tag="dim"
+                android:textSize="12sp"
+                android:layout_marginTop="6dp" />
+            <TextView
+                android:id="@+id/lan_local_ip"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="本机地址：—"
+                android:tag="dim"
+                android:textSize="12sp"
+                android:layout_marginTop="2dp" />
+
+            <!-- 附近设备 -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="附近设备"
+                android:tag="dim"
+                android:textSize="13sp"
+                android:layout_marginTop="18dp"
+                android:layout_marginBottom="8dp" />
+            <LinearLayout
+                android:id="@+id/lan_devices"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
+            <TextView
+                android:id="@+id/lan_no_devices"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="未发现设备，请确保两端连接同一 Wi-Fi，且都已打开本功能"
+                android:tag="dim"
+                android:textSize="12sp"
+                android:gravity="center"
+                android:padding="18dp" />
+
+            <!-- 已选设备操作区 -->
+            <LinearLayout
+                android:id="@+id/lan_ops"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone"
+                android:layout_marginTop="16dp">
+
+                <TextView
+                    android:id="@+id/lan_selected_name"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="已连接"
+                    android:textColor="#e8eaed"
+                    android:textSize="15sp"
+                    android:textStyle="bold" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:layout_marginTop="10dp">
+                        <Button
+                            android:id="@+id/lan_btn_files"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="查看文件"
+                            android:textSize="12sp" />
+                        <Button
+                            android:id="@+id/lan_btn_upload"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="发送文件"
+                            android:textSize="12sp"
+                            android:layout_marginStart="6dp" />
+                        <Button
+                            android:id="@+id/lan_btn_control"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="远程控制"
+                            android:textSize="12sp"
+                            android:layout_marginStart="6dp" />
+                    </LinearLayout>
+
+                    <!-- 目录面包屑 + 返回上级 -->
+                    <LinearLayout
+                        android:id="@+id/lan_file_bar"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical"
+                        android:visibility="gone"
+                        android:layout_marginTop="14dp">
+                        <TextView
+                            android:id="@+id/lan_breadcrumb"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="共享目录"
+                            android:tag="dim"
+                            android:textSize="12sp" />
+                        <TextView
+                            android:id="@+id/lan_dir_up"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="上级"
+                            android:textColor="#f97316"
+                            android:textSize="12sp"
+                            android:padding="6dp" />
+                    </LinearLayout>
+
+                    <!-- 文件列表 -->
+                    <LinearLayout
+                        android:id="@+id/lan_file_list"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:visibility="gone"
+                        android:layout_marginTop="6dp" />
+
+                    <!-- 远控面板 -->
+                    <LinearLayout
+                        android:id="@+id/lan_control_panel"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:visibility="gone"
+                        android:layout_marginTop="10dp">
+                        <ImageView
+                            android:id="@+id/lan_screen"
+                            android:layout_width="match_parent"
+                            android:layout_height="260dp"
+                            android:background="#000000"
+                            android:scaleType="fitCenter"
+                            android:contentDescription="对方屏幕" />
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal"
+                            android:gravity="center"
+                            android:layout_marginTop="8dp">
+                                <Button
+                                    android:id="@+id/lan_key_back"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:text="返回"
+                                    android:textSize="12sp" />
+                                <Button
+                                    android:id="@+id/lan_key_home"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:text="主页"
+                                    android:textSize="12sp"
+                                    android:layout_marginStart="6dp" />
+                                <Button
+                                    android:id="@+id/lan_key_recent"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:text="多任务"
+                                    android:textSize="12sp"
+                                    android:layout_marginStart="6dp" />
+                                <Button
+                                    android:id="@+id/lan_control_stop"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:text="停止"
+                                    android:textSize="12sp"
+                                    android:layout_marginStart="6dp" />
+                            </LinearLayout>
+                        </LinearLayout>
+
+                    <!-- 被控授权 -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:background="#171a21"
+                        android:tag="card"
+                        android:padding="14dp"
+                        android:layout_marginTop="18dp">
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="让电脑控制本手机"
+                            android:textColor="#e8eaed"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="需授权屏幕共享，并开启「全能工具箱」无障碍服务（设置 → 无障碍）"
+                            android:tag="dim"
+                            android:textSize="11sp"
+                            android:layout_marginTop="4dp" />
+                        <Button
+                            android:id="@+id/lan_enable_control"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="授权屏幕共享"
+                            android:textSize="12sp"
+                            android:layout_marginTop="10dp" />
+                        <Button
+                            android:id="@+id/lan_open_accessibility"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="开启无障碍服务"
+                            android:textSize="12sp"
+                            android:layout_marginTop="6dp" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="全程局域网直连 · 不消耗移动流量"
+                        android:tag="dim"
+                        android:textSize="11sp"
+                        android:gravity="center"
+                        android:paddingTop="20dp" />
+                </LinearLayout>
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>

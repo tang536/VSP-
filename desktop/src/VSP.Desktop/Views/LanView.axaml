@@ -1,0 +1,103 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:VSP.Desktop"
+             xmlns:core="clr-namespace:VSP.Core;assembly=VSP.Core"
+             xmlns:views="clr-namespace:VSP.Desktop.Views"
+             x:Class="VSP.Desktop.Views.LanView"
+             x:DataType="vm:MainViewModel"
+             Background="{DynamicResource AppBackground}">
+    <UserControl.Resources>
+        <views:BytesToBitmapConverter x:Key="BytesToBitmap" />
+    </UserControl.Resources>
+
+    <Grid Margin="28,24" RowDefinitions="Auto,*">
+        <StackPanel Grid.Row="0" Margin="0,0,0,18">
+            <TextBlock Text="互传与远控" Classes="h1" />
+            <TextBlock Text="{Binding LanStatus}" Classes="sub" Margin="0,6,0,0" />
+            <TextBlock Text="{Binding LanLocalIp, StringFormat=本机地址：{0}}" Classes="dim" Margin="0,2,0,0" />
+        </StackPanel>
+
+        <Grid Grid.Row="1" ColumnDefinitions="260,*">
+            <!-- 设备列表 -->
+            <Border Classes="card" Margin="0,0,16,0" Padding="0">
+                <Grid RowDefinitions="Auto,*">
+                    <TextBlock Grid.Row="0" Text="附近设备" Classes="h2" Margin="16,14,0,10" />
+                    <ListBox Grid.Row="1" ItemsSource="{Binding LanDevices}"
+                             SelectedItem="{Binding SelectedLanDevice, Mode=TwoWay}"
+                             Background="Transparent" BorderThickness="0">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Orientation="Horizontal" Spacing="10" Margin="12,8">
+                                    <Border Width="34" Height="34" CornerRadius="4" Background="{DynamicResource AccentSoft}">
+                                        <TextBlock Text="{Binding Kind}" FontSize="11" Foreground="{DynamicResource Accent}"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    </Border>
+                                    <StackPanel VerticalAlignment="Center" Spacing="2">
+                                        <TextBlock Text="{Binding Name}" Foreground="{DynamicResource Ink}" FontSize="13" />
+                                        <TextBlock Text="{Binding Ip}" Foreground="{DynamicResource InkDim}" FontSize="11" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </Grid>
+            </Border>
+
+            <!-- 未选中提示 -->
+            <Border Classes="card" Grid.Column="1" Padding="18" IsVisible="{Binding !HasSelectedLanDevice}">
+                <TextBlock Text="请从左侧选择一台设备，开始互传文件或远程控制。"
+                           Classes="sub" HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Border>
+
+            <!-- 操作区 -->
+            <Border Classes="card" Grid.Column="1" Padding="18" IsVisible="{Binding HasSelectedLanDevice}">
+                <Grid RowDefinitions="Auto,Auto,*">
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <TextBlock Text="{Binding LanBreadcrumb}" Classes="h2" VerticalAlignment="Center" />
+                        <Button Classes="ghost small" Content="上级" Command="{Binding LanBackDirCommand}" />
+                        <Button Classes="primary small" Content="发送文件" Command="{Binding LanUploadCommand}" />
+                        <Button Classes="ghost small" Content="开始远控" Command="{Binding LanStartControlCommand}" />
+                        <Button Classes="ghost small" Content="停止远控" Command="{Binding LanStopControlCommand}" />
+                    </StackPanel>
+
+                    <ScrollViewer Grid.Row="1" MaxHeight="180" Margin="0,12,0,0"
+                                  HorizontalScrollBarVisibility="Disabled"
+                                  IsVisible="{Binding !IsRemoteControlling}">
+                        <ItemsControl ItemsSource="{Binding LanRemoteFiles}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1" Padding="8,6">
+                                        <Grid ColumnDefinitions="Auto,*,Auto">
+                                            <TextBlock Grid.Column="0" Width="16" VerticalAlignment="Center"
+                                                       Text="▸" IsVisible="{Binding IsDir}" Foreground="{DynamicResource Accent}" />
+                                            <TextBlock Grid.Column="1" Text="{Binding Name}" Classes="rowLabel" VerticalAlignment="Center" />
+                                            <Button Grid.Column="2" Classes="ghost small" Content="打开" IsVisible="{Binding IsDir}"
+                                                    Command="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).LanOpenDirCommand}"
+                                                    CommandParameter="{Binding}" />
+                                            <Button Grid.Column="2" Classes="ghost small" Content="接收" IsVisible="{Binding !IsDir}"
+                                                    Command="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).LanDownloadCommand}"
+                                                    CommandParameter="{Binding}" />
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+
+                    <Grid Grid.Row="2" Margin="0,12,0,0" RowDefinitions="*,Auto" IsVisible="{Binding IsRemoteControlling}">
+                        <Border Grid.Row="0" Background="#000000">
+                            <Image x:Name="RemoteScreen"
+                                   Source="{Binding LanScreenBytes, Converter={StaticResource BytesToBitmap}}"
+                                   Stretch="Uniform" StretchDirection="Both" Cursor="Hand" />
+                        </Border>
+                        <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center" Margin="0,10,0,0">
+                            <Button Classes="ghost small" Content="返回" Command="{Binding LanKeyCommand}" CommandParameter="back" />
+                            <Button Classes="ghost small" Content="主页" Command="{Binding LanKeyCommand}" CommandParameter="home" />
+                            <Button Classes="ghost small" Content="多任务" Command="{Binding LanKeyCommand}" CommandParameter="recent" />
+                        </StackPanel>
+                    </Grid>
+                </Grid>
+            </Border>
+        </Grid>
+    </Grid>
+</UserControl>
