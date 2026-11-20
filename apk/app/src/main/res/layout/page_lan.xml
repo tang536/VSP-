@@ -197,36 +197,39 @@
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:orientation="horizontal"
-                            android:gravity="center"
                             android:layout_marginTop="8dp">
                                 <Button
                                     android:id="@+id/lan_key_back"
-                                    android:layout_width="wrap_content"
+                                    android:layout_width="0dp"
                                     android:layout_height="wrap_content"
+                                    android:layout_weight="1"
                                     android:text="返回"
                                     android:textSize="12sp" />
                                 <Button
                                     android:id="@+id/lan_key_home"
-                                    android:layout_width="wrap_content"
+                                    android:layout_width="0dp"
                                     android:layout_height="wrap_content"
+                                    android:layout_weight="1"
                                     android:text="主页"
                                     android:textSize="12sp"
                                     android:layout_marginStart="6dp" />
                                 <Button
                                     android:id="@+id/lan_key_recent"
-                                    android:layout_width="wrap_content"
+                                    android:layout_width="0dp"
                                     android:layout_height="wrap_content"
+                                    android:layout_weight="1"
                                     android:text="多任务"
                                     android:textSize="12sp"
                                     android:layout_marginStart="6dp" />
                                 <Button
                                     android:id="@+id/lan_control_stop"
-                                    android:layout_width="wrap_content"
+                                    android:layout_width="0dp"
                                     android:layout_height="wrap_content"
+                                    android:layout_weight="1"
                                     android:text="停止"
                                     android:textSize="12sp"
                                     android:layout_marginStart="6dp" />
-                            </LinearLayout>
+                        </LinearLayout>
                         </LinearLayout>
 
                     <!-- 被控授权 -->
@@ -252,20 +255,27 @@
                             android:tag="dim"
                             android:textSize="11sp"
                             android:layout_marginTop="4dp" />
-                        <Button
-                            android:id="@+id/lan_enable_control"
-                            android:layout_width="wrap_content"
+                        <LinearLayout
+                            android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:text="授权屏幕共享"
-                            android:textSize="12sp"
-                            android:layout_marginTop="10dp" />
-                        <Button
-                            android:id="@+id/lan_open_accessibility"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="开启无障碍服务"
-                            android:textSize="12sp"
-                            android:layout_marginTop="6dp" />
+                            android:orientation="horizontal"
+                            android:layout_marginTop="10dp">
+                            <Button
+                                android:id="@+id/lan_enable_control"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:text="授权屏幕共享"
+                                android:textSize="12sp" />
+                            <Button
+                                android:id="@+id/lan_open_accessibility"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:text="开启无障碍服务"
+                                android:textSize="12sp"
+                                android:layout_marginStart="8dp" />
+                        </LinearLayout>
                     </LinearLayout>
 
                     <TextView

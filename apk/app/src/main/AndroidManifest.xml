@@ -17,6 +17,8 @@
     <!-- 自建前台服务下载更新：通知栏才能显示速度与已下载/总大小 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Android 14+ MediaProjection 必须运行在 mediaProjection 类型的前台服务中 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
@@ -52,6 +54,12 @@
             android:exported="false"
             android:stopWithTask="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- 局域网远控被控端：mediaProjection 类型前台服务承载屏幕捕获 -->
+        <service
+            android:name=".LanScreenService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
 
         <!-- 局域网远控被控端：无障碍注入点击/滑动/系统按键 -->
         <service

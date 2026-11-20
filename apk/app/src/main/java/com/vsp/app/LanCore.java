@@ -2,10 +2,7 @@ package com.vsp.app;
 
 import android.content.Context;
 import android.content.Intent;
-import android.media.Image;
-import android.media.ImageReader;
-import android.media.projection.MediaProjection;
-import android.media.projection.MediaProjectionManager;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
@@ -30,7 +27,6 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -97,11 +93,8 @@ public final class LanCore {
     private ServerSocket http;
     private String localIp = "";
 
-    // 被控：MediaProjection 截屏
-    private MediaProjection mediaProjection;
-    private ImageReader imageReader;
-    private android.hardware.display.VirtualDisplay virtualDisplay;
-    private volatile byte[] latestScreen;
+    // 被控：屏幕捕获由 LanScreenService（mediaProjection 前台服务）承载，
+    // 这里只通过静态方法取帧，不再直接持有 MediaProjection。
 
     public LanCore(Context ctx, File shareDir, String deviceName, Callback callback) {
         this.ctx = ctx.getApplicationContext();
@@ -132,8 +125,7 @@ public final class LanCore {
         running = false;
         try { if (udp != null) udp.close(); } catch (Throwable ignored) { }
         try { if (http != null) http.close(); } catch (Throwable ignored) { }
-        try { if (virtualDisplay != null) virtualDisplay.release(); } catch (Throwable ignored) { }
-        try { if (imageReader != null) imageReader.close(); } catch (Throwable ignored) { }
+        stopProjectionService();
         pool.shutdownNow();
     }
 
@@ -326,36 +318,25 @@ public final class LanCore {
 
     // ---------------- 被控：截屏与输入 ----------------
 
-    /** 由 Activity 在拿到 MediaProjection 授权回调后调用。 */
+    /** 由 Activity 在拿到 MediaProjection 授权回调后调用：转交 mediaProjection 前台服务。 */
     public void startProjection(int resultCode, Intent data) {
         try {
-            MediaProjectionManager mpm = (MediaProjectionManager) ctx.getSystemService(Context.MEDIA_PROJECTION_SERVICE);
-            mediaProjection = mpm.getMediaProjection(resultCode, data);
-            DisplayMetrics dm = new DisplayMetrics();
-            WindowManager wm = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
-            wm.getDefaultDisplay().getRealMetrics(dm);
-            imageReader = ImageReader.newInstance(dm.widthPixels, dm.heightPixels, android.graphics.ImageFormat.JPEG, 2);
-            imageReader.setOnImageAvailableListener(reader -> {
-                Image img = reader.acquireLatestImage();
-                if (img == null) return;
-                try {
-                    ByteBuffer bb = img.getPlanes()[0].getBuffer();
-                    byte[] jpeg = new byte[bb.remaining()];
-                    bb.get(jpeg);
-                    latestScreen = jpeg;
-                } catch (Throwable ignored) { }
-                finally { img.close(); }
-            }, main);
-            virtualDisplay = mediaProjection.createVirtualDisplay("Toolbox-LAN",
-                    dm.widthPixels, dm.heightPixels, dm.densityDpi, 0,
-                    imageReader.getSurface(), null, main);
+            Intent i = new Intent(ctx, LanScreenService.class);
+            i.putExtra(LanScreenService.EXTRA_CODE, resultCode);
+            i.putExtra(LanScreenService.EXTRA_DATA, data);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(i);
+            else ctx.startService(i);
             status("屏幕共享已开启，电脑可查看并控制本手机");
         } catch (Throwable t) { status("屏幕共享开启失败：" + t.getMessage()); }
     }
 
-    public boolean isProjecting() { return mediaProjection != null; }
+    public void stopProjectionService() {
+        try { ctx.stopService(new Intent(ctx, LanScreenService.class)); } catch (Throwable ignored) { }
+    }
 
-    private byte[] captureScreen() { return latestScreen; }
+    public boolean isProjecting() { return LanScreenService.isProjecting(); }
+
+    private byte[] captureScreen() { return LanScreenService.getLatestFrame(); }
 
     private boolean applyInput(byte[] body) {
         LanAccessibilityService acc = LanAccessibilityService.getInstance();

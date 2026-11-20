@@ -43,6 +43,7 @@ web/back/obj/
 *.suo
 
 # ---------- Windows 桌面端 ----------
+desktop/shots/
 desktop/publish/
 desktop/packaging/runtime/
 desktop/packaging/cache/

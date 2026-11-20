@@ -1538,19 +1538,40 @@ public class MainActivity extends Activity {
             catch (Throwable t) { Toast.makeText(this, "无法打开无障碍设置", Toast.LENGTH_SHORT).show(); }
         });
 
-        // 远控画面触摸：点击 / 滑动归一化坐标发给对方
+        // 远控画面触摸：按下-移动-抬起区分点击 / 滑动，归一化坐标发给对方
+        final float[] downX = new float[1];
+        final float[] downY = new float[1];
+        final boolean[] moved = new boolean[1];
         lanScreen.setOnTouchListener((v, event) -> {
             if (lan == null || lanSelected == null || !lanControlling) return false;
             float x = Math.max(0f, Math.min(1f, event.getX() / v.getWidth()));
             float y = Math.max(0f, Math.min(1f, event.getY() / v.getHeight()));
-            if (event.getAction() == MotionEvent.ACTION_UP) {
-                try {
-                    JSONObject o = new JSONObject();
-                    o.put("a", "tap"); o.put("x", x); o.put("y", y);
-                    lan.input(lanSelected, o);
-                } catch (Throwable ignored) { }
+            switch (event.getAction()) {
+                case MotionEvent.ACTION_DOWN:
+                    downX[0] = x; downY[0] = y; moved[0] = false;
+                    return true;
+                case MotionEvent.ACTION_MOVE:
+                    if (Math.abs(x - downX[0]) > 0.02f || Math.abs(y - downY[0]) > 0.02f) moved[0] = true;
+                    return true;
+                case MotionEvent.ACTION_UP:
+                    final boolean isSwipe = moved[0];
+                    final float sx = downX[0], sy = downY[0], ex = x, ey = y;
+                    new Thread(() -> {
+                        try {
+                            JSONObject o = new JSONObject();
+                            if (isSwipe) {
+                                o.put("a", "swipe");
+                                o.put("x1", sx); o.put("y1", sy); o.put("x2", ex); o.put("y2", ey);
+                            } else {
+                                o.put("a", "tap"); o.put("x", ex); o.put("y", ey);
+                            }
+                            lan.input(lanSelected, o);
+                        } catch (Throwable ignored) { }
+                    }, "lan-input").start();
+                    return true;
+                default:
+                    return true;
             }
-            return true;
         });
     }
 

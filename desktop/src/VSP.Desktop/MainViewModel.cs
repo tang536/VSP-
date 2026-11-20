@@ -328,6 +328,7 @@ public sealed class MainViewModel : BindableBase
     public ICommand LanStartControlCommand { get; }
     public ICommand LanStopControlCommand { get; }
     public ICommand LanTapCommand { get; }
+    public ICommand LanSwipeCommand { get; }
     public ICommand LanKeyCommand { get; }
 
     public bool IsHome => _page == 0;
@@ -384,6 +385,7 @@ public sealed class MainViewModel : BindableBase
         LanStartControlCommand = new RelayCommand(() => _ = StartLanControlAsync());
         LanStopControlCommand = new RelayCommand(StopLanControl);
         LanTapCommand = new RelayCommand(p => _ = LanTapAsync(p));
+        LanSwipeCommand = new RelayCommand(p => _ = LanSwipeAsync(p));
         LanKeyCommand = new RelayCommand(p => _ = LanSendKeyAsync(p?.ToString() ?? ""));
         StartLan();
 
@@ -830,6 +832,15 @@ public sealed class MainViewModel : BindableBase
         // p 为 (double x, double y) 归一化坐标，由 LanView 传入
         if (p is not ValueTuple<double, double> xy) return;
         await _lan.SendInputAsync(SelectedLanDevice, new { a = "tap", x = xy.Item1, y = xy.Item2 });
+    }
+
+    private async Task LanSwipeAsync(object? p)
+    {
+        if (_lan is null || SelectedLanDevice is null) return;
+        // p 为 (x1, y1, x2, y2) 归一化坐标，由 LanView 拖拽手势传入
+        if (p is not ValueTuple<double, double, double, double> s) return;
+        await _lan.SendInputAsync(SelectedLanDevice,
+            new { a = "swipe", x1 = s.Item1, y1 = s.Item2, x2 = s.Item3, y2 = s.Item4 });
     }
 
     private async Task LanSendKeyAsync(string key)

@@ -1,8 +1,8 @@
 {
   "platform": "desktop",
-  "version": "1.1.0",
-  "msi": "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.0/Toolbox-Setup-v1.1.0.msi",
+  "version": "1.1.1",
+  "msi": "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.1/Toolbox-Setup-v1.1.1.msi",
   "size": 88148181,
-  "notes": "更名「全能工具箱」；新增启动进场动画；新增局域网直连互传与双向远控（不耗流量）",
-  "page": "https://github.com/tang536/VSP-/releases/tag/desktop-v1.1.0"
+  "notes": "修复远控：预览支持拖拽滑动；预览下方补齐返回/主页/多任务/停止远控控制条；修复手机端 MediaProjection 前台服务崩溃",
+  "page": "https://github.com/tang536/VSP-/releases/tag/desktop-v1.1.1"
 }
