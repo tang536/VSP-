@@ -1,9 +1,9 @@
 {
-  "version": "1.3.1",
-  "versionCode": 11301,
-  "apk": "dist/VSP-Parse-v1.3.1.apk",
+  "version": "1.3.2",
+  "versionCode": 11302,
+  "apk": "dist/VSP-Parse-v1.3.2.apk",
   "size": 31853446,
-  "sha256": "3c3248ab0b514656ae2062de7f7a0f664411f3b981a5c324b5638586c338065c",
+  "sha256": "45fd1edd84fbd9d44d6ba939849c6c98a0a363fb86aff38c72ebaec615ddf220",
   "date": "2026-11-20",
-  "notes": "v1.3.1\n\n1) 修复手机被电脑远控时「MediaProjection requires a foreground service」崩溃：屏幕捕获改由 mediaProjection 前台服务承载，Android 14+ 可正常授权并投屏。\n2) 补全远控控制逻辑：手机端远控画面支持点击与滑动手势；桌面端预览支持拖拽滑动，并在预览下方补齐「返回 / 主页 / 多任务 / 停止远控」控制条。\n3) 优化布局：手机端两个权限按钮、屏幕下方四个控制按钮改为等宽横排，更整齐美观。\n"
+  "notes": "v1.3.2\n\n1) 修复检查更新：桌面端发布 desktop-v* 标签后占据了 GitHub/Gitee 的 latest 端点，导致手机端版本判断错乱、反复提示旧版。现在检查更新会忽略桌面版标签，并以手机版专属索引为准。\n2) 其余功能与 v1.3.1 一致（远控前台服务修复、点击/滑动控制、等宽按钮布局）。\n"
 }

@@ -159,7 +159,13 @@ public class MainActivity extends Activity {
             "https://github.com/" + UPDATE_REPO + "/releases.atom";
     private static final String GITEE_API =
             "https://gitee.com/api/v5/repos/" + GITEE_REPO + "/releases/latest";
-    /** Gitee 还没建 Release 时，读仓库里的 apk/dist/latest.json（随源码一起推上去） */
+    /**
+     * 手机版版本索引（随源码推到两个仓库，不受 Release 顺序影响）。
+     * 桌面端发版用 desktop-v* 标签，会占据 /releases/latest，
+     * 因此检查更新必须以这里的 version 为准，release 端点只作为补充。
+     */
+    private static final String GITHUB_INDEX =
+            "https://raw.githubusercontent.com/" + UPDATE_REPO + "/main/apk/dist/latest.json";
     private static final String GITEE_INDEX =
             "https://gitee.com/" + GITEE_REPO + "/raw/main/apk/dist/latest.json";
     private static final String UPDATE_PAGE = "https://github.com/" + UPDATE_REPO + "/releases";
@@ -6605,7 +6611,7 @@ public class MainActivity extends Activity {
         updateProgress.setVisibility(View.VISIBLE);
         updateVersion.setText("检查中…");
         new Thread(() -> {
-            UpdateInfo gh = null, ge = null;
+            UpdateInfo gh = null, ge = null, gi = null;
             String ghErr = null, geErr = null;
             try {
                 gh = fromGitHub(fetchLatestRelease());
@@ -6614,20 +6620,21 @@ public class MainActivity extends Activity {
             }
             try {
                 ge = fromGitee(fetchGiteeRelease());
-                if (ge == null || ge.version.isEmpty()) {
-                    ge = fromGiteeIndex(fetchGiteeIndex());
-                }
             } catch (Exception e) {
-                try {
-                    ge = fromGiteeIndex(fetchGiteeIndex());
-                } catch (Exception e2) {
-                    geErr = shortMsg(e2);
-                }
+                geErr = shortMsg(e);
             }
-            // 两个源版本相同时 pickNewer 取第一个参数，因此把 Gitee 放在前面：
-            // Gitee 实测约 1.5 MB/s，GitHub 只有 270 KB/s 左右，同版本优先走快的源。
-            // 若某天 GitHub 版本更高，pickNewer 仍会正确地选中它。
-            UpdateInfo best = pickNewer(ge, gh);
+            // 两个仓库的 apk/dist/latest.json 是手机版专属索引，不受 Release 顺序影响。
+            // 桌面端发版把 /releases/latest 占成 desktop-v* 后，release 源会被过滤为空，
+            // 这里必须回退到索引，否则用户会一直收不到手机版更新。
+            try {
+                gi = fromIndex(fetchText(GITHUB_INDEX, 3), "github");
+            } catch (Exception ignore) { }
+            try {
+                UpdateInfo giGitee = fromIndex(fetchText(GITEE_INDEX, 3), "gitee");
+                gi = pickNewer(gi, giGitee);
+            } catch (Exception ignore) { }
+            // release 与索引都参与比较，取版本最高的手机版。
+            UpdateInfo best = pickNewer(pickNewer(ge, gh), gi);
             // Gitee 的 release 附件接口不返回 size，同版本时借 GitHub 的大小把「版本 · 大小」补全
             if (best != null && best.size <= 0 && gh != null
                     && best.version.equals(gh.version) && gh.size > 0) {
@@ -6675,11 +6682,18 @@ public class MainActivity extends Activity {
         return m.length() > 60 ? m.substring(0, 60) : m;
     }
 
+    /** 桌面端发版用 desktop-v* 标签，手机检查更新必须忽略，否则会把桌面版当成 App 更新 */
+    private static boolean isDesktopTag(String tag) {
+        return tag != null && tag.trim().toLowerCase(Locale.ROOT).startsWith("desktop");
+    }
+
     private UpdateInfo fromGitHub(JSONObject rel) {
         if (rel == null) return null;
+        String rawTag = rel.optString("tag_name", "").trim();
+        if (isDesktopTag(rawTag)) return null;
         UpdateInfo info = new UpdateInfo();
         info.from = "github";
-        info.version = rel.optString("tag_name", "").trim().replaceFirst("^[vV]", "");
+        info.version = rawTag.replaceFirst("^[vV]", "");
         info.notes = rel.optString("body", "").trim();
         info.date = rel.optString("published_at", "").trim();
         JSONArray assets = rel.optJSONArray("assets");
@@ -6703,9 +6717,11 @@ public class MainActivity extends Activity {
 
     private UpdateInfo fromGitee(JSONObject rel) {
         if (rel == null) return null;
+        String rawTag = rel.optString("tag_name", "").trim();
+        if (isDesktopTag(rawTag)) return null;
         UpdateInfo info = new UpdateInfo();
         info.from = "gitee";
-        info.version = rel.optString("tag_name", "").trim().replaceFirst("^[vV]", "");
+        info.version = rawTag.replaceFirst("^[vV]", "");
         info.notes = rel.optString("body", "").trim();
         info.date = rel.optString("created_at", "").trim();
         if (info.date.isEmpty()) info.date = rel.optString("published_at", "").trim();
@@ -6761,12 +6777,19 @@ public class MainActivity extends Activity {
         throw new Exception("跳转次数过多");
     }
 
-    private UpdateInfo fromGiteeIndex(JSONObject idx) {
+    /** 直接解析索引原文（JSON 字符串），source = github / gitee 决定安装包兜底地址 */
+    private UpdateInfo fromIndex(String body, String source) throws Exception {
+        if (body == null || !body.trim().startsWith("{")) return null;
+        return fromIndex(new JSONObject(body), source);
+    }
+
+    /** 解析手机版索引对象；source 决定相对 apk 文件名补全到哪个仓库的 Release */
+    private UpdateInfo fromIndex(JSONObject idx, String source) {
         if (idx == null) return null;
         String ver = idx.optString("version", "").trim().replaceFirst("^[vV]", "");
-        if (ver.isEmpty()) return null;
+        if (ver.isEmpty() || isDesktopTag(ver)) return null;
         UpdateInfo info = new UpdateInfo();
-        info.from = "gitee";
+        info.from = source;
         info.version = ver;
         info.notes = idx.optString("notes", "").trim();
         info.date = idx.optString("date", "").trim();
@@ -6775,12 +6798,18 @@ public class MainActivity extends Activity {
             info.apkUrl = apk;
         } else {
             // 安装包不进源码仓（apk/dist/* 被忽略），索引里的 apk 只是文件名参考；
-            // 能下的是 release 附件，约定路径与 fromGitee 的兜底一致
-            info.apkUrl = "https://gitee.com/" + GITEE_REPO
+            // 能下的是 release 附件，按来源补全到对应仓库。
+            String repo = "github".equals(source) ? UPDATE_REPO : GITEE_REPO;
+            String host = "github".equals(source) ? "github.com" : "gitee.com";
+            info.apkUrl = "https://" + host + "/" + repo
                     + "/releases/download/v" + ver + "/VSP-Parse-v" + ver + ".apk";
         }
         info.size = idx.optLong("size", 0L);
         return info;
+    }
+
+    private UpdateInfo fromGiteeIndex(JSONObject idx) {
+        return fromIndex(idx, "gitee");
     }
 
     private JSONObject fetchLatestRelease() throws Exception {
