@@ -233,6 +233,21 @@ public class MainActivity extends Activity {
     /** 本页已嗅探过的 URL，避免 shouldInterceptRequest 重复刷列表 */
     private final java.util.Set<String> browserSeen = java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
     private volatile long browserNavToken = 0;
+    /** 浏览器主页：主页按钮 / 新建窗口都回到这里 */
+    private static final String BROWSER_HOME_URL = "https://www.bing.com";
+    /** 多窗口：每个窗口一个独立 WebView，只有当前窗口挂在容器上 */
+    private android.widget.FrameLayout browserViewHost;
+    private android.widget.ImageButton browserNavBack, browserNavForward;
+    private final java.util.List<BrowserWindow> browserWindows = new java.util.ArrayList<>();
+    private int browserWindowIndex = 0;
+
+    /** 一个浏览器窗口：历史属于 view 自己，title/url 给窗口列表展示 */
+    private static final class BrowserWindow {
+        final android.webkit.WebView view;
+        String title = "";
+        String url = "";
+        BrowserWindow(android.webkit.WebView v) { view = v; }
+    }
 
     /** 浏览网页时嗅探到的一条可下载媒体资源 */
     private static final class BrowserResource {
@@ -381,6 +396,8 @@ public class MainActivity extends Activity {
     private final Set<String> selectedIds = new HashSet<>();
     private List<JSONObject> activeTasks = new ArrayList<>();
     private List<JSONObject> finishedTasks = new ArrayList<>();
+    /** 已完成任务对应文件是否还在；文件被移走后要立刻把条目置灰 */
+    private volatile String lastTaskFileSig = "";
     private TextView selCount;
 
     private final Map<String, Bitmap> thumbCache = new LinkedHashMap<>();
@@ -645,6 +662,8 @@ public class MainActivity extends Activity {
                     py.getModule("vsp").callAttr("set_private_dir", privateDir.getAbsolutePath());
                     downloadDir = py.getModule("vsp").callAttr("get_save_dir").toString();
                     pyReady = true;
+                    // 恢复上次退出前的下载队列；浏览器内下载走的也是同一套任务表
+                    py.getModule("vsp").callAttr("restore_tasks");
                     // 后台把预览转发服务先拉起来，别等用户点预览时在 UI 线程里启动
                     try {
                         py.getModule("vsp").callAttr("warm_proxy");
@@ -865,7 +884,9 @@ public class MainActivity extends Activity {
      * - shouldInterceptRequest 被动嗅探媒体直链（不执行网页 JS 注入，避免双向桥）。
      */
     private void bindBrowser() {
-        browserView = pageBrowser.findViewById(R.id.browser_webview);
+        browserViewHost = pageBrowser.findViewById(R.id.browser_view_host);
+        browserNavBack = pageBrowser.findViewById(R.id.browser_back);
+        browserNavForward = pageBrowser.findViewById(R.id.browser_forward);
         browserUrl = pageBrowser.findViewById(R.id.browser_url);
         browserProgress = pageBrowser.findViewById(R.id.browser_progress);
         browserResList = pageBrowser.findViewById(R.id.browser_res_list);
@@ -877,112 +898,12 @@ public class MainActivity extends Activity {
         browserResClose = pageBrowser.findViewById(R.id.browser_res_close);
         browserResFab = pageBrowser.findViewById(R.id.browser_res_fab);
 
-        // ---------- WebView 沙箱加固 ----------
-        android.webkit.WebSettings ws = browserView.getSettings();
-        ws.setJavaScriptEnabled(true);
-        ws.setAllowFileAccess(false);                       // 禁止 file://
-        ws.setAllowContentAccess(false);                    // 禁止 content://
-        ws.setJavaScriptCanOpenWindowsAutomatically(false); // 禁止 window.open 弹窗
-        ws.setGeolocationEnabled(false);                    // 不给定位
-        ws.setSaveFormData(false);
-        ws.setDomStorageEnabled(false);                     // 不持久化 DOM 存储
-        ws.setDatabaseEnabled(false);
-        ws.setMediaPlaybackRequiresUserGesture(true);       // 禁止网页自动播放声音
-        ws.setCacheMode(android.webkit.WebSettings.LOAD_NO_CACHE);
-        ws.setUseWideViewPort(true);
-        ws.setLoadWithOverviewMode(true);
-        ws.setBuiltInZoomControls(true);
-        ws.setDisplayZoomControls(false);
-        ws.setSupportZoom(true);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            try { ws.setSafeBrowsingEnabled(true); } catch (Throwable ignored) { }
-        }
-        // 独立的 UserAgent，标注是 VSP 沙箱浏览器
-        try {
-            String ua = ws.getUserAgentString() + " VSPBrowser/1.0 (sandboxed)";
-            ws.setUserAgentString(ua);
-        } catch (Throwable ignored) { }
-        browserView.setVerticalScrollBarEnabled(true);
-        browserView.setHorizontalScrollBarEnabled(false);
-
-        browserView.setWebViewClient(new android.webkit.WebViewClient() {
-            // 新版（API 24+）：高版本系统会走这个重载
-            @Override
-            public boolean shouldOverrideUrlLoading(android.webkit.WebView view,
-                                                    android.webkit.WebResourceRequest request) {
-                return handleBrowserNavigation(request.getUrl().toString());
-            }
-            // 旧版兜底
-            @Override
-            public boolean shouldOverrideUrlLoading(android.webkit.WebView view, String url) {
-                return handleBrowserNavigation(url);
-            }
-            @Override
-            public void onPageStarted(android.webkit.WebView view, String url, android.graphics.Bitmap favicon) {
-                long token = ++browserNavToken;
-                browserSeen.clear();
-                ui.post(() -> {
-                    if (token != browserNavToken) return;
-                    browserResDismissed = false;
-                    clearBrowserResources();
-                    browserUrl.setText(url);
-                    browserProgress.setVisibility(View.VISIBLE);
-                });
-            }
-            @Override
-            public void onPageFinished(android.webkit.WebView view, String url) {
-                ui.post(() -> {
-                    browserProgress.setVisibility(View.GONE);
-                    applyBrowserSilent(); // 静音模式下压住网页视频
-                });
-                // 页面加载完后补充嗅探 DOM 里的 <video>/<audio>/<a> 直链（纯读取，不注入桥）
-                scanPageHtml(view, url);
-            }
-            @Override
-            public void onReceivedError(android.webkit.WebView view, int code, String desc, String failingUrl) {
-                ui.post(() -> browserProgress.setVisibility(View.GONE));
-            }
-
-            /**
-             * 被动嗅探：每个网络请求进来时看 URL / MIME 像不像媒体，
-             * 只记录直链，返回 null 表示不拦截、网页照常加载。
-             */
-            @Override
-            public android.webkit.WebResourceResponse shouldInterceptRequest(android.webkit.WebView view,
-                                                                             android.webkit.WebResourceRequest request) {
-                try {
-                    String url = request.getUrl().toString();
-                    String mime = request.getRequestHeaders() != null
-                            ? request.getRequestHeaders().get("Accept") : null;
-                    BrowserResource res = classifyBrowserResource(url, mime);
-                    if (res != null) offerBrowserResource(res);
-                } catch (Throwable ignored) { }
-                return null;
-            }
-        });
-
-        browserView.setWebChromeClient(new android.webkit.WebChromeClient() {
-            @Override
-            public void onProgressChanged(android.webkit.WebView view, int progress) {
-                ui.post(() -> {
-                    browserProgress.setVisibility(progress >= 100 ? View.GONE : View.VISIBLE);
-                    browserProgress.setProgress(progress);
-                });
-            }
-            @Override
-            public void onReceivedTitle(android.webkit.WebView view, String title) {
-                // 标题不抢占地址栏，地址栏始终显示当前 URL
-            }
-        });
-
-        // 拦截下载：不让网页把 APK / 任意文件塞进公共存储，转成我们自己的安全队列
-        browserView.setDownloadListener((url, userAgent, contentDisposition, mimeType, length) -> {
-            BrowserResource res = classifyBrowserResource(url, mimeType);
-            if (res == null) {
-                ui.post(() -> Toast.makeText(this, "已拦截不安全的下载请求", Toast.LENGTH_SHORT).show());
-                return;
-            }
-            ui.post(() -> downloadBrowserResource(res));
+        // ---------- 底部导航：按钮只对当前窗口生效 ----------
+        browserNavBack.setOnClickListener(v -> { if (browserView != null) browserView.goBack(); });
+        browserNavForward.setOnClickListener(v -> { if (browserView != null) browserView.goForward(); });
+        pageBrowser.findViewById(R.id.browser_tabs).setOnClickListener(v -> showBrowserWindows());
+        pageBrowser.findViewById(R.id.browser_home).setOnClickListener(v -> {
+            if (browserView != null) browserView.loadUrl(BROWSER_HOME_URL);
         });
 
         // ---------- 地址栏：网址直接打开，其它当搜索词走搜索引擎 ----------
@@ -997,7 +918,7 @@ public class MainActivity extends Activity {
                 return;
             }
             dismissKeyboard();
-            browserView.loadUrl(url);
+            if (browserView != null) browserView.loadUrl(url);
         };
         pageBrowser.findViewById(R.id.browser_go).setOnClickListener(v -> go.run());
         browserUrl.setOnEditorActionListener((v, actionId, event) -> {
@@ -1028,8 +949,276 @@ public class MainActivity extends Activity {
         makeBrowserResDraggable(browserResHeader, browserResFloat);
         makeBrowserResDraggable(browserResFab, browserResFab);
 
-        // 默认打开一个导航起始页，避免空白
-        browserView.loadUrl("https://www.bing.com");
+        // 默认开一个窗口打开导航起始页，避免空白
+        openBrowserWindow(BROWSER_HOME_URL);
+    }
+
+    /** 创建一个遵循沙箱规则的 WebView，每个窗口各持一个实例、各自独立历史 */
+    private android.webkit.WebView createBrowserView() {
+        final android.webkit.WebView view = new android.webkit.WebView(this);
+        // ---------- WebView 沙箱加固 ----------
+        android.webkit.WebSettings ws = view.getSettings();
+        ws.setJavaScriptEnabled(true);
+        ws.setAllowFileAccess(false);                       // 禁止 file://
+        ws.setAllowContentAccess(false);                    // 禁止 content://
+        ws.setJavaScriptCanOpenWindowsAutomatically(false); // 禁止 window.open 弹窗
+        ws.setGeolocationEnabled(false);                    // 不给定位
+        ws.setSaveFormData(false);
+        ws.setDomStorageEnabled(false);                     // 不持久化 DOM 存储
+        ws.setDatabaseEnabled(false);
+        ws.setMediaPlaybackRequiresUserGesture(true);       // 禁止网页自动播放声音
+        ws.setCacheMode(android.webkit.WebSettings.LOAD_NO_CACHE);
+        ws.setUseWideViewPort(true);
+        ws.setLoadWithOverviewMode(true);
+        ws.setBuiltInZoomControls(true);
+        ws.setDisplayZoomControls(false);
+        ws.setSupportZoom(true);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try { ws.setSafeBrowsingEnabled(true); } catch (Throwable ignored) { }
+        }
+        // 独立的 UserAgent，标注是 VSP 沙箱浏览器
+        try {
+            String ua = ws.getUserAgentString() + " VSPBrowser/1.0 (sandboxed)";
+            ws.setUserAgentString(ua);
+        } catch (Throwable ignored) { }
+        view.setVerticalScrollBarEnabled(true);
+        view.setHorizontalScrollBarEnabled(false);
+
+        view.setWebViewClient(new android.webkit.WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(android.webkit.WebView v,
+                                                    android.webkit.WebResourceRequest request) {
+                return handleBrowserNavigation(request.getUrl().toString());
+            }
+            @Override
+            public boolean shouldOverrideUrlLoading(android.webkit.WebView v, String url) {
+                return handleBrowserNavigation(url);
+            }
+            @Override
+            public void onPageStarted(android.webkit.WebView v, String url, android.graphics.Bitmap favicon) {
+                BrowserWindow win = windowOf(v);
+                if (win != null) win.url = url;
+                long token = ++browserNavToken;
+                browserSeen.clear();
+                ui.post(() -> {
+                    if (v != browserView || token != browserNavToken) return;
+                    browserResDismissed = false;
+                    clearBrowserResources();
+                    browserUrl.setText(url);
+                    browserProgress.setVisibility(View.VISIBLE);
+                    refreshBrowserNav();
+                });
+            }
+            @Override
+            public void onPageFinished(android.webkit.WebView v, String url) {
+                BrowserWindow win = windowOf(v);
+                if (win != null) win.url = url;
+                ui.post(() -> {
+                    if (v != browserView) return;
+                    browserProgress.setVisibility(View.GONE);
+                    applyBrowserSilent(); // 静音模式下压住网页视频
+                    refreshBrowserNav();
+                });
+                scanPageHtml(v, url);
+            }
+            @Override
+            public void doUpdateVisitedHistory(android.webkit.WebView v, String url, boolean isReload) {
+                ui.post(() -> { if (v == browserView) refreshBrowserNav(); });
+            }
+            @Override
+            public void onReceivedError(android.webkit.WebView v, int code, String desc, String failingUrl) {
+                ui.post(() -> { if (v == browserView) browserProgress.setVisibility(View.GONE); });
+            }
+            /** 被动嗅探：只记录直链，返回 null 表示不拦截、网页照常加载 */
+            @Override
+            public android.webkit.WebResourceResponse shouldInterceptRequest(android.webkit.WebView v,
+                                                                             android.webkit.WebResourceRequest request) {
+                try {
+                    String url = request.getUrl().toString();
+                    String mime = request.getRequestHeaders() != null
+                            ? request.getRequestHeaders().get("Accept") : null;
+                    BrowserResource res = classifyBrowserResource(url, mime);
+                    if (res != null) offerBrowserResource(res);
+                } catch (Throwable ignored) { }
+                return null;
+            }
+        });
+
+        view.setWebChromeClient(new android.webkit.WebChromeClient() {
+            @Override
+            public void onProgressChanged(android.webkit.WebView v, int progress) {
+                ui.post(() -> {
+                    if (v != browserView) return;
+                    browserProgress.setVisibility(progress >= 100 ? View.GONE : View.VISIBLE);
+                    browserProgress.setProgress(progress);
+                });
+            }
+            @Override
+            public void onReceivedTitle(android.webkit.WebView v, String title) {
+                BrowserWindow win = windowOf(v);
+                if (win != null && title != null && !title.trim().isEmpty()) win.title = title;
+            }
+        });
+
+        // 拦截下载：不让网页把 APK / 任意文件塞进公共存储，转成我们自己的安全队列
+        view.setDownloadListener((url, userAgent, contentDisposition, mimeType, length) -> {
+            BrowserResource res = classifyBrowserResource(url, mimeType);
+            if (res == null) {
+                ui.post(() -> Toast.makeText(this, "已拦截不安全的下载请求", Toast.LENGTH_SHORT).show());
+                return;
+            }
+            ui.post(() -> downloadBrowserResource(res));
+        });
+        return view;
+    }
+
+    private BrowserWindow windowOf(android.webkit.WebView view) {
+        for (BrowserWindow w : browserWindows) if (w.view == view) return w;
+        return null;
+    }
+
+    /** 新建窗口并立刻切过去 */
+    private void openBrowserWindow(String url) {
+        String target = (url == null || url.isEmpty()) ? BROWSER_HOME_URL : url;
+        android.webkit.WebView view = createBrowserView();
+        BrowserWindow win = new BrowserWindow(view);
+        win.url = target;
+        browserWindows.add(win);
+        attachBrowserWindow(browserWindows.size() - 1);
+        view.loadUrl(target);
+    }
+
+    /** 把某个窗口挂到界面上，并清理只属于上一个窗口的临时状态 */
+    private void attachBrowserWindow(int index) {
+        BrowserWindow win = browserWindows.get(index);
+        if (browserView != null && browserViewHost.indexOfChild(browserView) >= 0) {
+            browserViewHost.removeView(browserView);
+        }
+        browserWindowIndex = index;
+        browserView = win.view;
+        browserViewHost.addView(win.view, new android.widget.FrameLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT));
+        browserUrl.setText(win.url.isEmpty() ? BROWSER_HOME_URL : win.url);
+        browserNavToken++;
+        browserSeen.clear();
+        if (browserResAdapter != null) clearBrowserResources();
+        browserResDismissed = false;
+        browserResFloat.setVisibility(View.GONE);
+        browserResFab.setVisibility(View.GONE);
+        browserProgress.setVisibility(View.GONE);
+        applyBrowserSilent();
+        refreshBrowserNav();
+    }
+
+    private void switchBrowserWindow(int index) {
+        if (index < 0 || index >= browserWindows.size() || index == browserWindowIndex) return;
+        attachBrowserWindow(index);
+    }
+
+    /** 窗口列表里的「关闭当前窗口」；至少保留一个窗口 */
+    private void closeBrowserWindow(int index) {
+        if (index < 0 || index >= browserWindows.size()) return;
+        if (browserWindows.size() == 1) {
+            Toast.makeText(this, "至少保留一个窗口", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        BrowserWindow win = browserWindows.get(index);
+        if (browserViewHost.indexOfChild(win.view) >= 0) browserViewHost.removeView(win.view);
+        win.view.setWebViewClient(null);
+        win.view.setWebChromeClient(null);
+        win.view.destroy();
+        browserWindows.remove(index);
+        if (index == browserWindowIndex) {
+            int next = Math.min(index, browserWindows.size() - 1);
+            browserView = null;
+            attachBrowserWindow(next);
+        } else if (index < browserWindowIndex) {
+            browserWindowIndex--;
+        }
+        refreshBrowserNav();
+    }
+
+    /** 上一级 / 下一级按钮只在对应历史存在时出现 */
+    private void refreshBrowserNav() {
+        if (browserNavBack == null || browserNavForward == null) return;
+        boolean back = browserView != null && browserView.canGoBack();
+        boolean forward = browserView != null && browserView.canGoForward();
+        browserNavBack.setVisibility(back ? View.VISIBLE : View.GONE);
+        browserNavForward.setVisibility(forward ? View.VISIBLE : View.GONE);
+        if (P != null) {
+            browserNavBack.setColorFilter(back ? P.icon : P.dim);
+            browserNavForward.setColorFilter(forward ? P.icon : P.dim);
+        }
+    }
+
+    /** 自建窗口列表，沿用主题调色板，避免系统弹窗在深色模式下刺眼 */
+    private void showBrowserWindows() {
+        if (P == null) return;
+        final android.app.Dialog dialog = new android.app.Dialog(this);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setBackgroundColor(P.card);
+        int pad = dp(16);
+        box.setPadding(pad, pad, pad, pad);
+
+        TextView title = new TextView(this);
+        title.setText("浏览器窗口 · " + browserWindows.size());
+        title.setTextColor(P.text);
+        title.setTextSize(16);
+        title.setPadding(0, 0, 0, dp(10));
+        box.addView(title);
+
+        for (int i = 0; i < browserWindows.size(); i++) {
+            final int idx = i;
+            BrowserWindow win = browserWindows.get(i);
+            String name = (win.title == null || win.title.trim().isEmpty()) ? "新窗口" : win.title;
+            String url = win.url.isEmpty() ? BROWSER_HOME_URL : win.url;
+            TextView row = new TextView(this);
+            row.setText((i == browserWindowIndex ? "● " : "○ ") + name + "\n" + url);
+            row.setTextColor(i == browserWindowIndex ? P.accent : P.text);
+            row.setTextSize(13);
+            row.setPadding(dp(10), dp(10), dp(10), dp(10));
+            row.setBackgroundColor(i == browserWindowIndex ? P.soft : P.card);
+            row.setOnClickListener(v -> { switchBrowserWindow(idx); dialog.dismiss(); });
+            box.addView(row);
+        }
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        actions.setPadding(0, dp(12), 0, 0);
+        TextView btnNew = browserDialogAction("新建窗口", P.accent, v -> {
+            openBrowserWindow(BROWSER_HOME_URL);
+            dialog.dismiss();
+        });
+        TextView btnClose = browserDialogAction("关闭当前", P.danger, v -> {
+            closeBrowserWindow(browserWindowIndex);
+            dialog.dismiss();
+        });
+        TextView btnCancel = browserDialogAction("取消", P.dim, v -> dialog.dismiss());
+        LinearLayout.LayoutParams ap = new LinearLayout.LayoutParams(0,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        btnNew.setLayoutParams(ap);
+        btnClose.setLayoutParams(ap);
+        btnCancel.setLayoutParams(ap);
+        actions.addView(btnNew);
+        actions.addView(btnClose);
+        actions.addView(btnCancel);
+        box.addView(actions);
+
+        dialog.setContentView(box);
+        dialog.show();
+    }
+
+    private TextView browserDialogAction(String text, int color, View.OnClickListener click) {
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setTextColor(color);
+        tv.setTextSize(14);
+        tv.setGravity(android.view.Gravity.CENTER);
+        tv.setPadding(dp(6), dp(10), dp(6), dp(10));
+        tv.setOnClickListener(click);
+        return tv;
     }
 
     /** 让浮窗（或小圆钮）随触摸拖动，限制在网页区范围内 */
@@ -1643,6 +1832,7 @@ public class MainActivity extends Activity {
         }
         refreshTabColors();
         refreshFormatTabColors();
+        refreshBrowserNav();
         loadAvatar();
         updateSelectionBar();
     }
@@ -7159,8 +7349,12 @@ public class MainActivity extends Activity {
         if (!pyReady) return;
         try {
             String tasksJson = py.getModule("vsp").callAttr("get_tasks").toString();
-            if (tasksJson.equals(lastTasksJson)) return;
+            // 任务 JSON 没变也可能因为用户把已下载文件移走而需要重绘：
+            // 文件存在性签名变化时同样走一次渲染，把对应条目置灰。
+            String fileSig = taskFileSignature();
+            if (tasksJson.equals(lastTasksJson) && fileSig.equals(lastTaskFileSig)) return;
             lastTasksJson = tasksJson;
+            lastTaskFileSig = fileSig;
             JSONArray arr = new JSONArray(tasksJson);
             List<JSONObject> active = new ArrayList<>();
             List<JSONObject> finished = new ArrayList<>();
@@ -7181,6 +7375,31 @@ public class MainActivity extends Activity {
             ui.post(() -> renderTasks(active, finished));
         } catch (Exception ignored) {
         }
+    }
+
+    /** 下载任务的落盘文件：filename 可能是绝对路径，也可能只是下载目录里的文件名 */
+    private File downloadedFileOf(String name) {
+        if (name == null || name.isEmpty()) return null;
+        File f = new File(name);
+        if (!f.isAbsolute() && downloadDir != null && !downloadDir.isEmpty()) {
+            f = new File(downloadDir, name);
+        }
+        return f;
+    }
+
+    /** 已下载文件被移动 / 删除后，队列条目要变灰而不是自动删记录 */
+    private boolean downloadedFileMissing(String name) {
+        File f = downloadedFileOf(name);
+        return f != null && !f.exists();
+    }
+
+    /** 只比较「已完成」任务的 in/out 状态，文件一移动就能触发重绘 */
+    private String taskFileSignature() {
+        StringBuilder sb = new StringBuilder();
+        for (JSONObject o : finishedTasks) {
+            sb.append(downloadedFileMissing(o.optString("filename", "")) ? '0' : '1');
+        }
+        return sb.toString();
     }
 
     private void renderTasks(List<JSONObject> active, List<JSONObject> finished) {
@@ -7484,6 +7703,10 @@ public class MainActivity extends Activity {
             final String status = t.optString("status", "running");
             final String fn = t.optString("filename", "");
             int pct = (int) t.optDouble("progress", 0);
+            // 文件被移走后整条置灰，不自动删记录、也不自动重新扫描
+            final boolean fileMissing = !activeMode && "done".equals(status)
+                    && downloadedFileMissing(fn);
+            h.itemView.setAlpha(fileMissing ? 0.45f : 1f);
 
             h.title.setText(t.optString("title", ""));
             loadThumb(h.thumb, t.optString("thumb", ""));
@@ -7541,12 +7764,14 @@ public class MainActivity extends Activity {
                 });
             } else {
                 String err = t.optString("error", "");
-                h.status.setText("done".equals(status) ? "完成"
+                h.status.setText(fileMissing ? "文件已移走 · 无法打开"
+                        : "done".equals(status) ? "完成"
                         : "已取消".equals(err) ? "已取消" : "失败");
                 h.size.setVisibility(View.GONE);
                 h.speed.setVisibility(View.GONE);
                 h.progress.setVisibility(View.GONE);
-                boolean canOpen = "done".equals(status) && (isPlayable(fn) || isImageFile(fn));
+                boolean canOpen = !fileMissing && "done".equals(status)
+                        && (isPlayable(fn) || isImageFile(fn));
                 h.open.setVisibility(canOpen ? View.VISIBLE : View.GONE);
                 h.open.setOnClickListener(v -> {
                     if (!choosing) openLocal(t);
@@ -7556,6 +7781,7 @@ public class MainActivity extends Activity {
 
             h.itemView.setOnClickListener(v -> {
                 if (choosing) toggleSelect(tid);
+                else if (fileMissing) Toast.makeText(MainActivity.this, "文件已移走，已标记为失效", Toast.LENGTH_SHORT).show();
                 else if (!activeMode && "done".equals(status)
                         && (isPlayable(fn) || isImageFile(fn))) openLocal(t);
             });
@@ -7611,6 +7837,9 @@ public class MainActivity extends Activity {
         @Override
         public void onBindViewHolder(VH h, int i) {
             final MediaItem m = data.get(i);
+            final boolean missing = m.source != null && !m.source.startsWith("content://")
+                    && !new File(m.source).exists();
+            h.itemView.setAlpha(missing ? 0.45f : 1f);
             // 卡片只留封面 + 时长这类媒体信息，不再摆文件名 / 体积（照片没有时长就不显示）
             if (h.name != null) h.name.setVisibility(View.GONE);
             if (h.meta != null) {
@@ -7635,8 +7864,12 @@ public class MainActivity extends Activity {
                         : m.type == TYPE_AUDIO ? R.drawable.ic_music : R.drawable.ic_image);
             }
             loadMediaThumb(h.thumb, m);
-            h.itemView.setOnClickListener(v -> playLocal(m));
+            h.itemView.setOnClickListener(v -> {
+                if (missing) Toast.makeText(MainActivity.this, "文件已移走，已标记为失效", Toast.LENGTH_SHORT).show();
+                else playLocal(m);
+            });
             if (h.extract != null) {
+                h.extract.setVisibility(missing ? View.GONE : View.VISIBLE);
                 h.extract.setOnClickListener(v -> extractAudioFrom(m));
             }
             h.itemView.setOnLongClickListener(v -> {
@@ -7743,8 +7976,20 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onPause() {
+        super.onPause();
+        // 进程被系统回收时不一定走 onDestroy，切后台先落一份队列快照
+        try {
+            if (pyReady && py != null) py.getModule("vsp").callAttr("flush_tasks");
+        } catch (Throwable ignored) { }
+    }
+
+    @Override
     protected void onDestroy() {
         super.onDestroy();
+        try {
+            if (pyReady && py != null) py.getModule("vsp").callAttr("flush_tasks");
+        } catch (Throwable ignored) { }
         try {
             if (updateDialog != null) updateDialog.dismiss();
         } catch (Throwable ignored) {

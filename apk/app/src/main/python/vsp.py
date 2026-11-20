@@ -818,6 +818,13 @@ def _download_thumb(url, title, tmpdir):
 
 # ---------------------------------------------------------------- 任务
 
+# 任务队列持久化：退出 App 后队列不能变空。快照落在应用私有目录，
+# 下载进度节流写入（最多 2 秒一次），关键节点立即写入。
+TASKS_FILE_NAME = "vsp_tasks.json"
+_PERSIST_KEYS = ("taskId", "title", "status", "progress", "speed", "filename",
+                 "error", "thumb", "total", "downloaded", "url", "formatId", "needsMerge")
+_last_save = [0.0]
+
 tasks = {}
 task_lock = threading.Lock()
 task_counter = [0]
@@ -839,7 +846,96 @@ def _set_task(tid, **fields):
         if t is None:
             return False
         t.update(fields)
+        _write_tasks(_task_snapshot_locked())
         return True
+
+
+def _tasks_file():
+    base = _private_dir or get_download_dir()
+    try:
+        return os.path.join(base, TASKS_FILE_NAME)
+    except Exception:
+        return None
+
+
+def _task_snapshot_locked():
+    """调用方必须持有 task_lock。不落 _worker 这类不可序列化的线程对象。"""
+    out = []
+    for tid, t in tasks.items():
+        item = {k: t.get(k) for k in _PERSIST_KEYS}
+        item["taskId"] = str(tid)
+        out.append(item)
+    return out
+
+
+def _write_tasks(snapshot, force=False):
+    now = time.time()
+    if not force and now - _last_save[0] < 2.0:
+        return
+    _last_save[0] = now
+    path = _tasks_file()
+    if not path:
+        return
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def _save_tasks(force=False):
+    with task_lock:
+        snapshot = _task_snapshot_locked()
+    _write_tasks(snapshot, force)
+
+
+def flush_tasks():
+    """Java 层在切后台 / 退出前调用，保证最后一份队列状态落盘。"""
+    _save_tasks(True)
+
+
+def restore_tasks():
+    """启动时恢复队列；上次运行被中断的任务改成可原地重试的失败态。"""
+    global task_counter
+    path = _tasks_file()
+    if not path or not os.path.exists(path):
+        return "0"
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            items = json.load(f)
+    except Exception:
+        return "0"
+    restored = 0
+    with task_lock:
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            tid_str = str(item.get("taskId", ""))
+            if not tid_str.isdigit():
+                continue
+            tid = int(tid_str)
+            t = dict(item)
+            for k in _PERSIST_KEYS:
+                if k not in t:
+                    t[k] = False if k == "needsMerge" else (0 if k in
+                           ("progress", "total", "downloaded") else "")
+            t["taskId"] = tid_str
+            t.pop("_worker", None)
+            if t.get("status") in ("running", "paused"):
+                t["status"] = "error"
+                t["error"] = "应用已退出，下载未完成，请重试"
+                t["speed"] = ""
+            tasks[tid] = t
+            task_counter[0] = max(task_counter[0], tid)
+            cancel_flags[tid] = False
+            pause_flags[tid] = False
+            pause_conds[tid] = threading.Condition()
+            restored += 1
+        if restored:
+            _write_tasks(_task_snapshot_locked(), True)
+    return str(restored)
 
 
 def _task_alive(tid):
@@ -942,6 +1038,7 @@ def start_download(url, format_id, title, thumb="", needs_merge=False):
         cancel_flags[tid] = False
         pause_flags[tid] = False
         pause_conds[tid] = threading.Condition()
+        _write_tasks(_task_snapshot_locked(), True)
     _start_worker(tid, url, format_id, title, needs_merge, worker_token)
     return str(tid)
 
@@ -1798,6 +1895,7 @@ def _start_worker(tid, url, format_id, title, needs_merge, worker_token):
             _set_task(tid, status="done", progress=100,
                       total=os.path.getsize(fpath), downloaded=os.path.getsize(fpath),
                       speed="", filename=os.path.basename(fpath))
+            _save_tasks(True)
         except Exception as e:
             # 看门狗已经写过更准确的「网络长时间无响应」时不要覆盖；
             # 普通网络失败则把旧速度清掉，避免界面继续显示假速度。
@@ -1854,6 +1952,7 @@ def retry_task(task_id):
             cancel_flags[tid] = False
             pause_flags[tid] = False
             pause_conds[tid] = threading.Condition()
+            _write_tasks(_task_snapshot_locked(), True)
         _start_worker(tid, url, format_id, title, needs_merge, worker_token)
     except Exception:
         pass
@@ -1870,6 +1969,7 @@ def pause_task(task_id):
             if tasks[tid].get("status") == "running":
                 tasks[tid]["status"] = "paused"
                 tasks[tid]["speed"] = "已暂停"
+            _write_tasks(_task_snapshot_locked(), True)
     except Exception:
         pass
     return "ok"
@@ -1884,6 +1984,7 @@ def resume_task(task_id):
             if tasks.get(tid, {}).get("status") == "paused":
                 tasks[tid]["status"] = "running"
                 tasks[tid]["speed"] = ""
+            _write_tasks(_task_snapshot_locked(), True)
     except Exception:
         pass
     return "ok"
@@ -1918,6 +2019,7 @@ def delete_task(task_id):
                 cancel_flags.pop(tid, None)
                 pause_flags.pop(tid, None)
                 pause_conds.pop(tid, None)
+            _write_tasks(_task_snapshot_locked(), True)
         if fn:
             fp = os.path.join(get_download_dir(), fn)
             if os.path.exists(fp):

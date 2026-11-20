@@ -1,13 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 内置浏览器独立页面：返回栏 + 地址栏 + WebView + 可拖动悬浮资源窗。
-     悬浮窗在嗅探到资源时自动弹出，可拖动、可收成小圆钮、可关闭删除。 -->
+<!-- 内置浏览器独立页面：地址栏 + WebView 容器 + 可拖动悬浮资源窗 + 底部导航。
+     悬浮窗在嗅探到资源时自动弹出，可拖动、可收成小圆钮、可关闭删除。
+     底部导航：上一级 / 下一级（可返回时才显示）、窗口列表、主页。 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
     android:tag="bg">
 
-    <!-- 顶部返回栏已移除：浏览器页只保留地址栏 + 网页 + 资源浮窗，返回用系统返回键/手势 -->
+    <!-- 顶部返回栏已移除：浏览器页只保留地址栏、网页、底部导航与资源浮窗，返回用系统返回键/手势 -->
 
     <!-- 播放器：浏览器里打开视频时挂到这里 -->
     <FrameLayout
@@ -62,8 +63,9 @@
         android:layout_height="0dp"
         android:layout_weight="1">
 
-        <WebView
-            android:id="@+id/browser_webview"
+        <!-- 多窗口宿主：每个窗口一个独立 WebView，由代码动态挂进来 -->
+        <FrameLayout
+            android:id="@+id/browser_view_host"
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
 
@@ -185,4 +187,67 @@
             android:visibility="gone"
             android:text="资源 0" />
     </FrameLayout>
+
+    <!-- 浏览器底部导航：上一级 / 下一级 / 窗口 / 主页 -->
+    <LinearLayout
+        android:id="@+id/browser_nav"
+        android:layout_width="match_parent"
+        android:layout_height="52dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="#171a21"
+        android:tag="card"
+        android:paddingStart="10dp"
+        android:paddingEnd="10dp">
+
+        <ImageButton
+            android:id="@+id/browser_back"
+            android:layout_width="0dp"
+            android:layout_height="46dp"
+            android:layout_weight="1"
+            android:src="@drawable/ic_arrow_left"
+            android:tag="icon"
+            android:scaleType="fitCenter"
+            android:padding="13dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="上一级"
+            android:visibility="gone" />
+
+        <ImageButton
+            android:id="@+id/browser_forward"
+            android:layout_width="0dp"
+            android:layout_height="46dp"
+            android:layout_weight="1"
+            android:src="@drawable/ic_arrow_right"
+            android:tag="icon"
+            android:scaleType="fitCenter"
+            android:padding="13dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="下一级"
+            android:visibility="gone" />
+
+        <ImageButton
+            android:id="@+id/browser_tabs"
+            android:layout_width="0dp"
+            android:layout_height="46dp"
+            android:layout_weight="1"
+            android:src="@drawable/ic_windows"
+            android:tag="icon"
+            android:scaleType="fitCenter"
+            android:padding="11dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="窗口列表" />
+
+        <ImageButton
+            android:id="@+id/browser_home"
+            android:layout_width="0dp"
+            android:layout_height="46dp"
+            android:layout_weight="1"
+            android:src="@drawable/ic_home"
+            android:tag="icon"
+            android:scaleType="fitCenter"
+            android:padding="12dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="浏览器主页" />
+    </LinearLayout>
 </LinearLayout>
