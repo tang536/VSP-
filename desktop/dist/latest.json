@@ -1,8 +1,13 @@
 {
   "platform": "desktop",
-  "version": "1.1.1",
-  "msi": "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.1/Toolbox-Setup-v1.1.1.msi",
-  "size": 88148181,
-  "notes": "修复远控：预览支持拖拽滑动；预览下方补齐返回/主页/多任务/停止远控控制条；修复手机端 MediaProjection 前台服务崩溃",
-  "page": "https://github.com/tang536/VSP-/releases/tag/desktop-v1.1.1"
+  "version": "1.1.2",
+  "msi": "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.2/Toolbox-Setup-v1.1.2.msi",
+  "mirrors": [
+    "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.2/Toolbox-Setup-v1.1.2.msi",
+    "https://gitee.com/tang-rongqiang/VSP/releases/download/desktop-v1.1.2/Toolbox-Setup-v1.1.2.msi"
+  ],
+  "size": 88152277,
+  "sha256": "de1db00c15d10d3a03e09d97acb0392814281c5a58861bef26999c812598c7e8",
+  "notes": "智能升级：下载前并发测速 GitHub / Gitee 双源，自动选最快线路，失败自动切换；精简远控控制页布局",
+  "page": "https://github.com/tang536/VSP-/releases/tag/desktop-v1.1.2"
 }

@@ -711,8 +711,9 @@ public sealed class MainViewModel : BindableBase
         try
         {
             UpdateStatus = "正在下载桌面版安装包…";
+            var statusProgress = new Progress<string>(s => UpdateStatus = s);
             await _services.Updates.DownloadAsync(_update, target,
-                new Progress<double>(p => UpdateProgress = p), CancellationToken.None);
+                new Progress<double>(p => UpdateProgress = p), statusProgress, CancellationToken.None);
             UpdateStatus = "安装包已下载：" + target;
             LocalLibrary.OpenFolder(Path.GetDirectoryName(target)!);
         }
