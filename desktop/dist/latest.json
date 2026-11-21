@@ -1,13 +1,13 @@
 {
   "platform": "desktop",
-  "version": "1.1.2",
-  "msi": "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.2/Toolbox-Setup-v1.1.2.msi",
+  "version": "1.1.3",
+  "msi": "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.3/Toolbox-Setup-v1.1.3.msi",
   "mirrors": [
-    "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.2/Toolbox-Setup-v1.1.2.msi",
-    "https://gitee.com/tang-rongqiang/VSP/releases/download/desktop-v1.1.2/Toolbox-Setup-v1.1.2.msi"
+    "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.3/Toolbox-Setup-v1.1.3.msi",
+    "https://gitee.com/tang-rongqiang/VSP/releases/download/desktop-v1.1.3/Toolbox-Setup-v1.1.3.msi"
   ],
   "size": 88152277,
-  "sha256": "de1db00c15d10d3a03e09d97acb0392814281c5a58861bef26999c812598c7e8",
-  "notes": "智能升级：下载前并发测速 GitHub / Gitee 双源，自动选最快线路，失败自动切换；精简远控控制页布局",
-  "page": "https://github.com/tang536/VSP-/releases/tag/desktop-v1.1.2"
+  "sha256": "2a38dbbdfd763c27580262b960480ebe4e10d865a403d23b7718e9f3104dfb20",
+  "notes": "修复局域网互传与远控：HTTP 服务改用无权限限制的监听方式，电脑端可被手机稳定发现并连接；手机端广播兼容 Android 10+；截图缩放防内存溢出",
+  "page": "https://github.com/tang536/VSP-/releases/tag/desktop-v1.1.3"
 }
