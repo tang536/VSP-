@@ -1609,29 +1609,39 @@ public class MainActivity extends Activity {
 
     private void refreshLanFiles() {
         if (lan == null || lanSelected == null) return;
+        final LanCore.Device dev = lanSelected;
+        final String dir = lanDirStack.isEmpty() ? "" : b64(joinLanDir());
+        final String crumb = lanDirStack.isEmpty() ? "共享目录" : "共享目录 / " + joinLanDir();
+        lanBreadcrumbText.setText(crumb);
         lanFileList.removeAllViews();
-        String dir = lanDirStack.isEmpty() ? "" : b64(joinLanDir());
-        lanBreadcrumbText.setText(lanDirStack.isEmpty() ? "共享目录" : "共享目录 / " + joinLanDir());
-        java.util.List<LanCore.FileEntry> files = lan.listRemote(lanSelected, dir);
-        for (LanCore.FileEntry f : files) {
-            View row = getLayoutInflater().inflate(R.layout.item_lan_file, lanFileList, false);
-            ((TextView) row.findViewById(R.id.lf_name)).setText(f.name + (f.dir ? "/" : ""));
-            ((TextView) row.findViewById(R.id.lf_size)).setText(f.dir ? "" : formatSize(f.size));
-            final LanCore.FileEntry ref = f;
-            row.setOnClickListener(v -> {
-                if (ref.dir) { lanDirStack.push(ref.name); refreshLanFiles(); }
-                else downloadLanFile(ref);
+        // 网络请求放到后台线程：主线程同步 HTTP 会抛 NetworkOnMainThreadException 并卡死界面。
+        swipePool.execute(() -> {
+            final java.util.List<LanCore.FileEntry> files = lan.listRemote(dev, dir);
+            ui.post(() -> {
+                // 用户可能已切换设备/离开页面，避免用过期数据覆盖当前列表
+                if (lanSelected != dev || lanFileList == null) return;
+                lanFileList.removeAllViews();
+                for (LanCore.FileEntry f : files) {
+                    View row = getLayoutInflater().inflate(R.layout.item_lan_file, lanFileList, false);
+                    ((TextView) row.findViewById(R.id.lf_name)).setText(f.name + (f.dir ? "/" : ""));
+                    ((TextView) row.findViewById(R.id.lf_size)).setText(f.dir ? "" : formatSize(f.size));
+                    final LanCore.FileEntry ref = f;
+                    row.setOnClickListener(v -> {
+                        if (ref.dir) { lanDirStack.push(ref.name); refreshLanFiles(); }
+                        else downloadLanFile(ref);
+                    });
+                    lanFileList.addView(row);
+                }
+                if (files.isEmpty()) {
+                    TextView empty = new TextView(this);
+                    empty.setText("（空目录或读取失败）");
+                    empty.setTextColor(0xFF8B909A);
+                    empty.setTextSize(12);
+                    empty.setPadding(0, 12, 0, 12);
+                    lanFileList.addView(empty);
+                }
             });
-            lanFileList.addView(row);
-        }
-        if (files.isEmpty()) {
-            TextView empty = new TextView(this);
-            empty.setText("（空目录或读取失败）");
-            empty.setTextColor(0xFF8B909A);
-            empty.setTextSize(12);
-            empty.setPadding(0, 12, 0, 12);
-            lanFileList.addView(empty);
-        }
+        });
     }
 
     private void downloadLanFile(LanCore.FileEntry f) {
@@ -1666,19 +1676,39 @@ public class MainActivity extends Activity {
         lanControlPanel.setVisibility(View.VISIBLE);
         showLanFiles(false);
         stopLanControlLoop();
+        final LanCore.Device dev = lanSelected;
         lanScreenTask = new Runnable() {
             @Override public void run() {
-                if (!lanControlling || lan == null || lanSelected == null) return;
-                byte[] shot = lan.screen(lanSelected);
-                if (shot != null && shot.length > 0) {
-                    try {
-                        android.graphics.Bitmap bmp = android.graphics.BitmapFactory.decodeByteArray(shot, 0, shot.length);
-                        if (bmp != null) lanScreen.setImageBitmap(bmp);
-                    } catch (Throwable ignored) { }
-                } else if (!lanSelected.isAndroid()) {
-                    lanStatusText.setText("远控画面等待中…");
-                }
-                lanScreenHandler.postDelayed(this, 700);
+                if (!lanControlling || lan == null || lanSelected != dev) return;
+                // 网络 + 图片解码放后台：全屏 JPEG 在主线程解码极易 OOM，同步 HTTP 会卡死 UI。
+                swipePool.execute(() -> {
+                    if (!lanControlling || lanSelected != dev) return;
+                    byte[] shot = lan.screen(dev);
+                    android.graphics.Bitmap bmp = null;
+                    if (shot != null && shot.length > 0) {
+                        try {
+                            android.graphics.BitmapFactory.Options opt = new android.graphics.BitmapFactory.Options();
+                            opt.inSampleSize = 2; // 缩放到 1/2，远控预览 260dp 足够，显存降为 1/4
+                            bmp = android.graphics.BitmapFactory.decodeByteArray(shot, 0, shot.length, opt);
+                        } catch (Throwable ignored) { }
+                    }
+                    final android.graphics.Bitmap frame = bmp;
+                    ui.post(() -> {
+                        if (!lanControlling || lanSelected != dev) return;
+                        if (frame != null) {
+                            android.graphics.drawable.Drawable d = lanScreen.getDrawable();
+                            android.graphics.Bitmap old = (d instanceof android.graphics.drawable.BitmapDrawable)
+                                    ? ((android.graphics.drawable.BitmapDrawable) d).getBitmap() : null;
+                            lanScreen.setImageBitmap(frame);
+                            if (old != null && old != frame && !old.isRecycled()) {
+                                try { old.recycle(); } catch (Throwable ignored) { }
+                            }
+                        } else if (!dev.isAndroid()) {
+                            lanStatusText.setText("远控画面等待中…");
+                        }
+                    });
+                });
+                if (lanControlling) lanScreenHandler.postDelayed(this, 700);
             }
         };
         lanScreenHandler.post(lanScreenTask);

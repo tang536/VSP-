@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -38,6 +39,11 @@ public sealed class LanFileEntry
 /// 局域网直连服务：UDP 广播发现 + 内嵌 HTTP 服务（文件互传、屏幕查看、输入注入）。
 /// 两端协议完全一致，全部走局域网 IP，不经公网服务器、不消耗移动流量。
 /// 只接受私网地址，且所有请求必须带配对令牌 TOKEN。
+///
+/// HTTP 服务用裸 TcpListener 手写解析（而非 HttpListener）：Windows 上 HttpListener
+/// 绑定非 localhost 前缀需要管理员执行 netsh urlacl，普通权限会抛 E_ACCESSDENIED，
+/// 导致服务静默启动失败、手机发现电脑后却连不上。TcpListener 绑定 Any:端口无此限制，
+/// 且与手机端 ServerSocket 的协议完全对称。
 /// </summary>
 public sealed class LanService : IDisposable
 {
@@ -51,7 +57,7 @@ public sealed class LanService : IDisposable
     private readonly ConcurrentDictionary<string, LanDevice> _devices = new();
     private readonly HttpClient _client = new() { Timeout = TimeSpan.FromSeconds(20) };
     private UdpClient? _udp;
-    private HttpListener? _http;
+    private TcpListener? _tcp;
     private CancellationTokenSource? _cts;
 
     public string LocalIp { get; private set; } = "127.0.0.1";
@@ -89,13 +95,18 @@ public sealed class LanService : IDisposable
                 id = _deviceId, n = _deviceName, t = "pc", p = HttpPort, k = Token
             });
             var helloBytes = Encoding.UTF8.GetBytes(hello);
+            var targets = BroadcastAddresses();
+            LocalIp = GetLocalPrivateIps().FirstOrDefault() ?? "127.0.0.1";
 
             _ = Task.Run(async () =>
             {
                 while (!ct.IsCancellationRequested)
                 {
-                    try { await _udp!.SendAsync(helloBytes, new IPEndPoint(IPAddress.Broadcast, UdpPort), ct); }
-                    catch { }
+                    foreach (var t in targets)
+                    {
+                        try { await _udp!.SendAsync(helloBytes, new IPEndPoint(t, UdpPort), ct); }
+                        catch { }
+                    }
                     try { await Task.Delay(2000, ct); } catch { break; }
                 }
             }, ct);
@@ -136,18 +147,55 @@ public sealed class LanService : IDisposable
             {
                 while (!ct.IsCancellationRequested)
                 {
-                    await Task.Delay(3000, ct);
-                    var cutoff = DateTime.Now.AddSeconds(-9);
-                    var dead = _devices.Values.Where(d => d.LastSeen < cutoff).Select(d => d.Id).ToList();
-                    if (dead.Count > 0)
+                    try
                     {
-                        foreach (var id in dead) _devices.TryRemove(id, out _);
-                        DevicesChanged?.Invoke();
+                        await Task.Delay(3000, ct);
+                        var cutoff = DateTime.Now.AddSeconds(-9);
+                        var dead = _devices.Values.Where(d => d.LastSeen < cutoff).Select(d => d.Id).ToList();
+                        if (dead.Count > 0)
+                        {
+                            foreach (var id in dead) _devices.TryRemove(id, out _);
+                            DevicesChanged?.Invoke();
+                        }
                     }
+                    catch (OperationCanceledException) { break; }
+                    catch { }
                 }
             }, ct);
         }
         catch { }
+    }
+
+    /// <summary>各私网网卡的子网定向广播地址 + 全局广播兜底。</summary>
+    private static List<IPAddress> BroadcastAddresses()
+    {
+        var list = new List<IPAddress>();
+        var seen = new HashSet<string>();
+        try
+        {
+            foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (ni.OperationalStatus != OperationalStatus.Up) continue;
+                foreach (var ua in ni.GetIPProperties().UnicastAddresses)
+                {
+                    if (ua.Address.AddressFamily != AddressFamily.InterNetwork || !IsPrivate(ua.Address)) continue;
+                    var ip = ua.Address.GetAddressBytes();
+                    var mask = ua.IPv4Mask?.GetAddressBytes();
+                    byte[] bc;
+                    if (mask != null && mask.Length == 4)
+                    {
+                        bc = new byte[4];
+                        for (var i = 0; i < 4; i++) bc[i] = (byte)(ip[i] | (~mask[i] & 0xFF));
+                    }
+                    else bc = new[] { ip[0], ip[1], ip[2], (byte)255 };
+                    var addr = new IPAddress(bc);
+                    if (seen.Add(addr.ToString())) list.Add(addr);
+                }
+            }
+        }
+        catch { }
+        if (seen.Add(IPAddress.Broadcast.ToString())) list.Add(IPAddress.Broadcast);
+        return list;
     }
 
     // ---------------- HTTP 服务（被控 / 被传） ----------------
@@ -156,63 +204,111 @@ public sealed class LanService : IDisposable
     {
         try
         {
-            _http = new HttpListener();
-            var ips = GetLocalPrivateIps();
-            LocalIp = ips.FirstOrDefault() ?? "127.0.0.1";
-            foreach (var ip in ips)
-            {
-                try { _http.Prefixes.Add($"http://{ip}:{HttpPort}/"); } catch { }
-            }
-            _http.Start();
+            _tcp = new TcpListener(IPAddress.Any, HttpPort);
+            _tcp.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            _tcp.Start();
             _ = Task.Run(async () =>
             {
-                while (_http.IsListening)
+                while (_tcp is not null)
                 {
-                    HttpListenerContext ctx;
-                    try { ctx = await _http.GetContextAsync(); } catch { break; }
-                    _ = Task.Run(() => HandleAsync(ctx));
+                    TcpClient client;
+                    try { client = await _tcp.AcceptTcpClientAsync(); }
+                    catch { break; }
+                    _ = Task.Run(() => HandleClientAsync(client));
                 }
             });
         }
         catch { }
     }
 
-    private async Task HandleAsync(HttpListenerContext ctx)
+    private async Task HandleClientAsync(TcpClient client)
     {
         try
         {
-            var q = ctx.Request.QueryString;
-            if (q["k"] != Token) { Respond(ctx, 403, "forbidden"); return; }
-            var path = ctx.Request.Url?.AbsolutePath ?? "";
+            client.ReceiveTimeout = 20000;
+            client.SendTimeout = 20000;
+            var stream = client.GetStream();
+
+            var requestLine = await ReadLineAsync(stream);
+            if (string.IsNullOrEmpty(requestLine)) return;
+            var parts = requestLine.Split(' ');
+            if (parts.Length < 2) { Respond(stream, 400, "bad request"); return; }
+            var target = parts[1];
+
+            long contentLen = 0;
+            string? line;
+            while (!string.IsNullOrEmpty(line = await ReadLineAsync(stream)))
+            {
+                if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase)
+                    && long.TryParse(line[(line.IndexOf(':') + 1)..].Trim(), out var cl))
+                    contentLen = cl;
+            }
+
+            var body = Array.Empty<byte>();
+            if (contentLen > 0)
+            {
+                body = new byte[contentLen];
+                var off = 0;
+                while (off < contentLen)
+                {
+                    var n = await stream.ReadAsync(body.AsMemory(off, (int)contentLen - off));
+                    if (n <= 0) break;
+                    off += n;
+                }
+            }
+
+            var qi = target.IndexOf('?');
+            var path = qi >= 0 ? target[..qi] : target;
+            var qs = ParseQuery(qi >= 0 ? target[(qi + 1)..] : "");
+
+            if (!qs.TryGetValue("k", out var token) || token != Token)
+            {
+                Respond(stream, 403, "forbidden");
+                return;
+            }
+
             switch (path)
             {
-                case "/hello":
-                    Respond(ctx, 200, $"{_deviceName}|pc");
-                    break;
-                case "/files":
-                    RespondJson(ctx, ListFiles(q["dir"]));
-                    break;
-                case "/dl":
-                    await ServeDownload(ctx, q["path"]);
-                    break;
-                case "/ul":
-                    await ReceiveUpload(ctx, q["name"]);
-                    break;
-                case "/screen":
-                    await ServeScreen(ctx);
-                    break;
-                case "/input":
-                    await ReceiveInput(ctx);
-                    break;
-                default:
-                    Respond(ctx, 404, "not found");
-                    break;
+                case "/hello": Respond(stream, 200, $"{_deviceName}|pc"); break;
+                case "/files": await RespondJsonAsync(stream, ListFiles(qs.GetValueOrDefault("dir"))); break;
+                case "/dl": await ServeDownloadAsync(stream, qs.GetValueOrDefault("path")); break;
+                case "/ul": await ReceiveUploadAsync(stream, qs.GetValueOrDefault("name"), body); break;
+                case "/screen": await ServeScreenAsync(stream); break;
+                case "/input": await ReceiveInputAsync(stream, body); break;
+                default: Respond(stream, 404, "not found"); break;
             }
         }
-        catch (Exception ex)
+        catch { }
+        finally { try { client.Close(); } catch { } }
+    }
+
+    private static async Task<string?> ReadLineAsync(NetworkStream stream)
+    {
+        var sb = new StringBuilder();
+        var one = new byte[1];
+        while (true)
         {
-            try { Respond(ctx, 500, ex.Message); } catch { }
+            var n = await stream.ReadAsync(one.AsMemory(0, 1));
+            if (n <= 0) return sb.Length > 0 ? sb.ToString() : null;
+            if (one[0] == (byte)'\n') break;
+            if (one[0] != (byte)'\r') sb.Append((char)one[0]);
+            if (sb.Length > 16384) break;
         }
+        return sb.ToString();
+    }
+
+    private static Dictionary<string, string> ParseQuery(string query)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in query.Split('&'))
+        {
+            if (string.IsNullOrEmpty(pair)) continue;
+            var eq = pair.IndexOf('=');
+            var key = eq >= 0 ? pair[..eq] : pair;
+            var val = eq >= 0 ? pair[(eq + 1)..] : "";
+            try { result[key] = Uri.UnescapeDataString(val); } catch { result[key] = val; }
+        }
+        return result;
     }
 
     private List<LanFileEntry> ListFiles(string? dirB64)
@@ -242,38 +338,34 @@ public sealed class LanService : IDisposable
         return result.OrderBy(x => !x.IsDir).ThenBy(x => x.Name).ToList();
     }
 
-    private async Task ServeDownload(HttpListenerContext ctx, string? pathB64)
+    private async Task ServeDownloadAsync(NetworkStream stream, string? pathB64)
     {
         try
         {
             var rel = DecodePath(pathB64) ?? "";
             var full = Path.GetFullPath(Path.Combine(_shareRoot, rel));
-            if (!IsUnderRoot(full) || !File.Exists(full)) { Respond(ctx, 404, "missing"); return; }
-            ctx.Response.ContentType = "application/octet-stream";
-            ctx.Response.ContentLength64 = new FileInfo(full).Length;
-            await using var fs = File.OpenRead(full);
-            await fs.CopyToAsync(ctx.Response.OutputStream);
+            if (!IsUnderRoot(full) || !File.Exists(full)) { Respond(stream, 404, "missing"); return; }
+            var bytes = await File.ReadAllBytesAsync(full);
+            await RespondBytesAsync(stream, 200, "application/octet-stream", bytes);
         }
         catch { }
-        finally { try { ctx.Response.Close(); } catch { } }
     }
 
-    private async Task ReceiveUpload(HttpListenerContext ctx, string? nameB64)
+    private async Task ReceiveUploadAsync(NetworkStream stream, string? nameB64, byte[] body)
     {
         var name = DecodePath(nameB64);
-        if (string.IsNullOrWhiteSpace(name)) { Respond(ctx, 400, "no name"); return; }
+        if (string.IsNullOrWhiteSpace(name)) { Respond(stream, 400, "no name"); return; }
         name = Path.GetFileName(name);
         try
         {
             var full = Path.Combine(_shareRoot, name);
-            await using var fs = File.Create(full);
-            await ctx.Request.InputStream.CopyToAsync(fs);
-            Respond(ctx, 200, "ok");
+            await File.WriteAllBytesAsync(full, body);
+            Respond(stream, 200, "ok");
         }
-        catch (Exception ex) { Respond(ctx, 500, ex.Message); }
+        catch (Exception ex) { Respond(stream, 500, ex.Message); }
     }
 
-    private async Task ServeScreen(HttpListenerContext ctx)
+    private async Task ServeScreenAsync(NetworkStream stream)
     {
         try
         {
@@ -287,20 +379,13 @@ public sealed class LanService : IDisposable
             using var ep = new EncoderParameters(1);
             ep.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 68L);
             bmp.Save(ms, codec, ep);
-            var bytes = ms.ToArray();
-            ctx.Response.ContentType = "image/jpeg";
-            ctx.Response.ContentLength64 = bytes.Length;
-            await ctx.Response.OutputStream.WriteAsync(bytes);
+            await RespondBytesAsync(stream, 200, "image/jpeg", ms.ToArray());
         }
         catch { }
-        finally { try { ctx.Response.Close(); } catch { } }
     }
 
-    private async Task ReceiveInput(HttpListenerContext ctx)
+    private async Task ReceiveInputAsync(NetworkStream stream, byte[] body)
     {
-        string body;
-        using (var reader = new StreamReader(ctx.Request.InputStream))
-            body = await reader.ReadToEndAsync();
         try
         {
             using var doc = JsonDocument.Parse(body);
@@ -350,9 +435,9 @@ public sealed class LanService : IDisposable
                     break;
                 }
             }
-            Respond(ctx, 200, "ok");
+            Respond(stream, 200, "ok");
         }
-        catch (Exception ex) { Respond(ctx, 500, ex.Message); }
+        catch (Exception ex) { Respond(stream, 500, ex.Message); }
     }
 
     // ---------------- 客户端（主控 / 传文件） ----------------
@@ -453,11 +538,15 @@ public sealed class LanService : IDisposable
         var list = new List<string>();
         try
         {
-            foreach (var a in Dns.GetHostAddresses(Dns.GetHostName()))
-                if (a.AddressFamily == AddressFamily.InterNetwork && IsPrivate(a)) list.Add(a.ToString());
+            foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (ni.OperationalStatus != OperationalStatus.Up) continue;
+                foreach (var ua in ni.GetIPProperties().UnicastAddresses)
+                    if (ua.Address.AddressFamily == AddressFamily.InterNetwork && IsPrivate(ua.Address))
+                        list.Add(ua.Address.ToString());
+            }
         }
         catch { }
-        if (list.Count == 0) list.Add("127.0.0.1");
         return list.Distinct().ToList();
     }
 
@@ -475,24 +564,49 @@ public sealed class LanService : IDisposable
         try { return Encoding.UTF8.GetString(Convert.FromBase64String(s)); } catch { return null; }
     }
 
-    private static void Respond(HttpListenerContext ctx, int code, string text)
+    private static void Respond(NetworkStream stream, int code, string text)
     {
         var bytes = Encoding.UTF8.GetBytes(text);
-        ctx.Response.StatusCode = code;
-        ctx.Response.ContentType = "text/plain; charset=utf-8";
-        ctx.Response.ContentLength64 = bytes.Length;
-        ctx.Response.OutputStream.Write(bytes);
-        ctx.Response.Close();
+        WriteResponse(stream, code, "text/plain; charset=utf-8", bytes);
     }
 
-    private static void RespondJson(HttpListenerContext ctx, object obj)
+    private static async Task RespondJsonAsync(NetworkStream stream, object obj)
     {
         var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(obj));
-        ctx.Response.StatusCode = 200;
-        ctx.Response.ContentType = "application/json; charset=utf-8";
-        ctx.Response.ContentLength64 = bytes.Length;
-        ctx.Response.OutputStream.Write(bytes);
-        ctx.Response.Close();
+        await WriteResponseAsync(stream, 200, "application/json; charset=utf-8", bytes);
+    }
+
+    private static async Task RespondBytesAsync(NetworkStream stream, int code, string type, byte[] bytes)
+        => await WriteResponseAsync(stream, code, type, bytes);
+
+    private static void WriteResponse(NetworkStream stream, int code, string type, byte[] bytes)
+    {
+        try
+        {
+            var reason = code == 200 ? "OK" : code == 403 ? "Forbidden" : code == 404 ? "Not Found" :
+                         code == 503 ? "Service Unavailable" : "Error";
+            var head = Encoding.ASCII.GetBytes(
+                $"HTTP/1.1 {code} {reason}\r\nContent-Type: {type}\r\nContent-Length: {bytes.Length}\r\nConnection: close\r\n\r\n");
+            stream.Write(head, 0, head.Length);
+            stream.Write(bytes, 0, bytes.Length);
+            stream.Flush();
+        }
+        catch { }
+    }
+
+    private static async Task WriteResponseAsync(NetworkStream stream, int code, string type, byte[] bytes)
+    {
+        try
+        {
+            var reason = code == 200 ? "OK" : code == 403 ? "Forbidden" : code == 404 ? "Not Found" :
+                         code == 503 ? "Service Unavailable" : "Error";
+            var head = Encoding.ASCII.GetBytes(
+                $"HTTP/1.1 {code} {reason}\r\nContent-Type: {type}\r\nContent-Length: {bytes.Length}\r\nConnection: close\r\n\r\n");
+            await stream.WriteAsync(head.AsMemory());
+            await stream.WriteAsync(bytes.AsMemory());
+            await stream.FlushAsync();
+        }
+        catch { }
     }
 
     [DllImport("user32.dll")] private static extern bool SetCursorPos(int x, int y);
@@ -512,7 +626,7 @@ public sealed class LanService : IDisposable
     {
         _cts?.Cancel();
         try { _udp?.Close(); } catch { }
-        try { _http?.Stop(); _http?.Close(); } catch { }
+        try { _tcp?.Stop(); } catch { }
         _client.Dispose();
     }
 }

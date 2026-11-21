@@ -140,13 +140,32 @@ public final class LanCore {
         } catch (Throwable t) { status("发现服务启动失败：" + t.getMessage()); return; }
 
         final byte[] hello = helloJson().getBytes(StandardCharsets.UTF_8);
+        // Android 10+ 对受限广播 255.255.255.255 有系统限制，很多机型直接丢弃，
+        // 导致 PC 永远收不到 hello。改用每个网卡的子网定向广播地址（如 192.168.1.255），
+        // 这是 Android 上可靠发送 UDP 广播的标准做法；全局广播仅作为兜底保留。
+        final java.util.List<InetAddress> broadcastTargets = broadcastAddresses();
         pool.execute(() -> {
             while (running) {
-                try {
-                    udp.send(new DatagramPacket(hello, hello.length,
-                            InetAddress.getByName("255.255.255.255"), UDP_PORT));
-                } catch (Throwable ignored) { }
+                for (InetAddress target : broadcastTargets) {
+                    try {
+                        udp.send(new DatagramPacket(hello, hello.length, target, UDP_PORT));
+                    } catch (Throwable ignored) { }
+                }
                 sleep(2000);
+            }
+        });
+
+        // 超时剔除线程（必须在阻塞的 receive 循环之前启动，否则永远执行不到）
+        pool.execute(() -> {
+            while (running) {
+                sleep(3000);
+                long cutoff = System.currentTimeMillis() - 9000;
+                boolean removed = false;
+                Iterator<Map.Entry<String, Device>> it = devices.entrySet().iterator();
+                while (it.hasNext()) {
+                    if (it.next().getValue().lastSeen < cutoff) { it.remove(); removed = true; }
+                }
+                if (removed) changed();
             }
         });
 
@@ -167,20 +186,43 @@ public final class LanCore {
                 changed();
             } catch (Throwable ignored) { }
         }
+    }
 
-        // 超时剔除线程
-        pool.execute(() -> {
-            while (running) {
-                sleep(3000);
-                long cutoff = System.currentTimeMillis() - 9000;
-                boolean removed = false;
-                Iterator<Map.Entry<String, Device>> it = devices.entrySet().iterator();
-                while (it.hasNext()) {
-                    if (it.next().getValue().lastSeen < cutoff) { it.remove(); removed = true; }
+    /** 收集所有私网网卡的子网定向广播地址；拿不到时用全局广播兜底。 */
+    private java.util.List<InetAddress> broadcastAddresses() {
+        java.util.List<InetAddress> list = new ArrayList<>();
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        try {
+            java.util.Enumeration<java.net.NetworkInterface> nis =
+                    java.net.NetworkInterface.getNetworkInterfaces();
+            while (nis != null && nis.hasMoreElements()) {
+                java.net.NetworkInterface ni = nis.nextElement();
+                if (ni.isLoopback() || !ni.isUp()) continue;
+                for (java.net.InterfaceAddress ia : ni.getInterfaceAddresses()) {
+                    InetAddress addr = ia.getAddress();
+                    if (!(addr instanceof java.net.Inet4Address)) continue;
+                    if (!isPrivate(addr.getHostAddress())) continue;
+                    InetAddress bc = ia.getBroadcast();
+                    if (bc != null && seen.add(bc.getHostAddress())) list.add(bc);
                 }
-                if (removed) changed();
             }
-        });
+        } catch (Throwable ignored) { }
+        // 兜底：全局广播 + 从已发现的私网 IP 推出 /24 广播地址
+        try {
+            InetAddress all = InetAddress.getByName("255.255.255.255");
+            if (seen.add(all.getHostAddress())) list.add(all);
+        } catch (Throwable ignored) { }
+        if (list.isEmpty()) {
+            String ip = localIp;
+            if (isPrivate(ip)) {
+                String[] b = ip.split("\\.");
+                try {
+                    InetAddress bc = InetAddress.getByName(b[0] + "." + b[1] + "." + b[2] + ".255");
+                    if (seen.add(bc.getHostAddress())) list.add(bc);
+                } catch (Throwable ignored) { }
+            }
+        }
+        return list;
     }
 
     private String helloJson() {
