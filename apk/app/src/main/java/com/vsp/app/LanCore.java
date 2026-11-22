@@ -285,13 +285,24 @@ public final class LanCore {
             String method = parts[0];
             String target = parts[1];
 
+            Uri uri = Uri.parse("http://x" + target);
+            String k = uri.getQueryParameter("k");
+            if (!TOKEN.equals(k)) { respond(out, 403, "text/plain", "forbidden".getBytes()); s.close(); return; }
+
             int len = 0;
             String line;
             while ((line = readLine(in)) != null && !line.isEmpty()) {
-                if (line.toLowerCase(Locale.ROOT).startsWith("content-length:"))
-                    len = Integer.parseInt(line.substring(line.indexOf(':') + 1).trim());
+                if (line.toLowerCase(Locale.ROOT).startsWith("content-length:")) {
+                    try {
+                        len = Integer.parseInt(line.substring(line.indexOf(':') + 1).trim());
+                    } catch (Throwable ignored) { }
+                }
             }
-            byte[] body = len > 0 ? new byte[len] : new byte[0];
+            if (len < 0 || len > 64 * 1024 * 1024) {
+                respond(out, 413, "text/plain", "too large".getBytes());
+                return;
+            }
+            byte[] body = new byte[len];
             if (len > 0) {
                 int off = 0;
                 while (off < len) {
@@ -299,11 +310,8 @@ public final class LanCore {
                     if (n < 0) break;
                     off += n;
                 }
+                if (off < len) { respond(out, 400, "text/plain", "bad request".getBytes()); return; }
             }
-
-            Uri uri = Uri.parse("http://x" + target);
-            String k = uri.getQueryParameter("k");
-            if (!TOKEN.equals(k)) { respond(out, 403, "text/plain", "forbidden".getBytes()); s.close(); return; }
 
             String path = uri.getPath();
             if ("/hello".equals(path)) {
@@ -381,19 +389,28 @@ public final class LanCore {
         return arr;
     }
 
-    private void serveDownload(OutputStream out, String rel) {
-        try {
-            if (rel == null) { respond(out, 404, "text/plain", "missing".getBytes()); return; }
-            File f = canonical(new File(shareDir, rel));
-            if (!isUnder(f, canonical(shareDir)) || !f.exists() || !f.isFile()) {
-                respond(out, 404, "text/plain", "missing".getBytes()); return;
-            }
-            byte[] bytes = readAll(f);
-            String head = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: "
-                    + bytes.length + "\r\nConnection: close\r\n\r\n";
-            out.write(head.getBytes(StandardCharsets.ISO_8859_1));
-            out.write(bytes); out.flush();
+    private void serveDownload(OutputStream out, String rel) throws java.io.IOException {
+        // 按块流式写出，不读完整个文件再申请内存，几百 MB 的大文件传输安全。
+        File f = serveFile(rel);
+        long len = f.length();
+        try (InputStream in = java.nio.file.Files.newInputStream(f.toPath())) {
+            out.write(("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: "
+                    + len + "\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.ISO_8859_1));
+            byte[] buf = new byte[16384];
+            int n;
+            while ((n = in.read(buf)) >= 0) out.write(buf, 0, n);
+            out.flush();
         } catch (Throwable ignored) { }
+    }
+
+    /** 顺手校验路径，返回共享目录内的文件；非法路径抛异常让调用方回 404。 */
+    private File serveFile(String rel) throws java.io.IOException {
+        if (rel == null) throw new IllegalArgumentException("missing");
+        File f = canonical(new File(shareDir, rel));
+        if (!isUnder(f, canonical(shareDir)) || !f.exists() || !f.isFile()) {
+            throw new IllegalArgumentException("missing");
+        }
+        return f;
     }
 
     private void receiveUpload(String name, byte[] body) {
@@ -425,7 +442,9 @@ public final class LanCore {
 
     public boolean isProjecting() { return LanScreenService.isProjecting(); }
 
-    private byte[] captureScreen() { return LanScreenService.getLatestFrame(); }
+    private byte[] captureScreen() {
+        return LanScreenService.isProjecting() ? LanScreenService.getLatestFrame() : null;
+    }
 
     private boolean applyInput(byte[] body) {
         LanAccessibilityService acc = LanAccessibilityService.getInstance();
@@ -497,8 +516,10 @@ public final class LanCore {
     public void decidePair(String reqId, boolean accept) {
         PairRequest req = pairRequests.get(reqId);
         if (req == null) return;
+        // 决定后不再保留申请，避免 map 长期挂死；限速/暴力把设备注册需要用户再点同意，但对方的 poll 应当回 no。
+        pairRequests.remove(reqId);
         pairAnswers.put(reqId, accept);
-        if (accept) {
+        if (accept && !req.name.isEmpty()) {
             Device d = new Device(req.id, req.name, req.kind, req.ip, req.port);
             devices.put(req.id, d);
             changed();

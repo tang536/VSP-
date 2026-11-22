@@ -19,7 +19,7 @@ public final class LanAccessibilityService extends AccessibilityService {
     public boolean tap(float x, float y) {
         Path path = new Path();
         path.moveTo(x, y);
-        GestureDescription.StrokeDescription stroke = new GestureDescription.StrokeDescription(path, 0, 80);
+        GestureDescription.StrokeDescription stroke = new GestureDescription.StrokeDescription(path, 0, 120);
         return dispatchGesture(new GestureDescription.Builder().addStroke(stroke).build(), null, null);
     }
 

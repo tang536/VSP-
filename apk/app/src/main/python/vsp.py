@@ -1056,6 +1056,11 @@ def start_download(url, format_id, title, thumb="", needs_merge=False):
 _HLS_ATTR_RE = re.compile(r'([A-Z0-9-]+)=("[^"]*"|[^,]*)')
 _HLS_PACE = 0.0
 _HLS_MAX_ATTEMPTS = 5
+# 单路降级后连续失败多少个分片就放弃。已经下到过内容时给得宽一点，
+# 但绝不能无限重试；没有拿到任何字节时更快失败，避免队列假死。
+_HLS_MAX_SERIAL_FAILS = 12
+_HLS_MAX_SERIAL_FAILS_NO_DATA = 6
+_HLS_BACKOFF_MAX = 18
 # 并发分片数。这类源站大多只允许单条连接跑，开太多会被判成抓取、直接把
 # IP 拉黑（实测 8 路并发后整个域名对所有连接都拒绝），所以默认只开 2 路，
 # 一旦被拒就自动降级成单路，把已有的连接保住继续下。
@@ -1093,6 +1098,10 @@ def _hls_read(url, tid, referer="", timeout=20, on_bytes=None, headers=None,
     （返回 200 而不是 206），则丢掉残片从头读。
     只要每次还能拿到新字节就一直续，判定失败的依据是「连续 max_stall 次
     一个字节都没拿到」，而不是总重试次数——否则大分片永远下不完。
+
+    byte-range 分片（#EXT-X-BYTERANGE）也要能续传：请求区间整体后移已收到
+    的字节数，而不是简单忽略 Range。否则一次断线后重新从头读，再拼到旧
+    数据后面，分片内容就乱了（之前下出来的视频花屏/无法播放）。
     """
     req_headers = {"User-Agent": UA, "Accept": "*/*"}
     if referer:
@@ -1100,32 +1109,84 @@ def _hls_read(url, tid, referer="", timeout=20, on_bytes=None, headers=None,
     if headers:
         req_headers.update(headers)
 
+    # 取出调用方给的 Range。后面的续传请求都基于这个逻辑区间计算。
+    range_value = ""
+    for k in list(req_headers.keys()):
+        if k.lower() == "range":
+            range_value = req_headers.pop(k) or ""
+            break
+    base_start, base_end = 0, None
+    m = re.match(r"bytes\s*=\s*(\d+)-(\d*)", range_value.strip(), re.I)
+    if m:
+        base_start = int(m.group(1))
+        if m.group(2):
+            base_end = int(m.group(2))
+    elif range_value:
+        base_start = 0
+
+    def report(offset):
+        if on_bytes:
+            on_bytes(offset)
+
     buf = bytearray()
     attempts = 0
     empty_streak = 0
-    # 调用方自己指定了 Range（分片本身是 byte-range）时不能叠加续传 Range
-    allow_resume = "Range" not in (headers or {})
     start_time = time.time()
     while True:
         _wait_if_paused(tid)
         _check_abort(tid)
         hdrs = dict(req_headers)
-        if buf and allow_resume:
-            hdrs["Range"] = "bytes=%d-" % len(buf)
+        want = base_start + len(buf)
+        send_range = bool(range_value) or bool(buf)
+        if send_range:
+            if base_end is not None:
+                hdrs["Range"] = "bytes=%d-%d" % (want, base_end)
+            else:
+                hdrs["Range"] = "bytes=%d-" % want
         req = urllib.request.Request(url, headers=hdrs)
         got = 0
         expect_total = 0
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                if buf:
-                    # 续传请求必须真的从断点开始，否则会把重复数据拼进去
-                    if getattr(r, "status", 200) != 206:
+                status = getattr(r, "status", 200)
+                # 请求了 Range 但服务器回 200：它不支持断点续传。读出完整
+                # 资源后截取需要的区间，避免把整个文件当成分片内容。
+                if send_range and status != 206:
+                    full = bytearray()
+                    try:
+                        while True:
+                            _wait_if_paused(tid)
+                            _check_abort(tid)
+                            piece = r.read(128 * 1024)
+                            if not piece:
+                                break
+                            full.extend(piece)
+                            got += len(piece)
+                            _touch(tid)
+                    except http.client.IncompleteRead as e:
+                        if e.partial:
+                            full.extend(e.partial)
+                            got += len(e.partial)
+                            _touch(tid)
+                    end = None if base_end is None else base_end + 1
+                    sliced = bytes(full[base_start:end])
+                    if base_end is not None and len(sliced) < base_end - base_start + 1:
+                        raise http.client.IncompleteRead(
+                            b"", base_end - base_start + 1 - len(sliced))
+                    if not sliced:
+                        raise Exception("源站没有返回请求的分片区间")
+                    report(len(sliced))
+                    return sliced
+
+                # 206 必须真的从当前断点开始，否则会把重复数据拼进来
+                if send_range:
+                    cr = r.headers.get("Content-Range") or ""
+                    cm = re.match(r"bytes\s+(\d+)-", cr)
+                    if cm and int(cm.group(1)) != want:
                         buf = bytearray()
-                    else:
-                        cr = r.headers.get("Content-Range") or ""
-                        m = re.match(r"bytes\s+(\d+)-", cr)
-                        if m and int(m.group(1)) != len(buf):
-                            buf = bytearray()
+                        report(0)
+                        raise Exception("源站返回了错误的 Range 起点")
+
                 clen = int(r.headers.get("Content-Length") or 0)
                 if clen:
                     expect_total = len(buf) + clen
@@ -1138,20 +1199,26 @@ def _hls_read(url, tid, referer="", timeout=20, on_bytes=None, headers=None,
                     buf.extend(piece)
                     got += len(piece)
                     _touch(tid)
-                    if on_bytes:
-                        on_bytes(len(buf))
+                    report(len(buf))
                 # Content-Length 对不上说明又被截断：不能当成功返回
                 if expect_total and len(buf) < expect_total:
                     raise http.client.IncompleteRead(
                         b"", expect_total - len(buf))
+                # byte-range 分片还必须凑够请求长度，否则解密会得到半截数据
+                if base_end is not None and len(buf) < base_end - base_start + 1:
+                    raise http.client.IncompleteRead(
+                        b"", base_end - base_start + 1 - len(buf))
                 return bytes(buf)
         except http.client.IncompleteRead as e:
-            if getattr(e, "partial", None):
-                buf.extend(e.partial)
-                got += len(e.partial)
-            err = e
-        except Exception as e:
-            err = e
+            partial = getattr(e, "partial", None)
+            if partial:
+                buf.extend(partial)
+                got += len(partial)
+                _touch(tid)
+                report(len(buf))
+        except Exception:
+            if cancel_flags.get(tid) or abort_flags.get(tid):
+                raise
         # 走到这里说明连接被掐断
         attempts += 1
         if got == 0:
@@ -1366,9 +1433,12 @@ def _hls_fetch_segment(seg, tid, referer="", on_bytes=None):
         length, offset = rng
         headers["Range"] = "bytes=%d-%d" % (offset, offset + length - 1)
     data = _hls_read(seg.get("url") or "", tid, referer=referer,
-                     timeout=20, on_bytes=on_bytes, headers=headers)
+                     timeout=20, on_bytes=on_bytes, headers=headers,
+                     deadline=180)
     if not data:
         raise Exception("分片内容为空")
+    if rng and len(data) != rng[0]:
+        raise Exception("分片长度异常（期望 %d，收到 %d）" % (rng[0], len(data)))
     return _hls_decrypt(data, seg, tid, referer)
 
 
@@ -1466,7 +1536,8 @@ def _hls_cache_dir(url):
         return None
 
 
-def _hls_download(target_url, tmpdir, title, tid, referer="", end_pct=92, dest_dir=None):
+def _hls_download(target_url, tmpdir, title, tid, referer="", end_pct=92,
+                  dest_dir=None, worker_token=None):
     """下 HLS：多线程并发拉分片 + 单分片断点续传 + 失败换签名重试。
 
     这类站点的 CDN 对「一条连接连续拉」限制很狠，单线程必然卡在几 MB；
@@ -1503,6 +1574,7 @@ def _hls_download(target_url, tmpdir, title, tid, referer="", end_pct=92, dest_d
     state = {
         "next": 0,             # 下一个待领取的分片下标
         "serial": False,       # 是否已降级成单路
+        "serial_owner": 0,     # 降级后由哪条线程继续下（不能固定是 0 号）
         "serial_fails": 0,     # 降级后连续失败次数
         "committed": 0,        # 已经落盘的分片总字节
         "inflight": {},        # 在拉的分片：index -> 已收到字节
@@ -1510,10 +1582,23 @@ def _hls_download(target_url, tmpdir, title, tid, referer="", end_pct=92, dest_d
         "shown": 0,            # 只增不减的展示字节
         "last_bytes": 0,
         "last_time": time.time(),
+        "last_data": time.time(),   # 最后一次真正收到新字节的时间
+        "last_commit": time.time(), # 最后一次完整落盘分片的时间
         "speed": "",
         "last_pct": 0.0,
     }
-    # 上次失败前已经下完的分片：直接算数，不再重新请求
+    # 上次失败前已经下完的分片：直接算数，不再重新请求。
+    # 写分片时先写 .tmp 再原子改名，所以这里只认完整文件；旧版本可能留下
+    # 写了一半的 .bin，带 byte-range 的段可以按声明长度识别出来并重下。
+    try:
+        for entry in os.listdir(segdir):
+            if entry.endswith(".tmp"):
+                try:
+                    os.remove(os.path.join(segdir, entry))
+                except Exception:
+                    pass
+    except Exception:
+        pass
     for index in range(total):
         path = os.path.join(segdir, "%06d.bin" % index)
         if os.path.exists(path):
@@ -1521,9 +1606,19 @@ def _hls_download(target_url, tmpdir, title, tid, referer="", end_pct=92, dest_d
                 size = os.path.getsize(path)
             except Exception:
                 continue
-            if size > 0:
-                state["committed"] += size
-                state["done"] += 1
+            rng = segments[index].get("range") if index < len(segments) else None
+            if size <= 0 or (rng and size != rng[0]):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+                continue
+            state["committed"] += size
+            state["done"] += 1
+    state["shown"] = state["committed"]
+    state["last_bytes"] = state["committed"]
+    if total:
+        state["last_pct"] = (state["done"] / float(total)) * end_pct
     if state["done"] >= total:
         state["next"] = total
     else:
@@ -1532,36 +1627,53 @@ def _hls_download(target_url, tmpdir, title, tid, referer="", end_pct=92, dest_d
     errors = []
     stop = threading.Event()
 
+    def owner_me():
+        # 重试 / 取消后把 _worker 换成新 token；旧 HLS 线程发现自己不再是主人，
+        # 就不能再写任务状态、再写缓存，避免与新任务互相覆盖。
+        if worker_token is None:
+            return True
+        t = tasks.get(tid)
+        return t is not None and t.get("_worker") is worker_token
+
     def report_value(force=False):
+        if not owner_me():
+            return
         with lock:
+            now = time.time()
             cur = state["committed"] + sum(state["inflight"].values())
             if cur > state["shown"]:
                 state["shown"] = cur
+                state["last_data"] = now
+            # 每 0.5 秒最多写一次任务表；分片回调非常密集，不必每块都更新
+            if not force and now - state["last_time"] < 0.5:
+                return
             shown = state["shown"]
             done = state["done"]
-            now = time.time()
-            speed = state["speed"]
-            if force or now - state["last_time"] >= 0.6:
-                delta = shown - state["last_bytes"]
-                spd = delta / max(now - state["last_time"], 0.001)
-                if spd > 1:
-                    speed = human_size(spd) + "/s"
-                state["speed"] = speed
-                state["last_bytes"] = shown
-                state["last_time"] = now
+            delta = shown - state["last_bytes"]
+            elapsed = max(now - state["last_time"], 0.001)
+            if delta > 0:
+                spd = delta / elapsed
+                state["speed"] = (human_size(spd) + "/s") if spd > 1 else ""
+            elif now - state["last_data"] >= 3.0:
+                # 连续几秒没有新字节：把旧速度清掉，不能让它一直挂在界面上
+                state["speed"] = ""
+            # 速度只代表「最近还在动」，超过 3 秒没数据就显示为空
+            speed = state["speed"] if now - state["last_data"] < 3.0 else ""
+            state["last_bytes"] = shown
+            state["last_time"] = now
             # 进度按已完成分片推进，只增不减
             pct = (done / float(total)) * end_pct if total else 0.0
             if pct > state["last_pct"]:
                 state["last_pct"] = pct
             pct = state["last_pct"]
-        if speed:
-            _set_task(tid, progress=pct, downloaded=shown, speed=speed)
-        else:
-            _set_task(tid, progress=pct, downloaded=shown)
+        _set_task(tid, progress=pct, downloaded=shown, speed=speed)
 
     def on_seg_bytes(index, sofar):
         with lock:
+            prev = state["inflight"].get(index, 0)
             state["inflight"][index] = sofar
+            if sofar > prev:
+                state["last_data"] = time.time()
         report_value()
 
     def refresh_segments():
@@ -1580,6 +1692,18 @@ def _hls_download(target_url, tmpdir, title, tid, referer="", end_pct=92, dest_d
 
     refresh_lock = threading.Lock()
 
+    def is_throttle(msg):
+        """判断这次失败是不是「源站在拒绝/掐连接」，而不一定是签名过期。"""
+        text = str(msg or "")
+        low = text.lower()
+        return ("拒绝" in text or "超时" in text or "中断" in text
+                or "timed out" in low or "timeout" in low
+                or "reset" in low or "remote disconnected" in low
+                or "connection aborted" in low or "connection reset" in low
+                or "broken pipe" in low or "incompleteread" in low
+                or "http error 403" in low or "http error 429" in low
+                or "http error 503" in low or "分片长度异常" in text)
+
     def fetch_one(index):
         seg = segments[index]
         last_err = None
@@ -1590,10 +1714,12 @@ def _hls_download(target_url, tmpdir, title, tid, referer="", end_pct=92, dest_d
                 return _hls_fetch_segment(
                     seg, tid, referer, lambda n: on_seg_bytes(index, n))
             except Exception as e:
+                if abort_flags.get(tid) or cancel_flags.get(tid):
+                    raise
                 last_err = e
                 with lock:
                     state["inflight"][index] = 0
-                if "拒绝" in str(e):
+                if is_throttle(e):
                     # 源站已经在拒绝：多连接只会让它更狠，立刻降级成单路，
                     # 失败也不在这里空转重试，交给上层降速后重来。
                     with lock:
@@ -1609,10 +1735,11 @@ def _hls_download(target_url, tmpdir, title, tid, referer="", end_pct=92, dest_d
 
     def worker(slot):
         while not stop.is_set():
-            # 降级成单路后，除 0 号线程外的都退出，把连接额度让给正在下的那条
-            if slot > 0 and state.get("serial"):
-                return
+            # 降级成单路：非 owner 重新领片前先退出。把检查放到领片前，
+            # 不写死“0 号”，因为撞限速的可能是 1 号，而 0 号可能已经分完分片。
             with lock:
+                if slot > 0 and state.get("serial") and state.get("serial_owner") != slot:
+                    return
                 index = state["next"]
                 if index >= total:
                     return
@@ -1624,22 +1751,30 @@ def _hls_download(target_url, tmpdir, title, tid, referer="", end_pct=92, dest_d
             try:
                 data = fetch_one(index)
             except Exception as e:
+                if abort_flags.get(tid) or cancel_flags.get(tid):
+                    stop.set()
+                    return
+                if not owner_me():
+                    return
                 msg = str(e)
-                throttled = ("拒绝" in msg or "超时" in msg or "中断" in msg)
-                if throttled:
+                if is_throttle(msg):
                     with lock:
                         state["serial"] = True
+                        state["serial_owner"] = slot
                         state["serial_fails"] += 1
                         fails = state["serial_fails"]
                         committed_now = state["committed"]
-                        # 已经下到东西了就绝不放弃：限速站点只会越来越慢，
-                        # 但分片是能一个个到手的，退得足够久就能继续。
-                        if committed_now == 0 and fails >= 8:
-                            errors.append(
-                                "源站限制下载：连续 %d 个分片被拒（一个字节都没拿到）。"
-                                "该站对下载做了限制，可以先换网络，或直接用预览播放。" % fails)
-                            stop.set()
-                            return
+                        done_now = state["done"]
+                    # 不能无限重试：已经拿到过分片也要有上限，否则界面会一直
+                    # 停在同一个位置、旧速度不消失，用户只能强杀 App。
+                    if ((committed_now == 0 and fails >= _HLS_MAX_SERIAL_FAILS_NO_DATA)
+                            or fails >= _HLS_MAX_SERIAL_FAILS):
+                        errors.append(
+                            "源站限制下载：连续 %d 个分片失败（已完成 %d/%d，"
+                            "已下 %s）。可以换网络后重试，或先用预览播放。" %
+                            (fails, done_now, total, human_size(committed_now)))
+                        stop.set()
+                        return
                     # 换一批分片签名再重试：auth_key 有效期只有几分钟，
                     # 用旧链一直重试等于一直撞在过期签名上。
                     try:
@@ -1650,12 +1785,15 @@ def _hls_download(target_url, tmpdir, title, tid, referer="", end_pct=92, dest_d
                                 segments[:] = new_segs
                     except Exception:
                         pass
-                    # 退避拉长到最多 60 秒，期间保持「仍在活动」，
-                    # 否则会被看门狗判成假死直接掐掉。
-                    wait_s = min(10 * max(1, fails), 60)
-                    for _ in range(max(1, wait_s // 2)):
-                        time.sleep(2)
-                        _touch(tid)
+                    # 退避但不再伪造 _touch：没有真实字节就应该让看门狗
+                    # 在 60 秒后结束任务，而不是一直显示旧速度。
+                    wait_s = min(6 * max(1, fails), _HLS_BACKOFF_MAX)
+                    for _ in range(wait_s):
+                        if stop.is_set():
+                            return
+                        _wait_if_paused(tid)
+                        _check_abort(tid)
+                        time.sleep(1)
                     with lock:
                         state["next"] = index
                     continue
@@ -1663,13 +1801,25 @@ def _hls_download(target_url, tmpdir, title, tid, referer="", end_pct=92, dest_d
                     errors.append(msg)
                 stop.set()
                 return
+            if not owner_me():
+                return
             with lock:
                 state["serial_fails"] = 0
+                state["serial"] = False
+                state["serial_owner"] = -1
             path = os.path.join(segdir, "%06d.bin" % index)
+            tmp_path = path + ".tmp"
             try:
-                with open(path, "wb") as sf:
+                with open(tmp_path, "wb") as sf:
                     sf.write(data)
+                    sf.flush()
+                    os.fsync(sf.fileno())
+                os.replace(tmp_path, path)
             except Exception as e:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
                 errors.append("写分片失败：%s" % str(e)[:60])
                 stop.set()
                 return
@@ -1677,33 +1827,63 @@ def _hls_download(target_url, tmpdir, title, tid, referer="", end_pct=92, dest_d
                 state["committed"] += len(data)
                 state["done"] += 1
                 state["inflight"][index] = 0
+                state["last_commit"] = time.time()
+                state["last_data"] = time.time()
             report_value()
 
     with lock:
         state["next"] = 0
 
-    if init_seg:
+    if init_seg and owner_me():
         init_path = os.path.join(segdir, "init.bin")
-        if not (os.path.exists(init_path) and os.path.getsize(init_path) > 0):
+        rng = init_seg.get("range")
+        if os.path.exists(init_path):
+            try:
+                if os.path.getsize(init_path) <= 0 or (
+                        rng and os.path.getsize(init_path) != rng[0]):
+                    os.remove(init_path)
+            except Exception:
+                pass
+        if not os.path.exists(init_path):
             _touch(tid)
             data = _hls_fetch_segment(init_seg, tid, referer, lambda n: None)
-            with open(init_path, "wb") as f:
-                f.write(data)
+            tmp_path = init_path + ".tmp"
+            try:
+                with open(tmp_path, "wb") as f:
+                    f.write(data)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, init_path)
+            except Exception:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+                raise
 
     threads = []
     for slot in range(min(_HLS_WORKERS, total)):
         t = threading.Thread(target=worker, args=(slot,), daemon=True)
         t.start()
         threads.append(t)
-    for t in threads:
-        while t.is_alive():
-            t.join(0.5)
-            _wait_if_paused(tid)
-            _check_abort(tid)
-            report_value()
+    try:
+        for t in threads:
+            while t.is_alive():
+                t.join(0.5)
+                _wait_if_paused(tid)
+                _check_abort(tid)
+                report_value()
+    except Exception:
+        # 看门狗 / 用户取消：先把线程叫停，别让它们继续往缓存目录里写
+        stop.set()
+        for t in threads:
+            t.join(2.0)
+        raise
 
     if errors:
         raise Exception(errors[0])
+    if not owner_me():
+        raise Exception("下载已经取消")
 
     report_value(force=True)
     with open(part, "wb") as f:
@@ -1712,6 +1892,8 @@ def _hls_download(target_url, tmpdir, title, tid, referer="", end_pct=92, dest_d
             with open(init_path, "rb") as sf:
                 f.write(sf.read())
         for index in range(total):
+            if not owner_me():
+                raise Exception("下载已经取消")
             path = os.path.join(segdir, "%06d.bin" % index)
             if not os.path.exists(path):
                 raise Exception("分片 %d 缺失，下载不完整" % (index + 1))
@@ -1720,6 +1902,12 @@ def _hls_download(target_url, tmpdir, title, tid, referer="", end_pct=92, dest_d
         f.flush()
         os.fsync(f.fileno())
     os.replace(part, fpath)
+    if not owner_me():
+        try:
+            os.remove(fpath)
+        except Exception:
+            pass
+        raise Exception("下载已经取消")
     # 组装完成：整片缓存都不再需要，删掉免得占着几百 MB
     shutil.rmtree(segdir, ignore_errors=True)
     if cache_dir:
@@ -1815,7 +2003,8 @@ def _start_worker(tid, url, format_id, title, needs_merge, worker_token):
                     # 回源被重置时刷新播放列表，正是这次卡在 2~3 MB 的原因。
                     fpath = _hls_download(target_url, tmpdir, title, tid,
                                           referer=url, end_pct=92,
-                                          dest_dir=get_download_dir())
+                                          dest_dir=get_download_dir(),
+                                           worker_token=worker_token)
                 else:
                     ext = _ext_of(target_url) or ".mp4"
                     fpath = os.path.join(tmpdir, _safe_name(title, ext))
@@ -1833,7 +2022,8 @@ def _start_worker(tid, url, format_id, title, needs_merge, worker_token):
                     _set_task(tid, speed="HLS 分片下载中…")
                     fpath = _hls_download(fmt_meta["url"], tmpdir, title, tid,
                                           referer=url, end_pct=92,
-                                          dest_dir=get_download_dir())
+                                          dest_dir=get_download_dir(),
+                                           worker_token=worker_token)
                 else:
                     outtmpl = os.path.join(tmpdir, "%(title)s.%(ext)s")
                     fmt_arg = f"{format_id}/best" if format_id else "best"

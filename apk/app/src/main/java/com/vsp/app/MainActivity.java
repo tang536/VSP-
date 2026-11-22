@@ -200,11 +200,10 @@ public class MainActivity extends Activity {
 
     // 局域网互传与远控
     private LanCore lan;
-    private LinearLayout lanDevicesBox, lanFileList;
-    private View lanNoDevices, lanOps, lanFileBar, lanControlPanel;
+    private LinearLayout lanFileList;
+    private View lanOps, lanFileBar, lanControlPanel;
     private AlertDialog lanDevicesDialog;
     private LinearLayout lanDialogList;
-    private TextView lanDialogEmpty;
     private android.widget.ProgressBar lanPairingBar;
     private TextView lanStatusText, lanLocalIpText, lanSelectedName, lanBreadcrumbText;
     private ImageView lanScreen;
@@ -213,9 +212,6 @@ public class MainActivity extends Activity {
     private boolean lanControlling = false;
     private final Handler lanScreenHandler = new Handler(Looper.getMainLooper());
     private Runnable lanScreenTask;
-    /** 每个页面各有一个 player_slot，全 app 唯一的播放器在打开预览时挂到当前页。 */
-    private final FrameLayout[] playerSlots = new FrameLayout[PAGE_COUNT];
-
     // 首页
     private EditText urlInput;
     private Button btnParse;
@@ -242,6 +238,8 @@ public class MainActivity extends Activity {
     private volatile boolean checkingUpdate = false;
     private String latestApkUrl = "", latestVersion = "", latestNotes = "", latestDate = "",
             latestSource = "github";
+    /** 同版本在 GitHub / Gitee 两端的下载地址，下载前并发测速选最快、失败自动切换 */
+    private java.util.List<String> latestMirrors = new java.util.ArrayList<>();
     private long latestSize = 0L;
     private boolean repoEmpty = false;
 
@@ -286,12 +284,18 @@ public class MainActivity extends Activity {
         }
     }
 
-    // 下载队列：同页展示「下载中」与「已完成」两段
+    // 下载队列：同页展示「下载中」与「已完成」两段。
+    // Adapter 必须常驻：每次轮询都 setAdapter(new ...) 会让 RecyclerView
+    // 丢掉全部 ViewHolder，缩略图先变占位图再异步回来，队列就会一直闪。
     private RecyclerView downloadingList, taskList;
+    private TaskAdapter downloadingAdapter, finishedAdapter;
     private TextView dlCount, noDownloading, noTask;
 
     // 本地 / 视频 / 扫描 / 文件
     private RecyclerView localGrid, videoGrid, filesList;
+    private MediaAdapter localAdapter, videoAdapter;
+    private FileAdapter fileAdapter;
+    private FormatAdapter formatAdapter;
     private TextView localEmpty, localSummary, videoEmpty, filesEmpty, filesTotal;
     private TextView scanStatus, scanCount, scanScope, btnScanStart;
     private ProgressBar scanProgress, scanBtnProgress;
@@ -299,8 +303,6 @@ public class MainActivity extends Activity {
     private List<MediaItem> localFiles = new ArrayList<>();
     private List<MediaItem> videoFiles = new ArrayList<>();
     private List<File> storageFiles = new ArrayList<>();
-    private List<File> downloadFiles = new ArrayList<>();
-
     // 存储
     private TextView stCount, stSize, stCache;
     private ProgressBar clearCacheProgress, clearAllProgress;
@@ -650,14 +652,6 @@ public class MainActivity extends Activity {
 
             // 播放器只 inflate 一次，按需挂载到当前页面的 slot
             playerPanel = getLayoutInflater().inflate(R.layout.player_panel, null);
-            playerSlots[PAGE_HOME] = pageHome.findViewById(R.id.player_slot);
-            playerSlots[PAGE_ME] = pageMe.findViewById(R.id.player_slot);
-            playerSlots[PAGE_QUEUE] = pageQueue.findViewById(R.id.player_slot);
-            playerSlots[PAGE_LOCAL] = pageLocal.findViewById(R.id.player_slot);
-            playerSlots[PAGE_FILES] = pageFiles.findViewById(R.id.player_slot);
-            playerSlots[PAGE_VIDEOS] = pageVideos.findViewById(R.id.player_slot);
-            playerSlots[PAGE_BROWSER] = pageBrowser.findViewById(R.id.player_slot);
-            playerSlots[PAGE_LAN] = pageLan.findViewById(R.id.player_slot);
 
             bindHome();
             bindMe();
@@ -783,6 +777,8 @@ public class MainActivity extends Activity {
         formatHint = pageHome.findViewById(R.id.format_hint);
         formatList = pageHome.findViewById(R.id.format_list);
         formatList.setLayoutManager(new LinearLayoutManager(this));
+        formatAdapter = new FormatAdapter(new ArrayList<>());
+        formatList.setAdapter(formatAdapter);
 
         btnParse.setOnClickListener(v -> doParse());
         urlInput.setOnEditorActionListener((v, actionId, event) -> {
@@ -851,6 +847,10 @@ public class MainActivity extends Activity {
         noTask = pageQueue.findViewById(R.id.no_task);
         downloadingList.setLayoutManager(new LinearLayoutManager(this));
         taskList.setLayoutManager(new LinearLayoutManager(this));
+        downloadingAdapter = new TaskAdapter(new ArrayList<>(), true);
+        finishedAdapter = new TaskAdapter(new ArrayList<>(), false);
+        downloadingList.setAdapter(downloadingAdapter);
+        taskList.setAdapter(finishedAdapter);
         pageQueue.findViewById(R.id.dl_back).setOnClickListener(v -> switchPage(PAGE_ME));
     }
 
@@ -859,6 +859,8 @@ public class MainActivity extends Activity {
         localEmpty = pageLocal.findViewById(R.id.local_empty);
         localSummary = pageLocal.findViewById(R.id.local_summary);
         localGrid.setLayoutManager(new GridLayoutManager(this, 3));
+        localAdapter = new MediaAdapter(new ArrayList<>(), false);
+        localGrid.setAdapter(localAdapter);
         localEmpty.setVisibility(View.VISIBLE);
     }
 
@@ -866,6 +868,8 @@ public class MainActivity extends Activity {
         videoGrid = pageVideos.findViewById(R.id.video_grid);
         videoEmpty = pageVideos.findViewById(R.id.video_empty);
         videoGrid.setLayoutManager(new GridLayoutManager(this, 3));
+        videoAdapter = new MediaAdapter(new ArrayList<>(), true);
+        videoGrid.setAdapter(videoAdapter);
         pageVideos.findViewById(R.id.video_back).setOnClickListener(v -> switchPage(PAGE_LOCAL));
     }
 
@@ -888,6 +892,8 @@ public class MainActivity extends Activity {
         filesEmpty = pageFiles.findViewById(R.id.files_empty);
         filesTotal = pageFiles.findViewById(R.id.files_total);
         filesList.setLayoutManager(new LinearLayoutManager(this));
+        fileAdapter = new FileAdapter(new ArrayList<>());
+        filesList.setAdapter(fileAdapter);
         pageFiles.findViewById(R.id.files_back).setOnClickListener(v -> switchPage(PAGE_STORAGE));
     }
 
@@ -1513,8 +1519,6 @@ public class MainActivity extends Activity {
     }
 
     private void bindLan() {
-        lanDevicesBox = (LinearLayout) pageLan.findViewById(R.id.lan_devices);
-        lanNoDevices = pageLan.findViewById(R.id.lan_no_devices);
         lanPairingBar = pageLan.findViewById(R.id.lan_pairing);
         pageLan.findViewById(R.id.lan_find_devices).setOnClickListener(v -> {
             ensureLan();
@@ -1604,7 +1608,6 @@ public class MainActivity extends Activity {
         if (lan == null) return;
         View view = getLayoutInflater().inflate(R.layout.dialog_lan_devices, null);
         lanDialogList = view.findViewById(R.id.ldd_list);
-        lanDialogEmpty = view.findViewById(R.id.ldd_empty);
         final android.widget.EditText ipEdit = view.findViewById(R.id.ldd_ip);
         final android.widget.Button btnManual = view.findViewById(R.id.ldd_manual);
         btnManual.setOnClickListener(v -> {
@@ -1628,13 +1631,22 @@ public class MainActivity extends Activity {
         if (lan == null || lanDialogList == null) return;
         lanDialogList.removeAllViews();
         java.util.List<LanCore.Device> list = lan.getDevices();
-        lanDialogEmpty.setVisibility(list.isEmpty() ? View.VISIBLE : View.GONE);
-        for (final LanCore.Device d : list) {
-            View row = getLayoutInflater().inflate(R.layout.item_lan_device, lanDialogList, false);
-            ((TextView) row.findViewById(R.id.ld_name)).setText(d.name);
-            ((TextView) row.findViewById(R.id.ld_ip)).setText(d.ip + (d.isAndroid() ? " · 手机" : " · 电脑"));
-            row.setOnClickListener(v -> connectLanDevice(d));
-            lanDialogList.addView(row);
+        if (list.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("未发现设备，请在下方输入对方 IP 连接");
+            empty.setTextColor(P.dim);
+            empty.setTextSize(12);
+            empty.setGravity(android.view.Gravity.CENTER);
+            empty.setPadding(0, 20, 0, 20);
+            lanDialogList.addView(empty);
+        } else {
+            for (final LanCore.Device d : list) {
+                View row = getLayoutInflater().inflate(R.layout.item_lan_device, lanDialogList, false);
+                ((TextView) row.findViewById(R.id.ld_name)).setText(d.name);
+                ((TextView) row.findViewById(R.id.ld_ip)).setText(d.ip + (d.isAndroid() ? " · 手机" : " · 电脑"));
+                row.setOnClickListener(v -> connectLanDevice(d));
+                lanDialogList.addView(row);
+            }
         }
     }
 
@@ -1651,8 +1663,9 @@ public class MainActivity extends Activity {
                 });
                 return;
             }
-            for (int i = 0; i < 40; i++) {
+            for (int i = 0; i < 120; i++) {
                 try { Thread.sleep(1000); } catch (InterruptedException ignored) { break; }
+                if (lan == null || lanSelected != d) return;
                 String r = lan.pollPair(d);
                 if ("ok".equals(r)) {
                     ui.post(() -> {
@@ -2830,8 +2843,9 @@ public class MainActivity extends Activity {
     private void loadThumb(ImageView iv, String url, int sample) {
         if (iv == null) return;
         final String key = url == null ? "" : url;
+        boolean same = key.equals(iv.getTag(R.id.thumb_url));
         iv.setTag(R.id.thumb_url, key);
-        iv.setBackgroundColor(P.divider);
+        if (!same) iv.setBackgroundColor(P.divider);
         if (key.isEmpty()) {
             iv.setImageResource(R.drawable.ic_image);
             iv.setColorFilter(P.icon);
@@ -2841,13 +2855,16 @@ public class MainActivity extends Activity {
         synchronized (thumbCache) {
             cached = thumbCache.get(key);
         }
-        if (cached != null) {
+        if (cached != null && same) {
             iv.setImageBitmap(cached);
             iv.clearColorFilter();
             return;
         }
-        iv.setImageResource(R.drawable.ic_image);
-        iv.setColorFilter(P.icon);
+        // 同一条目重新绑定（轮询 / 切页）时保留当前封面，只让异步任务继续补
+        if (!same) {
+            iv.setImageResource(R.drawable.ic_image);
+            iv.setColorFilter(P.icon);
+        }
         thumbPool.execute(() -> {
             Bitmap bmp = readDiskThumb(key);
             if (bmp == null) {
@@ -2902,23 +2919,30 @@ public class MainActivity extends Activity {
     /** 本地媒体缩略图：视频取首帧，图片取样解码，音频用音符图标 */
     private void loadMediaThumb(ImageView iv, MediaItem m) {
         if (iv == null) return;
+        final String key = "media:" + m.source;
+        // RecyclerView 会把同一个 ImageView 复用给别的条目。先记下这次要显示的
+        // key，异步回来时对不上就直接丢弃，否则旧图的缩略图会贴到新条目上。
+        boolean same = key.equals(iv.getTag(R.id.thumb_url));
+        iv.setTag(R.id.thumb_url, key);
         if (m.type == TYPE_AUDIO) {
             iv.setImageResource(R.drawable.ic_music);
             iv.setColorFilter(P.icon);
             return;
         }
-        final String key = "media:" + m.source;
         Bitmap cached;
         synchronized (thumbCache) {
             cached = thumbCache.get(key);
         }
-        if (cached != null) {
+        if (cached != null && same) {
             iv.setImageBitmap(cached);
             iv.clearColorFilter();
             return;
         }
-        iv.setImageResource(m.type == TYPE_IMAGE ? R.drawable.ic_image : R.drawable.ic_video);
-        iv.setColorFilter(P.icon);
+        // 同一个条目重新绑定时不要退回占位图，避免整屏闪烁
+        if (!same) {
+            iv.setImageResource(m.type == TYPE_IMAGE ? R.drawable.ic_image : R.drawable.ic_video);
+            iv.setColorFilter(P.icon);
+        }
         thumbPool.execute(() -> {
             Bitmap bmp = readDiskThumb(key);
             try {
@@ -2947,7 +2971,7 @@ public class MainActivity extends Activity {
             }
             final Bitmap fb = bmp;
             ui.post(() -> {
-                if (fb != null) {
+                if (fb != null && key.equals(iv.getTag(R.id.thumb_url))) {
                     iv.setImageBitmap(fb);
                     iv.clearColorFilter();
                 }
@@ -3205,6 +3229,25 @@ public class MainActivity extends Activity {
         return msg.trim();
     }
 
+    /** 是否已经有同 URL+formatId 的任务正在下载；只看任务表，简单且无竞态问题 */
+    private boolean hasActiveDownload(String url, String formatId) {
+        if (url == null || url.isEmpty() || formatId == null || formatId.isEmpty()) return false;
+        try {
+            String json = py.getModule("vsp").callAttr("get_tasks").toString();
+            JSONArray arr = new JSONArray(json);
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject o = arr.optJSONObject(i);
+                if (o == null) continue;
+                String st = o.optString("status", "");
+                if (!("running".equals(st) || "paused".equals(st))) continue;
+                if (url.equals(o.optString("url", ""))
+                        && formatId.equals(o.optString("formatId", ""))) return true;
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
     private void showFormatsFromCache() {
         if (parsedData == null) return;
         JSONArray arr = parsedData.optJSONArray(currentTab);
@@ -3215,7 +3258,11 @@ public class MainActivity extends Activity {
             if (o != null) items.add(o);
         }
         currentFormats = items;
-        formatList.setAdapter(new FormatAdapter(items));
+        // 换格式分类（videos/audios/images）也要更新，图标/文案完全同步
+        if (formatAdapter != null) {
+            syncList(formatAdapter.data, items);
+            formatAdapter.notifyDataSetChanged();
+        }
         formatHint.setText(items.isEmpty()
                 ? "这个分类下没有可用格式，换个分类看看"
                 : "点击预览 · 长按批量下载 · 同清晰度可能有多条线路/编码，右侧为文件大小");
@@ -3227,6 +3274,10 @@ public class MainActivity extends Activity {
             return;
         }
         final String formatId = fmt.optString("formatId", "");
+        if (hasActiveDownload(fmt.optString("url", ""), formatId)) {
+            Toast.makeText(this, "已有相同任务在下载", Toast.LENGTH_SHORT).show();
+            return;
+        }
         final String title = resultTitle.getText().toString();
         final String url = currentUrl;
         final String thumb = currentThumb;
@@ -3395,6 +3446,14 @@ public class MainActivity extends Activity {
                 }
                 if (got == null) {
                     Toast.makeText(this, "图片加载失败", Toast.LENGTH_SHORT).show();
+                    // defer 模式下这时还留着暂停态的视频/音频；拿不到图片就立刻结束，
+                    // 不能留个黑页 + 加载失败 toast。
+                    if (playerType == TYPE_IMAGE) {
+                        if (playerVideo != null) playerVideo.setVisibility(View.VISIBLE);
+                        if (playerExo != null) playerExo.setVisibility(View.VISIBLE);
+                        if (playerAudio != null) playerAudio.setVisibility(View.VISIBLE);
+                        stopPlayer();
+                    }
                     return;
                 }
                 Bitmap old = watchImageBitmap;
@@ -3486,6 +3545,9 @@ public class MainActivity extends Activity {
         if (playerExo != null) playerExo.setVisibility(View.GONE);
         if (playerAudio != null) playerAudio.setVisibility(View.GONE);
         stopPlayer();
+        // 盖板淡出是在后台异步的 140ms 动画；图片已经画出来的这一刻就该把它撤掉，
+        // 还要留它压住当前画面约 900ms，就会产生明显的“切图跳到黑帧再到图”的观感。
+        hideStageCover();
     }
 
     private void openPlayer(String source, int type, String title, boolean local,
@@ -5982,7 +6044,7 @@ public class MainActivity extends Activity {
                 } else if ("path".equals(mode) && !path.isEmpty()) {
                     collectMedia(new File(path), found, seen, 0, wantVideo, wantAudio, wantImage);
                 } else {
-                    collectMediaStore(found, wantVideo, wantAudio, wantImage);
+                    collectMediaStore(found, wantVideo, wantAudio, wantImage, seen);
                 }
             } catch (Throwable t) {
                 Log.w("VSP", "扫描失败", t);
@@ -6182,13 +6244,14 @@ public class MainActivity extends Activity {
     }
 
     /** 扫描手机媒体库：视频 / 音频 / 图片，按修改时间倒序 */
-    private void collectMediaStore(List<MediaItem> out, boolean video, boolean audio, boolean image) {
-        if (video) queryMedia(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, TYPE_VIDEO, out, true);
-        if (audio) queryMedia(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, TYPE_AUDIO, out, true);
-        if (image) queryMedia(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, TYPE_IMAGE, out, false);
+    private void collectMediaStore(List<MediaItem> out, boolean video, boolean audio, boolean image,
+                                   Set<String> seen) {
+        if (video) queryMedia(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, TYPE_VIDEO, out, true, seen);
+        if (audio) queryMedia(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, TYPE_AUDIO, out, true, seen);
+        if (image) queryMedia(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, TYPE_IMAGE, out, false, seen);
     }
 
-    private void queryMedia(Uri base, int type, List<MediaItem> out, boolean hasDuration) {
+    private void queryMedia(Uri base, int type, List<MediaItem> out, boolean hasDuration, Set<String> seen) {
         List<String> cols = new ArrayList<>();
         cols.add(MediaStore.MediaColumns._ID);
         cols.add(MediaStore.MediaColumns.DISPLAY_NAME);
@@ -6209,6 +6272,7 @@ public class MainActivity extends Activity {
                 if (hasDuration && c.getColumnCount() > 4 && !c.isNull(4)) dur = c.getLong(4);
                 if (name == null) name = "未知文件";
                 Uri item = ContentUris.withAppendedId(base, id);
+                if (seen != null && !seen.add(item.toString())) continue;
                 out.add(new MediaItem(item.toString(), name, size, sec * 1000, type, id, dur));
             }
         } catch (Throwable t) {
@@ -6292,7 +6356,9 @@ public class MainActivity extends Activity {
                     + countType(localFiles, TYPE_AUDIO) + " / 图片 "
                     + countType(localFiles, TYPE_IMAGE));
         }
-        localGrid.setAdapter(new MediaAdapter(localFiles, false));
+        if (localAdapter != null && syncList(localAdapter.data, localFiles)) {
+            localAdapter.notifyDataSetChanged();
+        }
     }
 
     private void openVideosPage() {
@@ -6309,7 +6375,9 @@ public class MainActivity extends Activity {
         for (MediaItem m : localFiles) if (m.type == TYPE_VIDEO) videos.add(m);
         videoFiles = videos;
         videoEmpty.setVisibility(videos.isEmpty() ? View.VISIBLE : View.GONE);
-        videoGrid.setAdapter(new MediaAdapter(videos, true));
+        if (videoAdapter != null && syncList(videoAdapter.data, videos)) {
+            videoAdapter.notifyDataSetChanged();
+        }
     }
 
     private void playLocal(MediaItem m) {
@@ -6585,10 +6653,11 @@ public class MainActivity extends Activity {
     }
 
     private void renderFilesPage(List<File> files) {
-        downloadFiles = files;
         filesTotal.setText(files.size() + " 个");
         filesEmpty.setVisibility(files.isEmpty() ? View.VISIBLE : View.GONE);
-        filesList.setAdapter(new FileAdapter(files));
+        if (fileAdapter != null && syncList(fileAdapter.data, files)) {
+            fileAdapter.notifyDataSetChanged();
+        }
     }
 
     private long dirSize(File dir) {
@@ -6740,6 +6809,7 @@ public class MainActivity extends Activity {
         latestVersion = "";
         latestNotes = "";
         latestDate = "";
+        latestMirrors = new java.util.ArrayList<>();
         latestSize = 0L;
         repoEmpty = false;
         updateProgress.setVisibility(View.VISIBLE);
@@ -6780,6 +6850,7 @@ public class MainActivity extends Activity {
                 latestNotes = best.notes;
                 latestDate = best.date;
                 latestApkUrl = best.apkUrl;
+                latestMirrors = buildApkMirrors(best.version, best.apkUrl);
                 latestSize = best.size;
                 latestSource = best.from;
                 err = null;
@@ -6808,6 +6879,30 @@ public class MainActivity extends Activity {
         if (a.version.isEmpty()) return b;
         if (b.version.isEmpty()) return a;
         return compareVersion(b.version, a.version) > 0 ? b : a;
+    }
+
+    /**
+     * 组装同一版本 APK 在 GitHub / Gitee 两端的下载地址，供下载前并发测速、失败切换。
+     * 首选地址（best.apkUrl）放第一位；再按版本号补全两端 Release 附件地址并去重。
+     * 这样即使 /releases/latest 被桌面版占用，下载仍能拿到两个可用镜像。
+     */
+    private java.util.List<String> buildApkMirrors(String version, String primaryUrl) {
+        java.util.List<String> urls = new java.util.ArrayList<>();
+        if (primaryUrl != null && !primaryUrl.isEmpty()) urls.add(primaryUrl);
+        String v = version == null ? "" : version.replaceFirst("^[vV]", "");
+        if (!v.isEmpty()) {
+            String name = "VSP-Parse-v" + v + ".apk";
+            addMirrorUrl(urls, "https://gitee.com/" + GITEE_REPO + "/releases/download/v" + v + "/" + name);
+            addMirrorUrl(urls, "https://github.com/" + UPDATE_REPO + "/releases/download/v" + v + "/" + name);
+        }
+        return urls;
+    }
+
+    private void addMirrorUrl(java.util.List<String> urls, String url) {
+        for (String u : urls) {
+            if (u.equalsIgnoreCase(url)) return;
+        }
+        urls.add(url);
     }
 
     private String shortMsg(Exception e) {
@@ -7646,7 +7741,13 @@ public class MainActivity extends Activity {
         }
         ensureNotificationPermission();
         updateResumeTried = false;
-        UpdateService.start(this, apkUrl, ver, latestSize);
+        // 优先用刚检查更新得到的双源地址（下载前测速选最快、失败切换）；
+        // 只有恢复旧状态等拿不到地址列表的场景，才退回单一 apkUrl。
+        if (latestMirrors != null && !latestMirrors.isEmpty()) {
+            UpdateService.start(this, latestMirrors, ver, latestSize);
+        } else {
+            UpdateService.start(this, apkUrl, ver, latestSize);
+        }
         showUpdateProgress();
     }
 
@@ -7876,8 +7977,13 @@ public class MainActivity extends Activity {
     private void renderTasks(List<JSONObject> active, List<JSONObject> finished) {
         activeTasks = active;
         finishedTasks = finished;
-        downloadingList.setAdapter(new TaskAdapter(active, true));
-        taskList.setAdapter(new TaskAdapter(finished, false));
+        // 只换数据，不换 Adapter：ViewHolder 保留下来，已加载的缩略图不会被重置
+        if (downloadingAdapter != null && syncList(downloadingAdapter.data, active)) {
+            downloadingAdapter.notifyDataSetChanged();
+        }
+        if (finishedAdapter != null && syncList(finishedAdapter.data, finished)) {
+            finishedAdapter.notifyDataSetChanged();
+        }
         noDownloading.setVisibility(active.isEmpty() ? View.VISIBLE : View.GONE);
         noTask.setVisibility(finished.isEmpty() ? View.VISIBLE : View.GONE);
         dlCount.setText(active.size() + " 下载中 · " + finished.size() + " 已完成");
@@ -8012,6 +8118,14 @@ public class MainActivity extends Activity {
                 })
                 .setNegativeButton("取消", null)
                 .show();
+    }
+
+    /** 原地同步 Adapter 的列表；内容没变就不刷新，切页时避免整屏重绑 */
+    private static <T> boolean syncList(List<T> target, List<T> source) {
+        if (target == source || target.equals(source)) return false;
+        target.clear();
+        target.addAll(source);
+        return true;
     }
 
     private void notifyAdapters() {
@@ -8468,6 +8582,7 @@ public class MainActivity extends Activity {
         updateDialog = null;
         if (taskPoller != null) taskPoller.shutdownNow();
         if (swipePool != null) swipePool.shutdownNow();
+        if (thumbPool != null) thumbPool.shutdownNow();
         stopLanControlLoop();
         if (lan != null) { try { lan.stop(); } catch (Throwable ignored) { } lan = null; }
         ui.removeCallbacksAndMessages(null);

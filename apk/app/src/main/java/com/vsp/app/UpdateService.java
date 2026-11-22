@@ -50,6 +50,8 @@ public class UpdateService extends Service {
     public static final String ACTION_RESUME = "com.vsp.app.UPDATE_RESUME";
     public static final String ACTION_CANCEL = "com.vsp.app.UPDATE_CANCEL";
     public static final String EXTRA_URL = "url";
+    /** 多个下载源（换行拼接），下载前并发测速选最快、失败自动切换 */
+    public static final String EXTRA_URLS = "urls";
     public static final String EXTRA_VERSION = "version";
     public static final String EXTRA_SIZE = "size";
 
@@ -99,8 +101,25 @@ public class UpdateService extends Service {
     // ------------------------------------------------------------ 静态入口
 
     public static void start(Context ctx, String url, String ver, long size) {
+        java.util.List<String> one = new java.util.ArrayList<>();
+        if (url != null && !url.isEmpty()) one.add(url);
+        start(ctx, one, ver, size);
+    }
+
+    /** 多源下载入口：urls 里第一个作为主地址，其余作为测速/失败切换的候选镜像。 */
+    public static void start(Context ctx, java.util.List<String> urls, String ver, long size) {
         if (ctx == null) return;
         cancelFlag.set(false);
+
+        java.util.List<String> sources = (urls == null) ? new java.util.ArrayList<String>() : urls;
+        String url = sources.isEmpty() ? "" : sources.get(0);
+        StringBuilder joined = new StringBuilder();
+        for (String u : sources) {
+            if (u == null || u.isEmpty()) continue;
+            if (joined.length() > 0) joined.append('\n');
+            joined.append(u);
+        }
+        final String urlsJoined = joined.toString();
 
         String oldUrl = UpdateStore.url(ctx);
         String oldVer = UpdateStore.version(ctx);
@@ -111,7 +130,7 @@ public class UpdateService extends Service {
         // 同一份下载正在跑时重复点「下载并安装」不再开新线程；其余情况都开启新序号
         if (!(same && running)) downloadGeneration.incrementAndGet();
         if (!same) {
-            UpdateStore.begin(ctx, url, ver, size);
+            UpdateStore.begin(ctx, url, sources, ver, size);
             resetRuntimeState();
         } else {
             restoreFromStore(ctx);
@@ -130,6 +149,7 @@ public class UpdateService extends Service {
         Intent i = new Intent(ctx, UpdateService.class);
         i.setAction(ACTION_START);
         i.putExtra(EXTRA_URL, url);
+        i.putExtra(EXTRA_URLS, urlsJoined);
         i.putExtra(EXTRA_VERSION, ver);
         i.putExtra(EXTRA_SIZE, size);
         try {
@@ -238,6 +258,9 @@ public class UpdateService extends Service {
         }
 
         String url = intent == null ? null : intent.getStringExtra(EXTRA_URL);
+        String urlsRaw = intent == null ? null : intent.getStringExtra(EXTRA_URLS);
+        java.util.List<String> sources = splitUrls(urlsRaw);
+        if (sources.isEmpty() && url != null && !url.isEmpty()) sources.add(url);
         String ver = intent == null ? "" : String.valueOf(intent.getStringExtra(EXTRA_VERSION));
         long want = intent == null ? 0L : intent.getLongExtra(EXTRA_SIZE, 0L);
 
@@ -249,7 +272,7 @@ public class UpdateService extends Service {
             boolean same = !UpdateStore.STATE_IDLE.equals(oldState)
                     && url.equals(oldUrl) && ver.equals(oldVer);
             if (!same) {
-                UpdateStore.begin(this, url, ver, want);
+                UpdateStore.begin(this, url, sources, ver, want);
                 resetRuntimeState();
             } else {
                 restoreFromStore(this);
@@ -278,8 +301,13 @@ public class UpdateService extends Service {
             errorText = "";
             url = UpdateStore.url(this);
             ver = UpdateStore.version(this);
+            // 续传时用持久化的完整源列表，保证测速/切换仍然可用；旧数据则只有单 url
+            sources = UpdateStore.urls(this);
             expectedSize = totalSize;
         }
+        // 点“继续下载”后必须清掉暂停前的 idle 计时；否则看门狗按上一次 idle
+        // 恢复后立刻判死。
+        lastDataAt = System.currentTimeMillis();
 
         startForegroundCompat(buildNotification(percent,
                 sizeLine(downloaded, totalSize),
@@ -293,14 +321,14 @@ public class UpdateService extends Service {
                     sizeLine(downloaded, totalSize), "正在下载…", null, false));
         } else {
             destroyed = false;
-            final String dlUrl = url;
+            final java.util.List<String> dlSources = sources;
             final String dlVer = ver;
             final long myGen = gen;
             Thread t = new Thread(() -> {
                 try {
                     synchronized (downloadLock) {
                         if (destroyed || myGen != downloadGeneration.get()) return;
-                        download(dlUrl, dlVer, myGen);
+                        download(dlSources, dlVer, myGen);
                     }
                 } finally {
                     if (activeGeneration == myGen) activeDownloadThread = null;
@@ -325,7 +353,10 @@ public class UpdateService extends Service {
 
     // ------------------------------------------------------------ 下载
 
-    private void download(String url, String ver, long gen) {
+    /** 单个源的重试次数上限；多源时每个源少试几次，尽快切到更快的镜像 */
+    private static final int PER_SOURCE_RETRIES = 3;
+
+    private void download(java.util.List<String> sources, String ver, long gen) {
         File out = targetFile(ver);
         File part = new File(out.getAbsolutePath() + ".part");
         acquireWakeLock();
@@ -348,69 +379,111 @@ public class UpdateService extends Service {
             if (totalSize <= 0) totalSize = expectedSize;
             if (totalSize > 0) percent = (int) Math.min(100L, have * 100L / totalSize);
 
-            int failures = 0;
-            long lastFailureSize = have;
-            long lastProgressSave = 0L;
+            // 下载前并发测速，按快到慢排序；测速失败的排最后，但依然保留尝试。
+            // 两个源是同一个 APK 的不同镜像，字节完全一致，切换后共用 .part 断点续传是安全的。
+            java.util.List<String> ranked = rankSourcesBySpeed(sources, gen);
+            if (gen != downloadGeneration.get() || cancelFlag.get() || destroyed) return;
 
-            while (!cancelFlag.get() && !destroyed && gen == downloadGeneration.get()) {
-                try {
-                    boolean ok = downloadOnce(url, out, part, gen);
-                    if (ok) return;
-                } catch (InterruptedException ie) {
-                    throw ie;
-                } catch (FatalDownloadException fe) {
-                    closeQuietly();
-                    if (gen == downloadGeneration.get() && !destroyed) fail(fe.getMessage());
-                    return;
-                } catch (Exception e) {
-                    closeQuietly();
-                    if (gen != downloadGeneration.get()) return;
-                    if (cancelFlag.get()) throw new InterruptedException("cancel");
-                    if (destroyed) return;
+            for (int si = 0; si < ranked.size(); si++) {
+                if (cancelFlag.get() || destroyed || gen != downloadGeneration.get()) {
+                    throw new InterruptedException("cancel");
+                }
+                final String url = ranked.get(si);
+                final boolean isLast = (si == ranked.size() - 1);
+                if (si > 0) {
+                    // 换源后重新读 .part 长度（上一源可能刚下了一截）
+                    long p = part.isFile() ? part.length() : 0L;
+                    downloaded = p;
+                    if (totalSize > 0) percent = (int) Math.min(100L, p * 100L / totalSize);
+                }
+                speedText = ranked.size() > 1 ? "正在从 " + friendly(url) + " 下载…" : "正在下载…";
+                notifyProgress(buildNotification(percent,
+                        sizeLine(downloaded, totalSize), speedText, null, false));
 
-                    long nowLength = part.isFile() ? part.length() : 0L;
-                    downloaded = nowLength;
-                    if (totalSize > 0) {
-                        percent = (int) Math.min(100L, nowLength * 100L / totalSize);
-                    }
-                    UpdateStore.progress(this, downloaded, totalSize);
+                int failures = 0;
+                long lastFailureSize = part.isFile() ? part.length() : 0L;
+                long lastProgressSave = 0L;
+                int limit = isLast ? MAX_RETRIES : PER_SOURCE_RETRIES;
 
-                    // 断网：不急着失败，前台服务一直等到网络恢复
-                    if (!isNetworkAvailable()) {
-                        failures = 0;
-                        speedText = "等待网络恢复…";
+                while (!cancelFlag.get() && !destroyed && gen == downloadGeneration.get()) {
+                    try {
+                        boolean ok = downloadOnce(url, out, part, gen);
+                        if (ok) return;
+                    } catch (InterruptedException ie) {
+                        throw ie;
+                    } catch (FatalDownloadException fe) {
+                        closeQuietly();
+                        if (gen != downloadGeneration.get()) return;
+                        if (cancelFlag.get()) throw new InterruptedException("cancel");
+                        if (destroyed) return;
+                        if (isLast) {
+                            fail(fe.getMessage());
+                            return;
+                        }
+                        // 该源链接失效/报错，立即切下一个镜像
+                        speedText = friendly(url) + " 不可用，切换其它源…";
                         notifyProgress(buildNotification(percent,
                                 sizeLine(downloaded, totalSize), speedText, null, false));
-                        waitForNetwork();
-                        continue;
-                    }
+                        break;
+                    } catch (Exception e) {
+                        closeQuietly();
+                        if (gen != downloadGeneration.get()) return;
+                        if (cancelFlag.get()) throw new InterruptedException("cancel");
+                        if (destroyed) return;
 
-                    // 这一轮其实又往前下了一截，说明网络只是抖，重新计数
-                    if (nowLength > lastFailureSize + 256L * 1024L) failures = 0;
-                    lastFailureSize = nowLength;
-                    failures++;
-
-                    String msg = shortMsg(e);
-                    if (failures >= MAX_RETRIES) {
-                        fail(msg);
-                        return;
-                    }
-
-                    long delay = Math.min(30000L, 1000L << Math.min(failures - 1, 5));
-                    speedText = "网络不稳定，正在重试…";
-                    notifyProgress(buildNotification(percent,
-                            sizeLine(downloaded, totalSize), speedText, null, false));
-                    if (!sleepInterruptible(delay)) throw new InterruptedException("cancel");
-
-                    long now = System.currentTimeMillis();
-                    if (now - lastProgressSave > 1000L) {
+                        long nowLength = part.isFile() ? part.length() : 0L;
+                        downloaded = nowLength;
+                        if (totalSize > 0) {
+                            percent = (int) Math.min(100L, nowLength * 100L / totalSize);
+                        }
                         UpdateStore.progress(this, downloaded, totalSize);
-                        lastProgressSave = now;
+
+                        // 断网：不急着失败，前台服务一直等到网络恢复；此时切源也无用
+                        if (!isNetworkAvailable()) {
+                            failures = 0;
+                            speedText = "等待网络恢复…";
+                            notifyProgress(buildNotification(percent,
+                                    sizeLine(downloaded, totalSize), speedText, null, false));
+                            waitForNetwork();
+                            continue;
+                        }
+
+                        // 这一轮其实又往前下了一截，说明网络只是抖，重新计数
+                        if (nowLength > lastFailureSize + 256L * 1024L) failures = 0;
+                        lastFailureSize = nowLength;
+                        failures++;
+
+                        String msg = shortMsg(e);
+                        if (failures >= limit) {
+                            if (isLast) {
+                                fail(msg);
+                                return;
+                            }
+                            // 当前源反复失败，切下一个镜像
+                            speedText = friendly(url) + " 连接不稳定，切换其它源…";
+                            notifyProgress(buildNotification(percent,
+                                    sizeLine(downloaded, totalSize), speedText, null, false));
+                            break;
+                        }
+
+                        long delay = Math.min(30000L, 1000L << Math.min(failures - 1, 5));
+                        speedText = "网络不稳定，正在重试…";
+                        notifyProgress(buildNotification(percent,
+                                sizeLine(downloaded, totalSize), speedText, null, false));
+                        if (!sleepInterruptible(delay)) throw new InterruptedException("cancel");
+
+                        long now = System.currentTimeMillis();
+                        if (now - lastProgressSave > 1000L) {
+                            UpdateStore.progress(this, downloaded, totalSize);
+                            lastProgressSave = now;
+                        }
                     }
                 }
             }
             if (gen != downloadGeneration.get()) return;
             if (cancelFlag.get()) throw new InterruptedException("cancel");
+            // 所有源都没完成（正常路径里每个源都会 return 或 fail，这里只是兜底）
+            fail("所有下载源都不可用");
         } catch (InterruptedException ie) {
             closeQuietly();
             if (gen == downloadGeneration.get() && cancelFlag.get()) {
@@ -425,6 +498,135 @@ public class UpdateService extends Service {
             closeQuietly();
             releaseWakeLock();
         }
+    }
+
+    /** 并发对每个源取开头一小段算速率，按快到慢返回；测速失败(-1)的排在最后。 */
+    private java.util.List<String> rankSourcesBySpeed(java.util.List<String> sources, long gen) {
+        java.util.List<String> result = new java.util.ArrayList<>();
+        if (sources == null || sources.isEmpty()) return result;
+        if (sources.size() == 1) {
+            result.add(sources.get(0));
+            return result;
+        }
+
+        speedText = "正在测速，自动选择最快的下载源…";
+        notifyProgress(buildNotification(percent,
+                sizeLine(downloaded, totalSize), speedText, null, false));
+
+        final long[] speeds = new long[sources.size()];
+        final Thread[] threads = new Thread[sources.size()];
+        for (int i = 0; i < sources.size(); i++) {
+            final int idx = i;
+            final String u = sources.get(i);
+            threads[i] = new Thread(() -> speeds[idx] = probeSpeed(u, gen), "vsp-probe-" + i);
+            threads[i].start();
+        }
+        // 最多等 12 秒，避免某个源慢速拖住整个下载
+        long deadline = System.currentTimeMillis() + 12000L;
+        for (Thread t : threads) {
+            long remain = deadline - System.currentTimeMillis();
+            if (remain <= 0) break;
+            try {
+                t.join(remain);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        for (Thread t : threads) {
+            if (t != null && t.isAlive()) t.interrupt();
+        }
+        if (gen != downloadGeneration.get() || cancelFlag.get() || destroyed) {
+            result.addAll(sources);
+            return result;
+        }
+
+        java.util.List<Integer> order = new java.util.ArrayList<>();
+        for (int i = 0; i < sources.size(); i++) order.add(i);
+        java.util.Collections.sort(order, (a, b) -> {
+            long sa = speeds[a] >= 0 ? speeds[a] : -1L;
+            long sb = speeds[b] >= 0 ? speeds[b] : -1L;
+            if (sa == sb) return a - b; // 同速保持原始顺序（首选地址在前）
+            return sa > sb ? -1 : 1;
+        });
+        for (int idx : order) result.add(sources.get(idx));
+
+        if (!result.isEmpty() && speeds[order.get(0)] > 0) {
+            speedText = "已选 " + friendly(result.get(0)) + " · " + human(speeds[order.get(0)]) + "/s";
+            notifyProgress(buildNotification(percent,
+                    sizeLine(downloaded, totalSize), speedText, null, false));
+        }
+        return result;
+    }
+
+    /** 对一个源取开头 256KB 测速率，返回字节/秒；失败或数据太少返回 -1。 */
+    private long probeSpeed(String url, long gen) {
+        final int limit = 262144;
+        HttpURLConnection c = null;
+        try {
+            String cur = url;
+            for (int hop = 0; hop < MAX_HOPS; hop++) {
+                if (cancelFlag.get() || destroyed || gen != downloadGeneration.get()) return -1L;
+                c = (HttpURLConnection) new URL(cur).openConnection();
+                c.setConnectTimeout(10000);
+                c.setReadTimeout(10000);
+                c.setInstanceFollowRedirects(false);
+                c.setRequestProperty("User-Agent", UA);
+                c.setRequestProperty("Range", "bytes=0-" + (limit - 1));
+                int code = c.getResponseCode();
+                if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
+                    String loc = c.getHeaderField("Location");
+                    c.disconnect();
+                    c = null;
+                    if (loc == null || loc.trim().isEmpty()) return -1L;
+                    loc = loc.trim();
+                    if (!loc.startsWith("http://") && !loc.startsWith("https://")) {
+                        loc = new URL(new URL(cur), loc).toString();
+                    }
+                    cur = loc;
+                    continue;
+                }
+                if (code != 200 && code != 206) {
+                    if (c != null) c.disconnect();
+                    return -1L;
+                }
+                InputStream in = c.getInputStream();
+                byte[] buf = new byte[16384];
+                long got = 0L;
+                long t0 = System.currentTimeMillis();
+                while (got < limit) {
+                    int n = in.read(buf, 0, (int) Math.min(buf.length, limit - got));
+                    if (n <= 0) break;
+                    got += n;
+                }
+                long ms = Math.max(1L, System.currentTimeMillis() - t0);
+                if (c != null) c.disconnect();
+                if (got < 8192L) return -1L;
+                return got * 1000L / ms;
+            }
+            return -1L;
+        } catch (Exception e) {
+            if (c != null) c.disconnect();
+            return -1L;
+        }
+    }
+
+    private static String friendly(String url) {
+        if (url == null) return "备用源";
+        String l = url.toLowerCase(Locale.ROOT);
+        if (l.contains("gitee")) return "Gitee";
+        if (l.contains("github")) return "GitHub";
+        return "备用源";
+    }
+
+    /** 把换行拼接的地址还原成列表 */
+    private static java.util.List<String> splitUrls(String raw) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        if (raw == null || raw.isEmpty()) return out;
+        for (String u : raw.split("\\n")) {
+            if (u != null && !u.trim().isEmpty() && !out.contains(u.trim())) out.add(u.trim());
+        }
+        return out;
     }
 
     /**
@@ -590,8 +792,9 @@ public class UpdateService extends Service {
         if (gen != downloadGeneration.get() || destroyed) {
             throw new InterruptedException("cancel");
         }
-        if (totalSize > 0 && finalLen < totalSize - tolerance(totalSize)) {
-            // 连接提前结束，.part 留着，下一轮 Range 接着下
+        // 用户要求“完整数据”：连接提前结束（包括“CDN 恰好允许这一次却少几%”）也失败重试，
+        // 不能用 tolerant 留下不可识别的截断文件。
+        if (totalSize > 0 && finalLen < totalSize) {
             UpdateStore.progress(this, finalLen, totalSize);
             throw new IOException("连接提前结束（" + human(finalLen) + " / " + human(totalSize) + "）");
         }

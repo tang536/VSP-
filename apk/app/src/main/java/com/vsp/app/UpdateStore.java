@@ -23,6 +23,8 @@ final class UpdateStore {
 
     private static final String K_STATE = "state";
     private static final String K_URL = "url";
+    /** 多个下载源，用换行拼接；为空时回退到 K_URL（兼容旧版本） */
+    private static final String K_URLS = "urls";
     private static final String K_VERSION = "version";
     private static final String K_SIZE = "size";
     private static final String K_DOWNLOADED = "downloaded";
@@ -39,9 +41,25 @@ final class UpdateStore {
     }
 
     static void begin(Context ctx, String url, String version, long size) {
+        begin(ctx, url, null, version, size);
+    }
+
+    /** 带多下载源的开始：urls 为 null/空时等价于单 url。首元素同时写进 K_URL 便于兼容旧逻辑。 */
+    static void begin(Context ctx, String url, java.util.List<String> urls, String version, long size) {
+        String first = url == null ? "" : url;
+        StringBuilder joined = new StringBuilder();
+        if (urls != null) {
+            for (String u : urls) {
+                if (u == null || u.trim().isEmpty()) continue;
+                if (joined.length() > 0) joined.append('\n');
+                joined.append(u.trim());
+            }
+        }
+        if (joined.length() == 0 && !first.isEmpty()) joined.append(first);
         prefs(ctx).edit()
                 .putString(K_STATE, STATE_DOWNLOADING)
-                .putString(K_URL, url == null ? "" : url)
+                .putString(K_URL, first)
+                .putString(K_URLS, joined.toString())
                 .putString(K_VERSION, version == null ? "" : version)
                 .putLong(K_SIZE, Math.max(0L, size))
                 .putLong(K_DOWNLOADED, 0L)
@@ -89,6 +107,22 @@ final class UpdateStore {
 
     static String url(Context ctx) {
         return prefs(ctx).getString(K_URL, "");
+    }
+
+    /** 读取全部下载源；旧数据没有 K_URLS 时回退到单个 K_URL。返回列表至少有一个元素。 */
+    static java.util.List<String> urls(Context ctx) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        String joined = prefs(ctx).getString(K_URLS, "");
+        if (joined != null && !joined.isEmpty()) {
+            for (String u : joined.split("\\n")) {
+                if (u != null && !u.trim().isEmpty() && !out.contains(u.trim())) out.add(u.trim());
+            }
+        }
+        if (out.isEmpty()) {
+            String one = url(ctx);
+            if (!one.isEmpty()) out.add(one);
+        }
+        return out;
     }
 
     static String version(Context ctx) {

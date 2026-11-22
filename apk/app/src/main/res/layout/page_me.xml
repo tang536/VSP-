@@ -383,7 +383,7 @@
                     android:id="@+id/update_version"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="v1.4"
+                    android:text="待检查"
                     android:textColor="#8b909a"
                     android:tag="dim"
                     android:textSize="12sp" />

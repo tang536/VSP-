@@ -85,19 +85,6 @@
                 android:indeterminate="true"
                 android:visibility="gone"
                 android:layout_marginTop="8dp" />
-            <!-- 兼容旧代码引用：隐藏占位 -->
-            <LinearLayout
-                android:id="@+id/lan_devices"
-                android:layout_width="match_parent"
-                android:layout_height="0dp"
-                android:visibility="gone"
-                android:orientation="vertical" />
-            <TextView
-                android:id="@+id/lan_no_devices"
-                android:layout_width="match_parent"
-                android:layout_height="0dp"
-                android:visibility="gone" />
-
             <!-- 已选设备操作区 -->
             <LinearLayout
                 android:id="@+id/lan_ops"
