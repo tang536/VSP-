@@ -25,5 +25,4 @@ public partial class LanDevicesWindow : Window
         Closing += (_, _) => owner.RequestCloseLanDevices -= OnClose;
     }
 
-    private void Close_Click(object? sender, RoutedEventArgs e) => Close();
 }

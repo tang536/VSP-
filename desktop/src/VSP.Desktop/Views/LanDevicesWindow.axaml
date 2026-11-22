@@ -48,7 +48,6 @@
             <TextBox Watermark="输入对方 IP，如 192.168.1.5" Text="{Binding LanManualIp}"
                      HorizontalAlignment="Stretch" VerticalAlignment="Center" />
             <Button Classes="primary" Content="手动连接" Command="{Binding LanAddManualCommand}" />
-            <Button Classes="ghost" Content="关闭" Click="Close_Click" />
         </StackPanel>
     </Grid>
 </Window>

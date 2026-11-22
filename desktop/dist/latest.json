@@ -1,13 +1,13 @@
 {
   "platform": "desktop",
-  "version": "1.1.5",
-  "msi": "dist/Toolbox-Setup-v1.1.5.msi",
-  "size": 88160469,
-  "sha256": "1bab429d9ce6d6b1bec788120a68f6105a96ec919bbc6d24c2088bd9a6cf461c",
+  "version": "1.1.6",
+  "msi": "dist/Toolbox-Setup-v1.1.6.msi",
+  "size": 88180949,
+  "sha256": "65a9daefa570334a2f6b0d4bf3e02111bbd0815caf8ab2a15cbb85b23fdfbee7",
   "mirrors": [
-    "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.5/Toolbox-Setup-v1.1.5.msi",
-    "https://gitee.com/tang-rongqiang/VSP/releases/download/desktop-v1.1.5/Toolbox-Setup-v1.1.5.msi"
+    "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.6/Toolbox-Setup-v1.1.6.msi",
+    "https://gitee.com/tang-rongqiang/VSP/releases/download/desktop-v1.1.6/Toolbox-Setup-v1.1.6.msi"
   ],
-  "notes": "v1.1.5\n\n同步手机 v1.3.5：HLS/UI/远控/队列防御修复，桌面与 App 代码共享引擎。\n",
-  "page": "https://github.com/tang536/VSP-/releases/tag/desktop-v1.1.5"
+  "notes": "v1.1.6\n\n1) 清理局域网弹窗与窗口重复的关闭按钮。\n2) 状态栏不再重复显示本机 IP 与设备名。\n3) 桌面图标统一为手机端 V 图标。\n",
+  "page": "https://github.com/tang536/VSP-/releases/tag/desktop-v1.1.6"
 }

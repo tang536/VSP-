@@ -764,7 +764,7 @@ public sealed class MainViewModel : BindableBase
                 RequestPairDialog?.Invoke();
             });
             _lan.Start();
-            Dispatch(() => { Raise(nameof(LanLocalIp)); LanStatus = $"本机 {LanLocalIp} · 正在发现附近设备…"; });
+            Dispatch(() => { Raise(nameof(LanLocalIp)); LanStatus = "正在发现附近设备…"; });
         }
         catch (Exception ex)
         {
@@ -789,7 +789,7 @@ public sealed class MainViewModel : BindableBase
                 if (result == "ok")
                 {
                     SelectedLanDevice = dev;
-                    LanStatus = $"已连接 {dev.Name}";
+                    LanStatus = "连接成功，可互传文件或远程控制";
                     LanPairing = false;
                     RequestCloseLanDevices?.Invoke();
                     return;
@@ -837,8 +837,8 @@ public sealed class MainViewModel : BindableBase
         foreach (var d in list)
             if (!LanDevices.Any(x => x.Id == d.Id)) LanDevices.Add(d);
         LanStatus = list.Count == 0
-            ? $"本机 {LanLocalIp} · 未发现设备，请确保两端在同一 Wi-Fi"
-            : $"本机 {LanLocalIp} · 发现 {list.Count} 台设备";
+            ? "未发现设备，请确保两端在同一 Wi-Fi"
+            : $"发现 {list.Count} 台设备";
     }
 
     private async Task RefreshLanFilesAsync()
@@ -852,7 +852,7 @@ public sealed class MainViewModel : BindableBase
             var dir = _lanDirStack.Count == 0 ? "" : EncodeLan(string.Join("/", _lanDirStack));
             var files = await _lan.ListRemoteAsync(SelectedLanDevice, dir);
             foreach (var f in files) LanRemoteFiles.Add(f);
-            LanStatus = $"已连接 {SelectedLanDevice.Name} · {files.Count} 项";
+            LanStatus = $"文件 {files.Count} 项";
         }
         catch (Exception ex) { LanStatus = "读取失败：" + ex.Message; }
         finally { LanBusy = false; }
@@ -900,7 +900,7 @@ public sealed class MainViewModel : BindableBase
     {
         if (_lan is null || SelectedLanDevice is null) return;
         IsRemoteControlling = true;
-        LanStatus = $"远控中：{SelectedLanDevice.Name}";
+        LanStatus = "远控中";
         while (IsRemoteControlling && SelectedLanDevice is not null)
         {
             var bytes = await _lan.GetScreenAsync(SelectedLanDevice);

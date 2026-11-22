@@ -142,7 +142,7 @@ public final class LanCore {
         } catch (Throwable ignored) { }
         new Thread(this::discoverLoop, "lan-discover").start();
         new Thread(this::httpLoop, "lan-http").start();
-        status("本机 " + localIp + " · 正在发现附近设备…");
+        status("正在发现附近设备…");
     }
 
     public void stop() {

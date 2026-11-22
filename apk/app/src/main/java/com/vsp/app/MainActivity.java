@@ -1676,7 +1676,7 @@ public class MainActivity extends Activity {
                         lanOps.setVisibility(View.VISIBLE);
                         showLanFiles(true);
                         refreshLanFiles();
-                        if (lanStatusText != null) lanStatusText.setText("已连接 " + d.name);
+                        if (lanStatusText != null) lanStatusText.setText("连接成功，可互传文件或远程控制");
                         if (lanDevicesDialog != null && lanDevicesDialog.isShowing()) lanDevicesDialog.dismiss();
                     });
                     return;
