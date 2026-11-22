@@ -251,6 +251,16 @@ public sealed class LanService : IDisposable
             if (parts.Length < 2) { Respond(stream, 400, "bad request"); return; }
             var target = parts[1];
 
+            var qi = target.IndexOf('?');
+            var path = qi >= 0 ? target[..qi] : target;
+            var qs = ParseQuery(qi >= 0 ? target[(qi + 1)..] : "");
+            if (!qs.TryGetValue("k", out var token) || token != Token)
+            {
+                Respond(stream, 403, "forbidden");
+                return;
+            }
+
+            const long maxBody = 64L * 1024L * 1024L;
             long contentLen = 0;
             string? line;
             while (!string.IsNullOrEmpty(line = await ReadLineAsync(stream)))
@@ -259,7 +269,11 @@ public sealed class LanService : IDisposable
                     && long.TryParse(line[(line.IndexOf(':') + 1)..].Trim(), out var cl))
                     contentLen = cl;
             }
-
+            if (contentLen < 0 || contentLen > maxBody)
+            {
+                Respond(stream, 413, "too large");
+                return;
+            }
             var body = Array.Empty<byte>();
             if (contentLen > 0)
             {
@@ -271,16 +285,6 @@ public sealed class LanService : IDisposable
                     if (n <= 0) break;
                     off += n;
                 }
-            }
-
-            var qi = target.IndexOf('?');
-            var path = qi >= 0 ? target[..qi] : target;
-            var qs = ParseQuery(qi >= 0 ? target[(qi + 1)..] : "");
-
-            if (!qs.TryGetValue("k", out var token) || token != Token)
-            {
-                Respond(stream, 403, "forbidden");
-                return;
             }
 
             switch (path)
@@ -391,8 +395,22 @@ public sealed class LanService : IDisposable
             var rel = DecodePath(pathB64) ?? "";
             var full = Path.GetFullPath(Path.Combine(_shareRoot, rel));
             if (!IsUnderRoot(full) || !File.Exists(full)) { Respond(stream, 404, "missing"); return; }
-            var bytes = await File.ReadAllBytesAsync(full);
-            await RespondBytesAsync(stream, 200, "application/octet-stream", bytes);
+            using var file = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, useAsync: true);
+            await WriteResponseHeadAsync(stream, 200, "application/octet-stream", file.Length);
+            await file.CopyToAsync(stream);
+        }
+        catch { }
+    }
+
+    private static async Task WriteResponseHeadAsync(NetworkStream stream, int code, string type, long length)
+    {
+        try
+        {
+            var reason = code == 200 ? "OK" : "Error";
+            var head = Encoding.ASCII.GetBytes(
+                $"HTTP/1.1 {code} {reason}\r\nContent-Type: {type}\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n");
+            await stream.WriteAsync(head.AsMemory());
+            await stream.FlushAsync();
         }
         catch { }
     }
@@ -616,8 +634,9 @@ public sealed class LanService : IDisposable
     public void DecidePair(string reqId, bool accept)
     {
         if (!_pairRequests.TryGetValue(reqId, out var req)) return;
+        _pairRequests.TryRemove(reqId, out _);
         _pairAnswers[reqId] = accept;
-        if (accept)
+        if (accept && !string.IsNullOrWhiteSpace(req.Name))
         {
             var dev = new LanDevice
             {

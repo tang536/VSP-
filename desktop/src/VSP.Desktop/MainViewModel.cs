@@ -534,6 +534,11 @@ public sealed class MainViewModel : BindableBase
         var title = MediaUtil.SafeFileName(string.IsNullOrWhiteSpace(_result?.Title) ? format.FormatId : _result.Title);
         var req = new DownloadRequest(_result?.WebpageUrl ?? Url, format.FormatId, format.Url, title,
                                       format.IsImage ? "image" : "video", DownloadDir);
+        if (_services.Downloads.Tasks.Any(t =>
+                (t.Status == "running" || t.Status == "paused")
+                && string.Equals(t.Url, req.Url, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(t.FormatId, req.FormatId, StringComparison.OrdinalIgnoreCase)))
+            return;
         var task = _services.Downloads.Start(req);
         _formatTasks[format] = task.TaskId;
         Status = "已加入下载队列：" + title;
@@ -777,7 +782,7 @@ public sealed class MainViewModel : BindableBase
         {
             var sent = await _lan.RequestPairAsync(dev);
             if (!sent) { LanStatus = "连接申请发送失败，请确认对方在线"; LanPairing = false; return; }
-            for (var i = 0; i < 40; i++) // 最多等 40 秒
+            for (var i = 0; i < 120; i++) // 最多等 40 秒
             {
                 await Task.Delay(1000);
                 var result = await _lan.PollPairAsync(dev);

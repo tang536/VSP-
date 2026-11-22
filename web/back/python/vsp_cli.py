@@ -53,9 +53,9 @@ def install_patient_watchdog():
                 if not last:
                     continue
                 idle = now - last
-                if idle >= 10 and (t.get("speed") or "").endswith("/s"):
+                if idle >= 3 and (t.get("speed") or "").endswith("/s"):
                     vsp._set_task(tid, speed="")
-                if idle >= 600:
+                if idle >= 60:
                     vsp.abort_flags[tid] = True
                     vsp._set_task(tid, status="error", speed="",
                                   error="网络长时间无响应，请重试")
@@ -106,7 +106,7 @@ def cmd_download(page_url, format_id, title, out_dir):
             # 源站限流时会一直退避重试，但 vsp 内部为了不被看门狗误杀会持续 _touch，
             # 速度字段于是停在最后一次的旧值——界面上就是「速度还在跳、进度不动」。
             # 这里按「数据多久没涨」自己判，超过 20 秒就不再显示旧速度。
-            if speed and time.time() - last_bytes_at > 20:
+            if speed and time.time() - last_bytes_at > 3:
                 speed = "等待源站重试…"
             state = (me.get("status"), round(float(me.get("progress") or 0), 1),
                      speed, me.get("error") or "", me.get("filename") or "")

@@ -1,13 +1,13 @@
 {
   "platform": "desktop",
-  "version": "1.1.4",
-  "msi": "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.4/Toolbox-Setup-v1.1.4.msi",
-  "mirrors": [
-    "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.4/Toolbox-Setup-v1.1.4.msi",
-    "https://gitee.com/tang-rongqiang/VSP/releases/download/desktop-v1.1.4/Toolbox-Setup-v1.1.4.msi"
-  ],
+  "version": "1.1.5",
+  "msi": "dist/Toolbox-Setup-v1.1.5.msi",
   "size": 88160469,
-  "sha256": "32b9871e2c63f9e6f273c8ce36dbc144b87de1f6a9474eabb27905149d30b29c",
-  "notes": "修复局域网互传与远控：新增连接握手确认（对方同意后才可连接）；附近设备改为按钮弹窗；新增手动 IP 直连；手机端申请 MulticastLock 修复发现不到设备",
-  "page": "https://github.com/tang536/VSP-/releases/tag/desktop-v1.1.4"
+  "sha256": "1bab429d9ce6d6b1bec788120a68f6105a96ec919bbc6d24c2088bd9a6cf461c",
+  "mirrors": [
+    "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.5/Toolbox-Setup-v1.1.5.msi",
+    "https://gitee.com/tang-rongqiang/VSP/releases/download/desktop-v1.1.5/Toolbox-Setup-v1.1.5.msi"
+  ],
+  "notes": "v1.1.5\n\n同步手机 v1.3.5：HLS/UI/远控/队列防御修复，桌面与 App 代码共享引擎。\n",
+  "page": "https://github.com/tang536/VSP-/releases/tag/desktop-v1.1.5"
 }

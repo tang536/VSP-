@@ -12,7 +12,7 @@ public sealed record UpdateInfo(string Version, string DownloadUrl, string PageU
 /// </summary>
 public sealed class UpdateService
 {
-    public const string Version = "1.1.4";
+    public const string Version = "1.1.5";
     private const string GithubApi = "https://api.github.com/repos/tang536/VSP-/releases/latest";
     private const string GiteeApi = "https://gitee.com/api/v5/repos/tang-rongqiang/VSP/releases/latest";
     private const string DesktopIndex = "https://gitee.com/tang-rongqiang/VSP/raw/main/desktop/dist/latest.json";
@@ -288,7 +288,7 @@ public sealed class UpdateService
                 got += read;
                 if (total > 0) progress.Report(got * 100.0 / total);
             }
-            if (total > 0 && got < total * 0.98)
+            if (total > 0 && got < total)
                 throw new Exception($"下载不完整：{MediaUtil.FormatSize(got)} / {MediaUtil.FormatSize(total)}");
             return;
         }
