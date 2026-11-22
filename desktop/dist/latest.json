@@ -1,13 +1,13 @@
 {
   "platform": "desktop",
-  "version": "1.1.3",
-  "msi": "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.3/Toolbox-Setup-v1.1.3.msi",
+  "version": "1.1.4",
+  "msi": "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.4/Toolbox-Setup-v1.1.4.msi",
   "mirrors": [
-    "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.3/Toolbox-Setup-v1.1.3.msi",
-    "https://gitee.com/tang-rongqiang/VSP/releases/download/desktop-v1.1.3/Toolbox-Setup-v1.1.3.msi"
+    "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.4/Toolbox-Setup-v1.1.4.msi",
+    "https://gitee.com/tang-rongqiang/VSP/releases/download/desktop-v1.1.4/Toolbox-Setup-v1.1.4.msi"
   ],
-  "size": 88152277,
-  "sha256": "2a38dbbdfd763c27580262b960480ebe4e10d865a403d23b7718e9f3104dfb20",
-  "notes": "修复局域网互传与远控：HTTP 服务改用无权限限制的监听方式，电脑端可被手机稳定发现并连接；手机端广播兼容 Android 10+；截图缩放防内存溢出",
-  "page": "https://github.com/tang536/VSP-/releases/tag/desktop-v1.1.3"
+  "size": 88160469,
+  "sha256": "32b9871e2c63f9e6f273c8ce36dbc144b87de1f6a9474eabb27905149d30b29c",
+  "notes": "修复局域网互传与远控：新增连接握手确认（对方同意后才可连接）；附近设备改为按钮弹窗；新增手动 IP 直连；手机端申请 MulticastLock 修复发现不到设备",
+  "page": "https://github.com/tang536/VSP-/releases/tag/desktop-v1.1.4"
 }

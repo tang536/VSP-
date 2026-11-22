@@ -330,6 +330,24 @@ public sealed class MainViewModel : BindableBase
     public ICommand LanTapCommand { get; }
     public ICommand LanSwipeCommand { get; }
     public ICommand LanKeyCommand { get; }
+    public ICommand OpenLanDevicesCommand { get; }
+    public ICommand LanConnectCommand { get; }
+    public ICommand LanAddManualCommand { get; }
+    public ICommand LanAcceptPairCommand { get; }
+    public ICommand LanRejectPairCommand { get; }
+    /// <summary>手动输入 IP 的文本框内容（设备弹窗绑定）。</summary>
+    public string LanManualIp { get => _lanManualIp; set => Set(ref _lanManualIp, value); }
+    private string _lanManualIp = "";
+    /// <summary>收到的连接申请（弹窗显示）。</summary>
+    public LanPairRequest? IncomingPair { get => _incomingPair; private set => Set(ref _incomingPair, value); }
+    private LanPairRequest? _incomingPair;
+    /// <summary>是否正在等待对方同意我的连接申请。</summary>
+    public bool LanPairing { get => _lanPairing; private set => Set(ref _lanPairing, value); }
+    private bool _lanPairing;
+    /// <summary>UI 事件：请求打开「附近设备」弹窗。</summary>
+    public event Action? RequestOpenLanDevices;
+    /// <summary>UI 事件：收到连接申请，请求弹窗确认。</summary>
+    public event Action? RequestPairDialog;
 
     public bool IsHome => _page == 0;
     public bool IsLocal => _page == 1;
@@ -387,6 +405,11 @@ public sealed class MainViewModel : BindableBase
         LanTapCommand = new RelayCommand(p => _ = LanTapAsync(p));
         LanSwipeCommand = new RelayCommand(p => _ = LanSwipeAsync(p));
         LanKeyCommand = new RelayCommand(p => _ = LanSendKeyAsync(p?.ToString() ?? ""));
+        OpenLanDevicesCommand = new RelayCommand(() => RequestOpenLanDevices?.Invoke());
+        LanConnectCommand = new RelayCommand(p => { if (p is LanDevice d) _ = LanConnectAsync(d); });
+        LanAddManualCommand = new RelayCommand(() => _ = LanAddManualAsync());
+        LanAcceptPairCommand = new RelayCommand(() => DecideIncomingPair(true));
+        LanRejectPairCommand = new RelayCommand(() => DecideIncomingPair(false));
         StartLan();
 
         _services.Downloads.Tasks.CollectionChanged += (_, _) =>
@@ -729,6 +752,12 @@ public sealed class MainViewModel : BindableBase
         {
             _lan = new LanService(Environment.MachineName, DownloadDir);
             _lan.DevicesChanged += () => Dispatch(() => RefreshLanDevices());
+            _lan.PairRequested += req => Dispatch(() =>
+            {
+                IncomingPair = req;
+                LanStatus = $"{req.Name} 请求连接，请在弹窗中选择是否同意";
+                RequestPairDialog?.Invoke();
+            });
             _lan.Start();
             Dispatch(() => { Raise(nameof(LanLocalIp)); LanStatus = $"本机 {LanLocalIp} · 正在发现附近设备…"; });
         }
@@ -737,6 +766,61 @@ public sealed class MainViewModel : BindableBase
             Dispatch(() => LanStatus = "局域网服务启动失败：" + ex.Message);
         }
     }
+
+    /// <summary>向选中设备发起连接申请，轮询对方是否同意，同意后才真正建立连接。</summary>
+    private async Task LanConnectAsync(LanDevice dev)
+    {
+        if (_lan is null) return;
+        LanPairing = true;
+        LanStatus = $"正在请求连接 {dev.Name}，等待对方同意…";
+        try
+        {
+            var sent = await _lan.RequestPairAsync(dev);
+            if (!sent) { LanStatus = "连接申请发送失败，请确认对方在线"; LanPairing = false; return; }
+            for (var i = 0; i < 40; i++) // 最多等 40 秒
+            {
+                await Task.Delay(1000);
+                var result = await _lan.PollPairAsync(dev);
+                if (result == "ok")
+                {
+                    SelectedLanDevice = dev;
+                    LanStatus = $"已连接 {dev.Name}";
+                    LanPairing = false;
+                    RequestCloseLanDevices?.Invoke();
+                    return;
+                }
+                if (result == "no") { LanStatus = "对方拒绝了连接申请"; LanPairing = false; return; }
+            }
+            LanStatus = "对方未响应，连接超时";
+        }
+        catch (Exception ex) { LanStatus = "连接失败：" + ex.Message; }
+        LanPairing = false;
+    }
+
+    /// <summary>手动按 IP 添加设备（广播发现不可用时兜底）。</summary>
+    private async Task LanAddManualAsync()
+    {
+        if (_lan is null || string.IsNullOrWhiteSpace(LanManualIp)) return;
+        LanStatus = "正在连接 " + LanManualIp + "…";
+        var (ok, msg) = await _lan.AddManualDeviceAsync(LanManualIp);
+        LanStatus = msg;
+        if (ok) LanManualIp = "";
+    }
+
+    private void DecideIncomingPair(bool accept)
+    {
+        if (_lan is null || IncomingPair is null) return;
+        var name = IncomingPair.Name;
+        _lan.DecidePair(IncomingPair.Id, accept);
+        IncomingPair = null;
+        LanStatus = accept ? $"已同意 {name} 的连接申请" : $"已拒绝 {name} 的连接申请";
+        RequestClosePairDialog?.Invoke();
+    }
+
+    /// <summary>UI 事件：连接成功后关闭「附近设备」弹窗。</summary>
+    public event Action? RequestCloseLanDevices;
+    /// <summary>UI 事件：审批完成后关闭连接申请弹窗。</summary>
+    public event Action? RequestClosePairDialog;
 
     private void RefreshLanDevices()
     {

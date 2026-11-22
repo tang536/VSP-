@@ -70,29 +70,33 @@
                 android:textSize="12sp"
                 android:layout_marginTop="2dp" />
 
-            <!-- 附近设备 -->
-            <TextView
-                android:layout_width="wrap_content"
+            <!-- 附近设备：按钮点击后弹窗展示 -->
+            <Button
+                android:id="@+id/lan_find_devices"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="附近设备"
-                android:tag="dim"
-                android:textSize="13sp"
-                android:layout_marginTop="18dp"
-                android:layout_marginBottom="8dp" />
+                android:text="查找附近设备 / 手动连接"
+                android:textSize="14sp"
+                android:layout_marginTop="18dp" />
+            <ProgressBar
+                android:id="@+id/lan_pairing"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:indeterminate="true"
+                android:visibility="gone"
+                android:layout_marginTop="8dp" />
+            <!-- 兼容旧代码引用：隐藏占位 -->
             <LinearLayout
                 android:id="@+id/lan_devices"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
+                android:layout_height="0dp"
+                android:visibility="gone"
                 android:orientation="vertical" />
             <TextView
                 android:id="@+id/lan_no_devices"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="未发现设备，请确保两端连接同一 Wi-Fi，且都已打开本功能"
-                android:tag="dim"
-                android:textSize="12sp"
-                android:gravity="center"
-                android:padding="18dp" />
+                android:layout_height="0dp"
+                android:visibility="gone" />
 
             <!-- 已选设备操作区 -->
             <LinearLayout

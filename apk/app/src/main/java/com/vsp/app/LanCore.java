@@ -74,9 +74,19 @@ public final class LanCore {
         }
     }
 
+    public static final class PairRequest {
+        public final String id, name, kind, ip;
+        public final int port;
+        public PairRequest(String id, String name, String kind, String ip, int port) {
+            this.id = id; this.name = name; this.kind = kind; this.ip = ip; this.port = port;
+        }
+    }
+
     public interface Callback {
         void onDevicesChanged();
         void onStatus(String text);
+        /** 对方发来连接申请，UI 应弹窗让用户选择同意/拒绝 */
+        default void onPairRequest(PairRequest req) { }
     }
 
     private final Context ctx;
@@ -87,6 +97,9 @@ public final class LanCore {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService pool = Executors.newFixedThreadPool(8);
     private final Map<String, Device> devices = new ConcurrentHashMap<>();
+    private final Map<String, PairRequest> pairRequests = new ConcurrentHashMap<>();
+    private final Map<String, Boolean> pairAnswers = new ConcurrentHashMap<>();
+    private android.net.wifi.WifiManager.MulticastLock multicastLock;
 
     private volatile boolean running = false;
     private DatagramSocket udp;
@@ -116,6 +129,17 @@ public final class LanCore {
         if (running) return;
         running = true;
         localIp = findPrivateIp();
+        // Android 必须持有 MulticastLock 才能收发 UDP 广播/组播，
+        // 否则多数机型（尤其息屏后）静默丢弃广播包，导致两端互相发现不了。
+        try {
+            android.net.wifi.WifiManager wm = (android.net.wifi.WifiManager)
+                    ctx.getSystemService(Context.WIFI_SERVICE);
+            if (wm != null) {
+                multicastLock = wm.createMulticastLock("toolbox-lan");
+                multicastLock.setReferenceCounted(false);
+                multicastLock.acquire();
+            }
+        } catch (Throwable ignored) { }
         new Thread(this::discoverLoop, "lan-discover").start();
         new Thread(this::httpLoop, "lan-http").start();
         status("本机 " + localIp + " · 正在发现附近设备…");
@@ -125,6 +149,7 @@ public final class LanCore {
         running = false;
         try { if (udp != null) udp.close(); } catch (Throwable ignored) { }
         try { if (http != null) http.close(); } catch (Throwable ignored) { }
+        try { if (multicastLock != null && multicastLock.isHeld()) multicastLock.release(); } catch (Throwable ignored) { }
         stopProjectionService();
         pool.shutdownNow();
     }
@@ -295,6 +320,28 @@ public final class LanCore {
                 byte[] shot = captureScreen();
                 if (shot == null) respond(out, 503, "text/plain", "no projection".getBytes());
                 else respond(out, 200, "image/jpeg", shot);
+            } else if ("/pair".equals(path)) {
+                // 对方请求连接：记录申请并通知 UI 弹窗
+                String rid = nullToEmpty(uri.getQueryParameter("id"));
+                String rip = nullToEmpty(uri.getQueryParameter("ip"));
+                if (!rid.isEmpty() && isPrivate(rip)) {
+                    PairRequest req = new PairRequest(rid, nullToEmpty(uri.getQueryParameter("n")),
+                            nullToEmpty(uri.getQueryParameter("t")), rip,
+                            parseInt(uri.getQueryParameter("p"), HTTP_PORT));
+                    pairRequests.put(rid, req);
+                    pairAnswers.remove(rid);
+                    try { callback.onPairRequest(req); } catch (Throwable ignored) { }
+                    respond(out, 200, "text/plain", "ok".getBytes());
+                } else {
+                    respond(out, 400, "text/plain", "bad request".getBytes());
+                }
+            } else if ("/pair-result".equals(path)) {
+                // 发起方轮询：我是否已同意/拒绝它的申请
+                String rid = nullToEmpty(uri.getQueryParameter("id"));
+                Boolean ans = pairAnswers.get(rid);
+                String result = ans == null ? "wait" : (ans ? "ok" : "no");
+                respond(out, 200, "text/plain", result.getBytes(StandardCharsets.UTF_8));
+                if (!"wait".equals(result)) { pairAnswers.remove(rid); pairRequests.remove(rid); }
             } else if ("/input".equals(path)) {
                 boolean ok = applyInput(body);
                 respond(out, ok ? 200 : 503, "text/plain", (ok ? "ok" : "no accessibility").getBytes());
@@ -409,6 +456,54 @@ public final class LanCore {
     // ---------------- 客户端（主控 / 传文件） ----------------
 
     public String hello(Device d) { return httpGet(d, "/hello?k=" + TOKEN); }
+
+    // ---------------- 连接握手 + 手动直连 ----------------
+
+    /** 按 IP 手动添加设备（发现不可用时兜底），会校验 hello。 */
+    public Device addManualDevice(String ipText) {
+        String ip = nullToEmpty(ipText).trim();
+        if (!isPrivate(ip)) return null;
+        Device probe = new Device("manual-" + ip, ip, "pc", ip, HTTP_PORT);
+        String h = hello(probe);
+        if (h == null) return null;
+        String[] parts = h.split("\\|");
+        String kind = parts.length > 1 ? parts[1] : "pc";
+        String name = parts.length > 0 && !parts[0].isEmpty() ? parts[0] : ip;
+        Device d = new Device("manual-" + ip, name, kind, ip, HTTP_PORT);
+        devices.put(d.id, d);
+        changed();
+        return d;
+    }
+
+    /** 向对方发起连接申请，携带本机信息；对方 UI 会弹窗确认。 */
+    public boolean requestPair(Device d) {
+        try {
+            String myIp = nullToEmpty(localIp).isEmpty() ? findPrivateIp() : localIp;
+            String url = base(d) + "/pair?k=" + TOKEN + "&id=" + urlEnc(deviceId)
+                    + "&n=" + urlEnc(deviceName) + "&t=android&p=" + HTTP_PORT + "&ip=" + urlEnc(myIp);
+            return "ok".equals(nullToEmpty(httpGetRaw(url)).trim());
+        } catch (Throwable t) { return false; }
+    }
+
+    /** 轮询对方是否已同意我的申请：wait / ok / no */
+    public String pollPair(Device d) {
+        try {
+            String r = httpGet(d, "/pair-result?k=" + TOKEN + "&id=" + urlEnc(deviceId));
+            return nullToEmpty(r).trim();
+        } catch (Throwable t) { return "wait"; }
+    }
+
+    /** 本地审批对方发来的申请；同意则把对方登记为设备。 */
+    public void decidePair(String reqId, boolean accept) {
+        PairRequest req = pairRequests.get(reqId);
+        if (req == null) return;
+        pairAnswers.put(reqId, accept);
+        if (accept) {
+            Device d = new Device(req.id, req.name, req.kind, req.ip, req.port);
+            devices.put(req.id, d);
+            changed();
+        }
+    }
 
     public List<FileEntry> listRemote(Device d, String dirB64) {
         List<FileEntry> list = new ArrayList<>();
@@ -594,4 +689,7 @@ public final class LanCore {
     }
     private static String urlEnc(String s) throws java.io.IOException { return URLEncoder.encode(s, "UTF-8"); }
     private static String nullToEmpty(String s) { return s == null ? "" : s; }
+    private static int parseInt(String s, int def) {
+        try { return Integer.parseInt(s); } catch (Throwable t) { return def; }
+    }
 }

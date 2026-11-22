@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="20dp">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="确保两端连接同一 Wi-Fi。发现不到时可用对方的本机 IP 直接连接。"
+        android:tag="dim"
+        android:textSize="12sp"
+        android:layout_marginBottom="12dp" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:maxHeight="320dp">
+        <LinearLayout
+            android:id="@+id/ldd_list"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+    </ScrollView>
+
+    <TextView
+        android:id="@+id/ldd_empty"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="未发现设备，请在下方输入对方 IP 连接"
+        android:tag="dim"
+        android:textSize="12sp"
+        android:gravity="center"
+        android:padding="16dp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="手动连接（对方 IP）"
+        android:tag="dim"
+        android:textSize="12sp"
+        android:layout_marginTop="14dp"
+        android:layout_marginBottom="6dp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+        <EditText
+            android:id="@+id/ldd_ip"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:hint="192.168.1.5"
+            android:inputType="text"
+            android:textSize="14sp"
+            android:singleLine="true" />
+        <Button
+            android:id="@+id/ldd_manual"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="连接"
+            android:textSize="13sp"
+            android:layout_marginStart="8dp" />
+    </LinearLayout>
+</LinearLayout>

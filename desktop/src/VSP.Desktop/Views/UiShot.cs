@@ -67,7 +67,7 @@ internal static class UiShot
         }
         vm.ClosePreviewCommand.Execute(null);
 
-        // 局域网远控页：选中已发现的设备并进入远控，验收预览画面与控制按钮
+        // 局域网互传与远控页：验收引导页 + 附近设备弹窗
         vm.ShowLanCommand.Execute(null);
         await Settle();
         vm.IsDarkTheme = true;
@@ -76,13 +76,13 @@ internal static class UiShot
             Name = "示例手机", Ip = "192.168.1.20", Kind = "android", LastSeen = DateTime.Now
         };
         if (!vm.LanDevices.Contains(dev)) vm.LanDevices.Add(dev);
-        vm.SelectedLanDevice = dev;
-        await Task.Delay(60);
-        vm.LanStartControlCommand.Execute(null);
-        await Task.Delay(60);
         Save(window, Path.Combine(dir, "6b-lan-control.png"), 1.0);
-        vm.LanStopControlCommand.Execute(null);
-        vm.SelectedLanDevice = null;
+        // 设备弹窗
+        var devicesWin = new LanDevicesWindow(vm);
+        devicesWin.Show();
+        await Settle();
+        Save(devicesWin, Path.Combine(dir, "6c-lan-devices.png"), 1.0);
+        devicesWin.Close();
 
         // 历史解析弹窗
         var history = new HistoryWindow(vm);

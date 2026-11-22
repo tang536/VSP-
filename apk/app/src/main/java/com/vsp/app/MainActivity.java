@@ -202,6 +202,10 @@ public class MainActivity extends Activity {
     private LanCore lan;
     private LinearLayout lanDevicesBox, lanFileList;
     private View lanNoDevices, lanOps, lanFileBar, lanControlPanel;
+    private AlertDialog lanDevicesDialog;
+    private LinearLayout lanDialogList;
+    private TextView lanDialogEmpty;
+    private android.widget.ProgressBar lanPairingBar;
     private TextView lanStatusText, lanLocalIpText, lanSelectedName, lanBreadcrumbText;
     private ImageView lanScreen;
     private LanCore.Device lanSelected;
@@ -1500,6 +1504,9 @@ public class MainActivity extends Activity {
         lan = new LanCore(this, share, android.os.Build.MODEL, new LanCore.Callback() {
             @Override public void onDevicesChanged() { renderLanDevices(); }
             @Override public void onStatus(String text) { if (lanStatusText != null) lanStatusText.setText(text); }
+            @Override public void onPairRequest(LanCore.PairRequest req) {
+                ui.post(() -> showPairRequestDialog(req));
+            }
         });
         lan.start();
         if (lanLocalIpText != null) lanLocalIpText.setText("本机地址：" + lan.getLocalIp());
@@ -1508,6 +1515,11 @@ public class MainActivity extends Activity {
     private void bindLan() {
         lanDevicesBox = (LinearLayout) pageLan.findViewById(R.id.lan_devices);
         lanNoDevices = pageLan.findViewById(R.id.lan_no_devices);
+        lanPairingBar = pageLan.findViewById(R.id.lan_pairing);
+        pageLan.findViewById(R.id.lan_find_devices).setOnClickListener(v -> {
+            ensureLan();
+            showLanDevicesDialog();
+        });
         lanOps = pageLan.findViewById(R.id.lan_ops);
         lanFileBar = pageLan.findViewById(R.id.lan_file_bar);
         lanFileList = (LinearLayout) pageLan.findViewById(R.id.lan_file_list);
@@ -1583,23 +1595,115 @@ public class MainActivity extends Activity {
 
     private void renderLanDevices() {
         if (lan == null) return;
-        lanDevicesBox.removeAllViews();
+        // 设备列表改为弹窗展示；若弹窗正打开则刷新其内容
+        if (lanDevicesDialog != null && lanDevicesDialog.isShowing()) fillLanDialogList();
+    }
+
+    /** 弹出「附近设备」对话框：设备列表 + 手动 IP 输入 + 连接（走握手）。 */
+    private void showLanDevicesDialog() {
+        if (lan == null) return;
+        View view = getLayoutInflater().inflate(R.layout.dialog_lan_devices, null);
+        lanDialogList = view.findViewById(R.id.ldd_list);
+        lanDialogEmpty = view.findViewById(R.id.ldd_empty);
+        final android.widget.EditText ipEdit = view.findViewById(R.id.ldd_ip);
+        final android.widget.Button btnManual = view.findViewById(R.id.ldd_manual);
+        btnManual.setOnClickListener(v -> {
+            String ip = ipEdit.getText().toString().trim();
+            if (ip.isEmpty()) { Toast.makeText(this, "请输入对方 IP", Toast.LENGTH_SHORT).show(); return; }
+            final LanCore.Device dev = lan.addManualDevice(ip);
+            if (dev == null) { Toast.makeText(this, "连接失败：请确认对方在线且在同一 Wi-Fi", Toast.LENGTH_SHORT).show(); return; }
+            Toast.makeText(this, "已找到 " + dev.name + "，正在请求连接…", Toast.LENGTH_SHORT).show();
+            connectLanDevice(dev);
+        });
+        fillLanDialogList();
+        lanDevicesDialog = new AlertDialog.Builder(this)
+                .setTitle("附近设备")
+                .setView(view)
+                .setNegativeButton("关闭", null)
+                .create();
+        lanDevicesDialog.show();
+    }
+
+    private void fillLanDialogList() {
+        if (lan == null || lanDialogList == null) return;
+        lanDialogList.removeAllViews();
         java.util.List<LanCore.Device> list = lan.getDevices();
-        lanNoDevices.setVisibility(list.isEmpty() ? View.VISIBLE : View.GONE);
-        for (LanCore.Device d : list) {
-            View row = getLayoutInflater().inflate(R.layout.item_lan_device, lanDevicesBox, false);
+        lanDialogEmpty.setVisibility(list.isEmpty() ? View.VISIBLE : View.GONE);
+        for (final LanCore.Device d : list) {
+            View row = getLayoutInflater().inflate(R.layout.item_lan_device, lanDialogList, false);
             ((TextView) row.findViewById(R.id.ld_name)).setText(d.name);
             ((TextView) row.findViewById(R.id.ld_ip)).setText(d.ip + (d.isAndroid() ? " · 手机" : " · 电脑"));
-            row.setOnClickListener(v -> {
-                lanSelected = d;
-                lanDirStack.clear();
-                lanSelectedName.setText("已连接：" + d.name);
-                lanOps.setVisibility(View.VISIBLE);
-                showLanFiles(true);
-                refreshLanFiles();
-            });
-            lanDevicesBox.addView(row);
+            row.setOnClickListener(v -> connectLanDevice(d));
+            lanDialogList.addView(row);
         }
+    }
+
+    /** 发起握手：请求连接 → 轮询对方是否同意 → 同意后建立连接。 */
+    private void connectLanDevice(final LanCore.Device d) {
+        if (lanPairingBar != null) lanPairingBar.setVisibility(View.VISIBLE);
+        if (lanStatusText != null) lanStatusText.setText("正在请求连接 " + d.name + "，等待对方同意…");
+        new Thread(() -> {
+            boolean sent = lan.requestPair(d);
+            if (!sent) {
+                ui.post(() -> {
+                    if (lanPairingBar != null) lanPairingBar.setVisibility(View.GONE);
+                    if (lanStatusText != null) lanStatusText.setText("连接申请发送失败，请确认对方在线");
+                });
+                return;
+            }
+            for (int i = 0; i < 40; i++) {
+                try { Thread.sleep(1000); } catch (InterruptedException ignored) { break; }
+                String r = lan.pollPair(d);
+                if ("ok".equals(r)) {
+                    ui.post(() -> {
+                        if (lanPairingBar != null) lanPairingBar.setVisibility(View.GONE);
+                        lanSelected = d;
+                        lanDirStack.clear();
+                        lanSelectedName.setText("已连接：" + d.name);
+                        lanOps.setVisibility(View.VISIBLE);
+                        showLanFiles(true);
+                        refreshLanFiles();
+                        if (lanStatusText != null) lanStatusText.setText("已连接 " + d.name);
+                        if (lanDevicesDialog != null && lanDevicesDialog.isShowing()) lanDevicesDialog.dismiss();
+                    });
+                    return;
+                }
+                if ("no".equals(r)) {
+                    ui.post(() -> {
+                        if (lanPairingBar != null) lanPairingBar.setVisibility(View.GONE);
+                        if (lanStatusText != null) lanStatusText.setText("对方拒绝了连接申请");
+                        Toast.makeText(this, "对方拒绝了连接申请", Toast.LENGTH_SHORT).show();
+                    });
+                    return;
+                }
+            }
+            ui.post(() -> {
+                if (lanPairingBar != null) lanPairingBar.setVisibility(View.GONE);
+                if (lanStatusText != null) lanStatusText.setText("对方未响应，连接超时");
+            });
+        }, "lan-pair").start();
+    }
+
+    /** 收到对方连接申请：弹窗让用户选择同意/拒绝。 */
+    private void showPairRequestDialog(final LanCore.PairRequest req) {
+        String type = "android".equalsIgnoreCase(req.kind) ? "手机" : "电脑";
+        new AlertDialog.Builder(this)
+                .setTitle("收到连接申请")
+                .setMessage(req.name + "（" + type + " · " + req.ip + "）请求连接本设备，是否同意？\n同意后将允许互传文件与查看/控制屏幕。")
+                .setPositiveButton("同意连接", (dialog, which) -> {
+                    if (lan != null) {
+                        lan.decidePair(req.id, true);
+                        if (lanStatusText != null) lanStatusText.setText("已同意 " + req.name + " 的连接申请");
+                    }
+                })
+                .setNegativeButton("拒绝", (dialog, which) -> {
+                    if (lan != null) {
+                        lan.decidePair(req.id, false);
+                        if (lanStatusText != null) lanStatusText.setText("已拒绝 " + req.name + " 的连接申请");
+                    }
+                })
+                .setCancelable(false)
+                .show();
     }
 
     private void showLanFiles(boolean show) {

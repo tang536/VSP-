@@ -1,3 +1,4 @@
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 
@@ -7,6 +8,7 @@ public partial class LanView : UserControl
 {
     private bool _pressing;
     private double _downX, _downY;
+    private MainViewModel? _bound;
 
     public LanView()
     {
@@ -14,6 +16,48 @@ public partial class LanView : UserControl
         RemoteScreen.PointerPressed += OnScreenPressed;
         RemoteScreen.PointerMoved += OnScreenMoved;
         RemoteScreen.PointerReleased += OnScreenReleased;
+        AttachedToVisualTree += (_, _) => BindEvents();
+        DetachedFromVisualTree += (_, _) => UnbindEvents();
+    }
+
+    private void BindEvents()
+    {
+        if (DataContext is not MainViewModel vm || ReferenceEquals(vm, _bound)) return;
+        UnbindEvents();
+        _bound = vm;
+        vm.RequestOpenLanDevices += OpenDevicesWindow;
+        vm.RequestPairDialog += OpenPairWindow;
+    }
+
+    private void UnbindEvents()
+    {
+        if (_bound is null) return;
+        _bound.RequestOpenLanDevices -= OpenDevicesWindow;
+        _bound.RequestPairDialog -= OpenPairWindow;
+        _bound = null;
+    }
+
+    private static Window? OwnerWindow() =>
+        Application.Current?.ApplicationLifetime is Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime lifetime
+            ? lifetime.MainWindow : null;
+
+    private void OpenDevicesWindow()
+    {
+        var owner = OwnerWindow();
+        if (owner is null) return;
+        // 避免重复打开
+        foreach (var w in owner.OwnedWindows)
+            if (w is LanDevicesWindow) { w.Activate(); return; }
+        new LanDevicesWindow(_bound!).Show(owner);
+    }
+
+    private void OpenPairWindow()
+    {
+        var owner = OwnerWindow();
+        if (owner is null) return;
+        foreach (var w in owner.OwnedWindows)
+            if (w is LanPairWindow) { w.Activate(); return; }
+        new LanPairWindow(_bound!).Show(owner);
     }
 
     private bool TryGetPoint(PointerEventArgs e, out double x, out double y)

@@ -35,6 +35,17 @@ public sealed class LanFileEntry
     public long Size { get; set; }
 }
 
+/// <summary>收到的连接申请（待对方同意）。</summary>
+public sealed class LanPairRequest
+{
+    public string Id { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string Kind { get; set; } = "android";
+    public string Ip { get; set; } = "";
+    public int Port { get; set; }
+    public DateTime Time { get; set; } = DateTime.Now;
+}
+
 /// <summary>
 /// 局域网直连服务：UDP 广播发现 + 内嵌 HTTP 服务（文件互传、屏幕查看、输入注入）。
 /// 两端协议完全一致，全部走局域网 IP，不经公网服务器、不消耗移动流量。
@@ -55,16 +66,21 @@ public sealed class LanService : IDisposable
     private readonly string _deviceName;
     private readonly string _shareRoot;
     private readonly ConcurrentDictionary<string, LanDevice> _devices = new();
-    private readonly HttpClient _client = new() { Timeout = TimeSpan.FromSeconds(20) };
+    private readonly ConcurrentDictionary<string, LanPairRequest> _pairRequests = new();
+    private readonly ConcurrentDictionary<string, bool> _pairAnswers = new();
+    private readonly HttpClient _client = new() { Timeout = TimeSpan.FromSeconds(8) };
     private UdpClient? _udp;
     private TcpListener? _tcp;
     private CancellationTokenSource? _cts;
+    private string DeviceId => _deviceId;
 
     public string LocalIp { get; private set; } = "127.0.0.1";
     public string ShareRoot => _shareRoot;
     public IReadOnlyList<LanDevice> Devices => _devices.Values
         .OrderBy(d => d.IsAndroid).ThenBy(d => d.Name).ToList();
     public event Action? DevicesChanged;
+    /// <summary>收到一台设备发起的连接申请，UI 应弹窗让用户选择同意/拒绝。</summary>
+    public event Action<LanPairRequest>? PairRequested;
 
     public LanService(string deviceName, string shareRoot)
     {
@@ -275,6 +291,36 @@ public sealed class LanService : IDisposable
                 case "/ul": await ReceiveUploadAsync(stream, qs.GetValueOrDefault("name"), body); break;
                 case "/screen": await ServeScreenAsync(stream); break;
                 case "/input": await ReceiveInputAsync(stream, body); break;
+                case "/pair":
+                    {
+                        // 对方请求连接：记录申请并通知 UI 弹窗；附带把对方登记为设备，便于同意后直接操作。
+                        var req = new LanPairRequest
+                        {
+                            Id = qs.GetValueOrDefault("id") ?? "",
+                            Name = qs.GetValueOrDefault("n") ?? "设备",
+                            Kind = qs.GetValueOrDefault("t") ?? "android",
+                            Ip = qs.GetValueOrDefault("ip") ?? "",
+                            Port = int.TryParse(qs.GetValueOrDefault("p"), out var pp) ? pp : HttpPort,
+                        };
+                        if (!string.IsNullOrEmpty(req.Id) && IsPrivateOrLoopback(req.Ip))
+                        {
+                            _pairRequests[req.Id] = req;
+                            _pairAnswers.TryRemove(req.Id, out _);
+                            try { PairRequested?.Invoke(req); } catch { }
+                            Respond(stream, 200, "ok");
+                        }
+                        else Respond(stream, 400, "bad request");
+                        break;
+                    }
+                case "/pair-result":
+                    {
+                        // 发起方轮询：我是否已同意/拒绝它的申请。
+                        var rid = qs.GetValueOrDefault("id") ?? "";
+                        var answer = _pairAnswers.TryGetValue(rid, out var a) ? (a ? "ok" : "no") : "wait";
+                        Respond(stream, 200, answer);
+                        if (answer != "wait") { _pairAnswers.TryRemove(rid, out _); _pairRequests.TryRemove(rid, out _); }
+                        break;
+                    }
                 default: Respond(stream, 404, "not found"); break;
             }
         }
@@ -519,6 +565,78 @@ public sealed class LanService : IDisposable
             return resp.IsSuccessStatusCode;
         }
         catch { return false; }
+    }
+
+    // ---------------- 连接握手 + 手动直连 ----------------
+
+    /// <summary>手动按 IP 添加设备（广播发现不可用时兜底；会校验 hello）。</summary>
+    public async Task<(bool ok, string msg)> AddManualDeviceAsync(string ipText)
+    {
+        var ip = ipText.Trim();
+        if (string.IsNullOrEmpty(ip) || !IsPrivateOrLoopback(ip))
+            return (false, "请输入有效的局域网 IP（192.168.* / 10.* / 172.16~31.*）");
+        var dev = new LanDevice { Id = "manual-" + ip, Name = ip, Kind = "pc", Ip = ip, Port = HttpPort, LastSeen = DateTime.Now };
+        var hello = await HelloAsync(dev);
+        if (hello is null) return (false, "连接失败：请确认对方已打开本功能，且未开启 AP 隔离/防火墙拦截");
+        var parts = hello.Split('|');
+        if (parts.Length > 1) dev.Kind = parts[1];
+        if (parts.Length > 0 && !string.IsNullOrWhiteSpace(parts[0])) dev.Name = parts[0];
+        dev.Id = "manual-" + ip; // 保持固定，避免被超时剔除后又与发现的设备冲突
+        _devices[dev.Id] = dev;
+        DevicesChanged?.Invoke();
+        return (true, $"已添加：{dev.Name}（{ip}）");
+    }
+
+    /// <summary>向对方发起连接申请，携带本机信息；对方 UI 会弹窗确认。</summary>
+    public async Task<bool> RequestPairAsync(LanDevice dev)
+    {
+        try
+        {
+            var myIp = GetLocalPrivateIps().FirstOrDefault() ?? LocalIp;
+            var url = $"http://{dev.Ip}:{dev.Port}/pair?k={Token}&id={Uri.EscapeDataString(DeviceId)}"
+                      + $"&n={Uri.EscapeDataString(_deviceName)}&t=pc&p={HttpPort}&ip={Uri.EscapeDataString(myIp)}";
+            var r = await _client.GetStringAsync(url);
+            return r.Trim() == "ok";
+        }
+        catch { return false; }
+    }
+
+    /// <summary>轮询对方是否已同意我的申请：wait / ok / no。</summary>
+    public async Task<string> PollPairAsync(LanDevice dev)
+    {
+        try
+        {
+            var r = await _client.GetStringAsync($"http://{dev.Ip}:{dev.Port}/pair-result?k={Token}&id={Uri.EscapeDataString(DeviceId)}");
+            return r.Trim();
+        }
+        catch { return "wait"; }
+    }
+
+    /// <summary>本地审批对方发来的连接申请。同意则同时把对方登记为设备。</summary>
+    public void DecidePair(string reqId, bool accept)
+    {
+        if (!_pairRequests.TryGetValue(reqId, out var req)) return;
+        _pairAnswers[reqId] = accept;
+        if (accept)
+        {
+            var dev = new LanDevice
+            {
+                Id = req.Id, Name = req.Name, Kind = req.Kind,
+                Ip = req.Ip, Port = req.Port, LastSeen = DateTime.Now,
+            };
+            _devices[req.Id] = dev;
+            DevicesChanged?.Invoke();
+        }
+    }
+
+    private static bool IsPrivateOrLoopback(string ipText)
+    {
+        if (System.Net.IPAddress.TryParse(ipText, out var ip))
+        {
+            if (System.Net.IPAddress.IsLoopback(ip)) return true;
+            return IsPrivate(ip);
+        }
+        return false;
     }
 
     // ---------------- 工具 ----------------
