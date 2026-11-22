@@ -207,6 +207,10 @@ public class MainActivity extends Activity {
     private android.widget.ProgressBar lanPairingBar;
     private TextView lanStatusText, lanLocalIpText, lanSelectedName, lanBreadcrumbText;
     private ImageView lanScreen;
+    private ImageView lanScreenFull;
+    private FrameLayout lanFullscreenHost;
+    private android.graphics.Bitmap lanScreenBitmap;
+    private boolean lanFullscreen = false;
     private LanCore.Device lanSelected;
     private final java.util.Stack<String> lanDirStack = new java.util.Stack<>();
     private boolean lanControlling = false;
@@ -1533,6 +1537,10 @@ public class MainActivity extends Activity {
         lanSelectedName = pageLan.findViewById(R.id.lan_selected_name);
         lanBreadcrumbText = pageLan.findViewById(R.id.lan_breadcrumb);
         lanScreen = pageLan.findViewById(R.id.lan_screen);
+        lanScreenFull = pageLan.findViewById(R.id.lan_screen_full);
+        lanFullscreenHost = pageLan.findViewById(R.id.lan_fullscreen_host);
+        pageLan.findViewById(R.id.lan_fullscreen).setOnClickListener(v -> setLanFullscreen(true));
+        pageLan.findViewById(R.id.lan_fullscreen_exit).setOnClickListener(v -> setLanFullscreen(false));
 
         pageLan.findViewById(R.id.lan_back).setOnClickListener(v -> switchPage(PAGE_ME));
         pageLan.findViewById(R.id.lan_dir_up).setOnClickListener(v -> {
@@ -1813,13 +1821,7 @@ public class MainActivity extends Activity {
                     ui.post(() -> {
                         if (!lanControlling || lanSelected != dev) return;
                         if (frame != null) {
-                            android.graphics.drawable.Drawable d = lanScreen.getDrawable();
-                            android.graphics.Bitmap old = (d instanceof android.graphics.drawable.BitmapDrawable)
-                                    ? ((android.graphics.drawable.BitmapDrawable) d).getBitmap() : null;
-                            lanScreen.setImageBitmap(frame);
-                            if (old != null && old != frame && !old.isRecycled()) {
-                                try { old.recycle(); } catch (Throwable ignored) { }
-                            }
+                            setLanScreenBitmap(frame);
                         } else if (!dev.isAndroid()) {
                             lanStatusText.setText("远控画面等待中…");
                         }
@@ -1833,7 +1835,31 @@ public class MainActivity extends Activity {
 
     private void stopLanControlLoop() {
         lanControlling = false;
+        setLanFullscreen(false);
         if (lanScreenTask != null) { lanScreenHandler.removeCallbacks(lanScreenTask); lanScreenTask = null; }
+    }
+
+    /** 远控画面同时更新预览和全屏层；旧帧在两个 View 都替换后再回收，避免 recycled bitmap 崩溃 */
+    private void setLanScreenBitmap(android.graphics.Bitmap bmp) {
+        android.graphics.Bitmap old = lanScreenBitmap;
+        lanScreenBitmap = bmp;
+        if (lanScreen != null) lanScreen.setImageBitmap(bmp);
+        if (lanScreenFull != null && lanFullscreenHost != null
+                && lanFullscreenHost.getVisibility() == View.VISIBLE) {
+            lanScreenFull.setImageBitmap(bmp);
+        }
+        if (old != null && old != bmp && !old.isRecycled()) {
+            try { old.recycle(); } catch (Throwable ignored) { }
+        }
+    }
+
+    private void setLanFullscreen(boolean on) {
+        if (lanFullscreenHost == null) return;
+        lanFullscreen = on;
+        lanFullscreenHost.setVisibility(on ? View.VISIBLE : View.GONE);
+        if (on && lanScreenBitmap != null && lanScreenFull != null) {
+            lanScreenFull.setImageBitmap(lanScreenBitmap);
+        }
     }
 
     private void sendLanKey(String key) {

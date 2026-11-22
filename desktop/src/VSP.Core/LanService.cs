@@ -66,6 +66,7 @@ public sealed class LanService : IDisposable
     private readonly string _deviceName;
     private readonly string _shareRoot;
     private readonly ConcurrentDictionary<string, LanDevice> _devices = new();
+    private readonly HashSet<string> _localIps = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, LanPairRequest> _pairRequests = new();
     private readonly ConcurrentDictionary<string, bool> _pairAnswers = new();
     private readonly HttpClient _client = new() { Timeout = TimeSpan.FromSeconds(8) };
@@ -112,7 +113,8 @@ public sealed class LanService : IDisposable
             });
             var helloBytes = Encoding.UTF8.GetBytes(hello);
             var targets = BroadcastAddresses();
-            LocalIp = GetLocalPrivateIps().FirstOrDefault() ?? "127.0.0.1";
+            foreach (var ip in GetLocalPrivateIps()) _localIps.Add(ip);
+            LocalIp = _localIps.FirstOrDefault() ?? "127.0.0.1";
 
             _ = Task.Run(async () =>
             {
@@ -135,7 +137,7 @@ public sealed class LanService : IDisposable
                     {
                         var r = await _udp!.ReceiveAsync(ct);
                         var ip = r.RemoteEndPoint.Address;
-                        if (!IsPrivate(ip)) continue;
+                        if (!IsPrivate(ip) || _localIps.Contains(ip.ToString())) continue;
                         using var doc = JsonDocument.Parse(Encoding.UTF8.GetString(r.Buffer));
                         var root = doc.RootElement;
                         if (!root.TryGetProperty("k", out var k) || k.GetString() != Token) continue;

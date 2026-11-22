@@ -1,13 +1,13 @@
 {
   "platform": "desktop",
-  "version": "1.1.6",
-  "msi": "dist/Toolbox-Setup-v1.1.6.msi",
-  "size": 88180949,
-  "sha256": "65a9daefa570334a2f6b0d4bf3e02111bbd0815caf8ab2a15cbb85b23fdfbee7",
+  "version": "1.1.7",
+  "msi": "dist/Toolbox-Setup-v1.1.7.msi",
+  "size": 90155936,
+  "sha256": "c8937d7ad773afd8dc905a59a3751590f6804c8a66cc6f10148a230de09fe1ab",
   "mirrors": [
-    "https://gitee.com/tang-rongqiang/VSP/releases/download/desktop-v1.1.6/Toolbox-Setup-v1.1.6.msi",
-    "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.6/Toolbox-Setup-v1.1.6.msi"
+    "https://gitee.com/tang-rongqiang/VSP/releases/download/desktop-v1.1.7/Toolbox-Setup-v1.1.7.msi",
+    "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.7/Toolbox-Setup-v1.1.7.msi"
   ],
-  "notes": "v1.1.6\n\n1) 清理局域网弹窗与窗口重复的关闭按钮。\n2) 状态栏不再重复显示本机 IP 与设备名。\n3) 桌面图标统一为手机端 V 图标。\n",
-  "page": "https://gitee.com/tang-rongqiang/VSP/releases/tag/desktop-v1.1.6"
+  "notes": "v1.1.7\n\n1) 局域网发现过滤本机所有 IP，不再出现多个自己。\n2) 远程控制新增全屏按钮，双击画面也能切换。\n3) 按钮与输入框高度对齐，布局更整齐。\n4) 更新源默认优先 Gitee。\n",
+  "page": "https://gitee.com/tang-rongqiang/VSP/releases/tag/desktop-v1.1.7"
 }

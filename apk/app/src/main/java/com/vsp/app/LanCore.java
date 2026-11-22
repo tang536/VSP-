@@ -97,6 +97,7 @@ public final class LanCore {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService pool = Executors.newFixedThreadPool(8);
     private final Map<String, Device> devices = new ConcurrentHashMap<>();
+    private final java.util.Set<String> localIps = new java.util.HashSet<>();
     private final Map<String, PairRequest> pairRequests = new ConcurrentHashMap<>();
     private final Map<String, Boolean> pairAnswers = new ConcurrentHashMap<>();
     private android.net.wifi.WifiManager.MulticastLock multicastLock;
@@ -129,6 +130,7 @@ public final class LanCore {
         if (running) return;
         running = true;
         localIp = findPrivateIp();
+        collectLocalIps();
         // Android 必须持有 MulticastLock 才能收发 UDP 广播/组播，
         // 否则多数机型（尤其息屏后）静默丢弃广播包，导致两端互相发现不了。
         try {
@@ -200,7 +202,7 @@ public final class LanCore {
                 DatagramPacket p = new DatagramPacket(buf, buf.length);
                 udp.receive(p);
                 String ip = p.getAddress().getHostAddress();
-                if (!isPrivate(ip)) continue;
+                if (!isPrivate(ip) || localIps.contains(ip)) continue;
                 JSONObject o = new JSONObject(new String(p.getData(), p.getOffset(), p.getLength(), StandardCharsets.UTF_8));
                 if (!TOKEN.equals(o.optString("k"))) continue;
                 String id = o.optString("id");
@@ -673,6 +675,23 @@ public final class LanCore {
             if (a == 172 && c >= 16 && c <= 31) return true;
         } catch (Throwable ignored) { }
         return false;
+    }
+
+    private void collectLocalIps() {
+        localIps.clear();
+        try {
+            java.util.Enumeration<java.net.NetworkInterface> nis =
+                    java.net.NetworkInterface.getNetworkInterfaces();
+            while (nis != null && nis.hasMoreElements()) {
+                java.util.Enumeration<InetAddress> addrs = nis.nextElement().getInetAddresses();
+                while (addrs.hasMoreElements()) {
+                    InetAddress a = addrs.nextElement();
+                    if (a instanceof java.net.Inet4Address && isPrivate(a.getHostAddress()))
+                        localIps.add(a.getHostAddress());
+                }
+            }
+        } catch (Throwable ignored) { }
+        if (!"0.0.0.0".equals(localIp)) localIps.add(localIp);
     }
 
     private static String findPrivateIp() {

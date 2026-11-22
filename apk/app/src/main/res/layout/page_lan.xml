@@ -1,9 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- 互传与远控：局域网设备直连，全程走局域网 IP，不耗流量 -->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
     android:tag="bg">
 
     <ScrollView
@@ -213,6 +212,14 @@
                                     android:textSize="12sp"
                                     android:layout_marginStart="6dp" />
                                 <Button
+                                    android:id="@+id/lan_fullscreen"
+                                    android:layout_width="0dp"
+                                    android:layout_height="wrap_content"
+                                    android:layout_weight="1"
+                                    android:text="全屏"
+                                    android:textSize="12sp"
+                                    android:layout_marginStart="6dp" />
+                                <Button
                                     android:id="@+id/lan_control_stop"
                                     android:layout_width="0dp"
                                     android:layout_height="wrap_content"
@@ -280,4 +287,28 @@
                 </LinearLayout>
         </LinearLayout>
     </ScrollView>
-</LinearLayout>
+
+    <!-- 远控全屏层 -->
+    <FrameLayout
+        android:id="@+id/lan_fullscreen_host"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#000000"
+        android:visibility="gone">
+        <ImageView
+            android:id="@+id/lan_screen_full"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="#000000"
+            android:scaleType="fitCenter"
+            android:contentDescription="对方屏幕（全屏）" />
+        <Button
+            android:id="@+id/lan_fullscreen_exit"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|end"
+            android:layout_margin="12dp"
+            android:text="退出全屏"
+            android:textSize="12sp" />
+    </FrameLayout>
+</FrameLayout>

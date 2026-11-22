@@ -87,6 +87,7 @@
                             <Button Classes="ghost small" Content="← 返回" Command="{Binding LanKeyCommand}" CommandParameter="back" />
                             <Button Classes="ghost small" Content="⌂ 主页" Command="{Binding LanKeyCommand}" CommandParameter="home" />
                             <Button Classes="ghost small" Content="▤ 多任务" Command="{Binding LanKeyCommand}" CommandParameter="recent" />
+                            <Button Classes="ghost small" Content="⛶ 全屏" Click="FullScreen_Click" />
                             <Button Classes="ghost small" Content="■ 停止远控" Command="{Binding LanStopControlCommand}" />
                         </StackPanel>
                     </Grid>

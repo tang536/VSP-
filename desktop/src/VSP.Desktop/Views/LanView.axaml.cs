@@ -16,6 +16,7 @@ public partial class LanView : UserControl
         RemoteScreen.PointerPressed += OnScreenPressed;
         RemoteScreen.PointerMoved += OnScreenMoved;
         RemoteScreen.PointerReleased += OnScreenReleased;
+        RemoteScreen.DoubleTapped += (_, _) => ToggleFullscreen();
         AttachedToVisualTree += (_, _) => BindEvents();
         DetachedFromVisualTree += (_, _) => UnbindEvents();
     }
@@ -58,6 +59,17 @@ public partial class LanView : UserControl
         foreach (var w in owner.OwnedWindows)
             if (w is LanPairWindow) { w.Activate(); return; }
         new LanPairWindow(_bound!).Show(owner);
+    }
+
+    private void FullScreen_Click(object? sender, Avalonia.Interactivity.RoutedEventArgs e) => ToggleFullscreen();
+
+    private void ToggleFullscreen()
+    {
+        var window = OwnerWindow();
+        if (window is null) return;
+        window.WindowState = window.WindowState == WindowState.FullScreen
+            ? WindowState.Normal
+            : WindowState.FullScreen;
     }
 
     private bool TryGetPoint(PointerEventArgs e, out double x, out double y)
