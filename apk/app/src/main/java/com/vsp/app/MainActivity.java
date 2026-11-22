@@ -6888,12 +6888,15 @@ public class MainActivity extends Activity {
      */
     private java.util.List<String> buildApkMirrors(String version, String primaryUrl) {
         java.util.List<String> urls = new java.util.ArrayList<>();
-        if (primaryUrl != null && !primaryUrl.isEmpty()) urls.add(primaryUrl);
         String v = version == null ? "" : version.replaceFirst("^[vV]", "");
         if (!v.isEmpty()) {
             String name = "VSP-Parse-v" + v + ".apk";
+            // Gitee 优先（国内网络更稳），主地址和 GitHub 作为后续测速/失败切换候选
             addMirrorUrl(urls, "https://gitee.com/" + GITEE_REPO + "/releases/download/v" + v + "/" + name);
+            addMirrorUrl(urls, primaryUrl);
             addMirrorUrl(urls, "https://github.com/" + UPDATE_REPO + "/releases/download/v" + v + "/" + name);
+        } else if (primaryUrl != null && !primaryUrl.isEmpty()) {
+            urls.add(primaryUrl);
         }
         return urls;
     }

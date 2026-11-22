@@ -42,8 +42,8 @@ public sealed class UpdateService
         {
             (GiteeApi, 0),
             (GithubApi, 1),
-            (GithubIndex, 2),
-            (DesktopIndex, 3),
+            (DesktopIndex, 2),
+            (GithubIndex, 3),
         };
 
         // 四个源并发拉取：串行的话断网时要一个接一个等超时，最坏两分钟。
