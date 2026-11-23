@@ -159,6 +159,11 @@ public class MainActivity extends Activity {
             "https://github.com/" + UPDATE_REPO + "/releases.atom";
     private static final String GITEE_API =
             "https://gitee.com/api/v5/repos/" + GITEE_REPO + "/releases/latest";
+    // /releases/latest 会被桌面端 desktop-v* 标签占用；用列表接口自己挑第一个非桌面版本
+    private static final String UPDATE_API_LIST =
+            "https://api.github.com/repos/" + UPDATE_REPO + "/releases?per_page=10";
+    private static final String GITEE_API_LIST =
+            "https://gitee.com/api/v5/repos/" + GITEE_REPO + "/releases?per_page=10";
     /**
      * 手机版版本索引（随源码推到两个仓库，不受 Release 顺序影响）。
      * 桌面端发版用 desktop-v* 标签，会占据 /releases/latest，
@@ -7071,12 +7076,49 @@ public class MainActivity extends Activity {
     }
 
     private JSONObject fetchLatestRelease() throws Exception {
-        return getJson(UPDATE_API, "application/vnd.github+json");
+        return firstAppRelease(getJsonArray(UPDATE_API_LIST, "application/vnd.github+json"));
     }
 
-    /** Gitee 的 OpenAPI 公开仓库匿名可读，没有 token 也能查最新发布 */
+    /** Gitee 的 OpenAPI 无需 token 也能读取公开仓库的 Release 列表 */
     private JSONObject fetchGiteeRelease() throws Exception {
-        return getJson(GITEE_API, "application/json");
+        return firstAppRelease(getJsonArray(GITEE_API_LIST, "application/json"));
+    }
+
+    /** 从 Release 列表中挑第一个非桌面、带 apk 附件的版本 */
+    private static JSONObject firstAppRelease(JSONArray arr) {
+        if (arr == null) return null;
+        for (int i = 0; i < arr.length(); i++) {
+            JSONObject rel = arr.optJSONObject(i);
+            if (rel == null) continue;
+            String tag = rel.optString("tag_name", "").trim();
+            if (tag.isEmpty() || isDesktopTag(tag)) continue;
+            JSONArray assets = rel.optJSONArray("assets");
+            if (assets == null) continue;
+            for (int j = 0; j < assets.length(); j++) {
+                JSONObject a = assets.optJSONObject(j);
+                if (a != null && a.optString("name", "").toLowerCase(Locale.ROOT).endsWith(".apk"))
+                    return rel;
+            }
+        }
+        return null;
+    }
+
+    private JSONArray getJsonArray(String api, String accept) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(api).openConnection();
+        c.setConnectTimeout(12000);
+        c.setReadTimeout(15000);
+        c.setInstanceFollowRedirects(true);
+        c.setRequestProperty("Accept", accept);
+        c.setRequestProperty("X-GitHub-Api-Version", "2022-11-28");
+        c.setRequestProperty("User-Agent", UA);
+        try {
+            if (c.getResponseCode() != 200) return null;
+            String body = readStream(c.getInputStream()).trim();
+            if (!body.startsWith("[")) return null;
+            return new JSONArray(body);
+        } finally {
+            c.disconnect();
+        }
     }
 
     private JSONObject getJson(String api, String accept) throws Exception {
