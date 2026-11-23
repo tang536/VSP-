@@ -162,8 +162,9 @@ public class MainActivity extends Activity {
     // /releases/latest 会被桌面端 desktop-v* 标签占用；用列表接口自己挑第一个非桌面版本
     private static final String UPDATE_API_LIST =
             "https://api.github.com/repos/" + UPDATE_REPO + "/releases?per_page=10";
+    // Gitee 列表按创建时间升序，取最高版本，per_page 放大一些避免新版被分页切掉
     private static final String GITEE_API_LIST =
-            "https://gitee.com/api/v5/repos/" + GITEE_REPO + "/releases?per_page=10";
+            "https://gitee.com/api/v5/repos/" + GITEE_REPO + "/releases?per_page=100";
     /**
      * 手机版版本索引（随源码推到两个仓库，不受 Release 顺序影响）。
      * 桌面端发版用 desktop-v* 标签，会占据 /releases/latest，
@@ -7084,9 +7085,10 @@ public class MainActivity extends Activity {
         return firstAppRelease(getJsonArray(GITEE_API_LIST, "application/json"));
     }
 
-    /** 从 Release 列表中挑第一个非桌面、带 apk 附件的版本 */
-    private static JSONObject firstAppRelease(JSONArray arr) {
+    /** 从 Release 列表中挑版本最高的非桌面、带 apk 附件的版本（Gitee 列表是升序，不能取第一条） */
+    private JSONObject firstAppRelease(JSONArray arr) {
         if (arr == null) return null;
+        JSONObject best = null;
         for (int i = 0; i < arr.length(); i++) {
             JSONObject rel = arr.optJSONObject(i);
             if (rel == null) continue;
@@ -7096,11 +7098,14 @@ public class MainActivity extends Activity {
             if (assets == null) continue;
             for (int j = 0; j < assets.length(); j++) {
                 JSONObject a = assets.optJSONObject(j);
-                if (a != null && a.optString("name", "").toLowerCase(Locale.ROOT).endsWith(".apk"))
-                    return rel;
+                if (a != null && a.optString("name", "").toLowerCase(Locale.ROOT).endsWith(".apk")) {
+                    if (best == null || compareVersion(tag, best.optString("tag_name", "")) > 0)
+                        best = rel;
+                    break;
+                }
             }
         }
-        return null;
+        return best;
     }
 
     private JSONArray getJsonArray(String api, String accept) throws Exception {

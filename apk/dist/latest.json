@@ -3,7 +3,7 @@
   "versionCode": 11307,
   "apk": "dist/VSP-Parse-v1.3.7.apk",
   "size": 31871038,
-  "sha256": "e359babfc2ffee2c4a001397805e13f3e28777becb40beba1245fba5b4155dd7",
+  "sha256": "bf45b319af6748e76a625ca519a0494ca76670adfd9414da22eb25743a9de23c",
   "date": "2026-11-23",
   "notes": "v1.3.7\n\n1) 局域网发现过滤本机所有 IP，不再出现多个自己。\n2) 手机端/桌面端远程控制新增全屏按钮。\n3) 桌面端按钮与输入框高度对齐，布局更整齐。\n4) 更新源默认优先 Gitee，更新接口改用 Release 列表避免被桌面端标签占用。\n"
 }
