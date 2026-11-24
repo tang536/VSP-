@@ -3,11 +3,10 @@
   "version": "1.1.7",
   "msi": "dist/Toolbox-Setup-v1.1.7.msi",
   "size": 90155936,
-  "sha256": "c8937d7ad773afd8dc905a59a3751590f6804c8a66cc6f10148a230de09fe1ab",
+  "sha256": "e452e3d5318d48baa127a5ea637d1b84f93caac8e834a12a05127a71cfbd8701",
   "mirrors": [
     "https://gitee.com/tang-rongqiang/VSP/releases/download/desktop-v1.1.7/Toolbox-Setup-v1.1.7.msi",
     "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.7/Toolbox-Setup-v1.1.7.msi"
   ],
-  "notes": "v1.1.7\n\n1) 局域网发现过滤本机所有 IP，不再出现多个自己。\n2) 远程控制新增全屏按钮，双击画面也能切换。\n3) 按钮与输入框高度对齐，布局更整齐。\n4) 更新源默认优先 Gitee。\n",
   "page": "https://gitee.com/tang-rongqiang/VSP/releases/tag/desktop-v1.1.7"
 }
