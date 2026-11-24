@@ -2,8 +2,8 @@
   "platform": "desktop",
   "version": "1.1.7",
   "msi": "dist/Toolbox-Setup-v1.1.7.msi",
-  "size": 90155936,
-  "sha256": "e452e3d5318d48baa127a5ea637d1b84f93caac8e834a12a05127a71cfbd8701",
+  "size": 90151840,
+  "sha256": "85e5d0012c337de837f1057945e7c49bc5c257ba95f077c8c58c3c8c7205fdff",
   "mirrors": [
     "https://gitee.com/tang-rongqiang/VSP/releases/download/desktop-v1.1.7/Toolbox-Setup-v1.1.7.msi",
     "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.7/Toolbox-Setup-v1.1.7.msi"

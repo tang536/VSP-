@@ -75,7 +75,13 @@ public partial class PreviewView : UserControl
             // 音频只播放声音，不需要 NativeControlHost 子窗口
             if (view is not null && !vm.IsAudio) view.MediaPlayer = player;
             vm.Attach(libvlc, player, media);
-            player.Play(media);
+            // 首次打开视频时 NativeHost（LibVLC 本机控件）初始化较慢，
+            // 稍延迟一点再播放，避免第一次预览显著滞后。
+            _ = Task.Run(async () =>
+            {
+                try { await Task.Delay(300); } catch { }
+                try { player.Play(media); } catch { }
+            });
         }
         catch (Exception ex)
         {

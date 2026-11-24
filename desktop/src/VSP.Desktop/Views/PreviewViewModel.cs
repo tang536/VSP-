@@ -93,7 +93,9 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
 
     public bool IsFullScreen { get => _isFullScreen; private set { if (Set(ref _isFullScreen, value)) { Raise(nameof(FullScreenText)); Raise(nameof(ShowControls)); Raise(nameof(ShowHeader)); } } }
     public string FullScreenText => IsFullScreen ? "退出全屏" : "全屏";
-    public bool ShowControls => !IsFullScreen && !IsImage;
+    // 播放器控制层（进度条/音量/全屏按钮）普通视频预览也保持可见；
+    // 之前全屏时隐藏，导致用户找不到进度和音量。
+    public bool ShowControls => !IsImage;
     public bool ShowHeader => !IsFullScreen;
     public void SetFullScreen(bool value) => IsFullScreen = value;
 
