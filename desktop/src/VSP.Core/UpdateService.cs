@@ -13,7 +13,7 @@ public sealed record UpdateInfo(string Version, string DownloadUrl, string PageU
 /// </summary>
 public sealed class UpdateService
 {
-    public const string Version = "1.1.8";
+    public const string Version = "1.1.9";
     private const string GithubApi = "https://api.github.com/repos/tang536/VSP-/releases/latest";
     private const string GiteeApi = "https://gitee.com/api/v5/repos/tang-rongqiang/VSP/releases/latest";
     private const string DesktopIndex = "https://gitee.com/tang-rongqiang/VSP/raw/main/desktop/dist/latest.json";
