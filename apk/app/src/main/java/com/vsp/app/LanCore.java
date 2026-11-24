@@ -159,12 +159,22 @@ public final class LanCore {
     // ---------------- 设备发现 ----------------
 
     private void discoverLoop() {
+        DatagramSocket sock = null;
         try {
-            udp = new DatagramSocket(null);
-            udp.setReuseAddress(true);
-            udp.setBroadcast(true);
-            udp.bind(new InetSocketAddress(UDP_PORT));
-        } catch (Throwable t) { status("发现服务启动失败：" + t.getMessage()); return; }
+            for (int attempt = 0; attempt < 5; attempt++) {
+                try {
+                    sock = new DatagramSocket(null);
+                    sock.setReuseAddress(true);
+                    sock.setBroadcast(true);
+                    sock.bind(new InetSocketAddress(UDP_PORT));
+                    break;
+                } catch (Throwable t) {
+                    if (sock != null) { try { sock.close(); } catch (Throwable ignored) { } sock = null; }
+                    sleep(1000);
+                }
+            }
+            if (sock == null) { status("发现服务启动失败：端口不可用"); return; }
+            udp = sock;
 
         final byte[] hello = helloJson().getBytes(StandardCharsets.UTF_8);
         // Android 10+ 对受限广播 255.255.255.255 有系统限制，很多机型直接丢弃，
@@ -196,22 +206,25 @@ public final class LanCore {
             }
         });
 
-        byte[] buf = new byte[4096];
-        while (running) {
-            try {
-                DatagramPacket p = new DatagramPacket(buf, buf.length);
-                udp.receive(p);
-                String ip = p.getAddress().getHostAddress();
-                if (!isPrivate(ip) || localIps.contains(ip)) continue;
-                JSONObject o = new JSONObject(new String(p.getData(), p.getOffset(), p.getLength(), StandardCharsets.UTF_8));
-                if (!TOKEN.equals(o.optString("k"))) continue;
-                String id = o.optString("id");
-                if (id.isEmpty() || id.equals(deviceId)) continue;
-                Device d = new Device(id, o.optString("n", "设备"), o.optString("t", "pc"),
-                        ip, o.optInt("p", HTTP_PORT));
-                devices.put(id, d);
-                changed();
-            } catch (Throwable ignored) { }
+            byte[] buf = new byte[4096];
+            while (running) {
+                try {
+                    DatagramPacket p = new DatagramPacket(buf, buf.length);
+                    udp.receive(p);
+                    String ip = p.getAddress().getHostAddress();
+                    if (!isPrivate(ip) || localIps.contains(ip)) continue;
+                    JSONObject o = new JSONObject(new String(p.getData(), p.getOffset(), p.getLength(), StandardCharsets.UTF_8));
+                    if (!TOKEN.equals(o.optString("k"))) continue;
+                    String id = o.optString("id");
+                    if (id.isEmpty() || id.equals(deviceId)) continue;
+                    Device d = new Device(id, o.optString("n", "设备"), o.optString("t", "pc"),
+                            ip, o.optInt("p", HTTP_PORT));
+                    devices.put(id, d);
+                    changed();
+                } catch (Throwable ignored) { }
+            }
+        } catch (Throwable t) {
+            status("发现服务运行失败：" + t.getMessage());
         }
     }
 
@@ -234,20 +247,17 @@ public final class LanCore {
                 }
             }
         } catch (Throwable ignored) { }
-        // 兜底：全局广播 + 从已发现的私网 IP 推出 /24 广播地址
+        // 兜底：全局广播 + 从本机私网 IP 推出 /24 广播地址（只要有私网 IP，不依赖接口返回的广播值）
         try {
             InetAddress all = InetAddress.getByName("255.255.255.255");
             if (seen.add(all.getHostAddress())) list.add(all);
         } catch (Throwable ignored) { }
-        if (list.isEmpty()) {
-            String ip = localIp;
-            if (isPrivate(ip)) {
-                String[] b = ip.split("\\.");
-                try {
-                    InetAddress bc = InetAddress.getByName(b[0] + "." + b[1] + "." + b[2] + ".255");
-                    if (seen.add(bc.getHostAddress())) list.add(bc);
-                } catch (Throwable ignored) { }
-            }
+        if (isPrivate(localIp)) {
+            String[] b = localIp.split("\\.");
+            try {
+                InetAddress bc = InetAddress.getByName(b[0] + "." + b[1] + "." + b[2] + ".255");
+                if (seen.add(bc.getHostAddress())) list.add(bc);
+            } catch (Throwable ignored) { }
         }
         return list;
     }

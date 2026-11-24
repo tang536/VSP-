@@ -21,6 +21,7 @@
                                        FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Border>
                         <TextBlock Text="全能工具箱" Classes="h2" VerticalAlignment="Center" />
+                        <TextBlock Text="{Binding AppVersion}" Classes="dim" VerticalAlignment="Center" />
                     </StackPanel>
 
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Stretch">
@@ -53,7 +54,6 @@
                             <TextBlock Text="历史解析" VerticalAlignment="Center" />
                         </StackPanel>
                     </Button>
-                    <TextBlock Text="{Binding AppVersion}" Classes="dim" VerticalAlignment="Center" />
                     <Button Classes="ghost small" Command="{Binding ToggleThemeCommand}">
                         <StackPanel Orientation="Horizontal" Spacing="6">
                             <PathIcon Data="{Binding ThemeIcon}" />

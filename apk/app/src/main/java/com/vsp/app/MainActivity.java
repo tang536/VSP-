@@ -2441,6 +2441,8 @@ public class MainActivity extends Activity {
         pageScan.setVisibility(page == PAGE_SCAN ? View.VISIBLE : View.GONE);
         pageBrowser.setVisibility(page == PAGE_BROWSER ? View.VISIBLE : View.GONE);
         pageLan.setVisibility(page == PAGE_LAN ? View.VISIBLE : View.GONE);
+        // 打开互传与远控页面就启动局域网发现，找到的设备随时能在弹窗刷新里看到
+        if (page == PAGE_LAN) ensureLan();
 
         // 最高级页面（首页 / 本地 / 我的）才显示 VSP 解析标题栏与底部标签；
         // 浏览器已从主标签改为「我的」里的独立页面，自带返回栏，不显示底栏；
