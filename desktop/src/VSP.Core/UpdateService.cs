@@ -1,9 +1,10 @@
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace VSP.Core;
 
 public sealed record UpdateInfo(string Version, string DownloadUrl, string PageUrl, string Notes, long Size,
-    IReadOnlyList<string>? Mirrors = null);
+    IReadOnlyList<string>? Mirrors = null, string? Sha256 = null);
 
 /// <summary>
 /// Desktop-only update lookup. This deliberately never reads the App's apk/dist/latest.json:
@@ -12,7 +13,7 @@ public sealed record UpdateInfo(string Version, string DownloadUrl, string PageU
 /// </summary>
 public sealed class UpdateService
 {
-    public const string Version = "1.1.7";
+    public const string Version = "1.1.8";
     private const string GithubApi = "https://api.github.com/repos/tang536/VSP-/releases/latest";
     private const string GiteeApi = "https://gitee.com/api/v5/repos/tang-rongqiang/VSP/releases/latest";
     private const string DesktopIndex = "https://gitee.com/tang-rongqiang/VSP/raw/main/desktop/dist/latest.json";
@@ -105,6 +106,7 @@ public sealed class UpdateService
             // App 的 APK release 没有任何 .msi 资产，走不到下面，天然被排除。
             string download = "";
             var mirrors = new List<string>();
+            var sha = NormalizeSha(Str(root, "sha256"));
             if (root.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
             {
                 foreach (var a in assets.EnumerateArray())
@@ -113,7 +115,11 @@ public sealed class UpdateService
                     var url = Str(a, "browser_download_url");
                     if ((name.EndsWith(".msi", StringComparison.OrdinalIgnoreCase) || IsMsi(url)) &&
                         !string.IsNullOrWhiteSpace(url) && !mirrors.Contains(url, StringComparer.OrdinalIgnoreCase))
+                    {
                         mirrors.Add(url);
+                        // GitHub Release 资产带 digest=sha256:...，可用于下载后校验。
+                        if (sha is null) sha = NormalizeSha(Str(a, "digest"));
+                    }
                 }
             }
             // 索引里可显式列出镜像（不同 CDN / 不同平台 Release），全部纳入候选。
@@ -141,7 +147,7 @@ public sealed class UpdateService
             // 桌面版发布页与 App 发布页分开。
             var page = Str(root, "page");
             if (string.IsNullOrWhiteSpace(page)) page = GithubPage;
-            return new UpdateInfo(tag, download, page, Str(root, "notes"), (long)Num(root, "size"), mirrors);
+            return new UpdateInfo(tag, download, page, Str(root, "notes"), (long)Num(root, "size"), mirrors, sha);
         }
         catch { return null; }
     }
@@ -151,6 +157,14 @@ public sealed class UpdateService
 
     private static double Num(JsonElement e, string name) =>
         e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetDouble(out var n) ? n : 0;
+
+    private static string? NormalizeSha(string? value)
+    {
+        var v = (value ?? "").Trim();
+        if (v.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)) v = v[7..].Trim();
+        if (v.Length != 64 || !v.All(char.IsAsciiHexDigit)) return null;
+        return v.ToLowerInvariant();
+    }
 
     public static int Compare(string a, string b)
     {
@@ -217,6 +231,16 @@ public sealed class UpdateService
             {
                 status?.Report($"正在从 {Friendly(url)} 下载…");
                 await DownloadOneAsync(client, url, target, progress, info, ct);
+                if (info.Sha256 is { Length: 64 })
+                {
+                    status?.Report("正在校验安装包…");
+                    var actual = await Sha256Async(target, ct);
+                    if (!actual.Equals(info.Sha256, StringComparison.OrdinalIgnoreCase))
+                    {
+                        TryDelete(target);
+                        throw new Exception("安装包校验不一致（可能下载到了旧版本），已自动切换下载源");
+                    }
+                }
                 return;
             }
             catch (OperationCanceledException) { throw; }
@@ -261,6 +285,18 @@ public sealed class UpdateService
         url.Contains("gitee", StringComparison.OrdinalIgnoreCase) ? "Gitee 镜像"
         : url.Contains("github", StringComparison.OrdinalIgnoreCase) ? "GitHub"
         : "备用源";
+
+    private static async Task<string> Sha256Async(string path, CancellationToken ct)
+    {
+        await using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, true);
+        var hash = await SHA256.HashDataAsync(fs, ct);
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private static void TryDelete(string path)
+    {
+        try { File.Delete(path); } catch { }
+    }
 
     private static async Task DownloadOneAsync(HttpClient client, string startUrl, string target,
         IProgress<double> progress, UpdateInfo info, CancellationToken ct)

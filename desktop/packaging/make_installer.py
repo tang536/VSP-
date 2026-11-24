@@ -19,7 +19,7 @@ PUBLISH = DESKTOP / "publish" / "win-x64"
 WIX = DESKTOP / "tools" / "wix.exe"
 OUT = DESKTOP / "dist"
 WXS = HERE / "VSPDesktop.wxs"
-VERSION = "1.1.7.0"
+VERSION = "1.1.8.0"
 UPGRADE_CODE = "A0A1D4B2-7D6C-4B8E-9F35-1234567890AB"
 NS = "http://wixtoolset.org/schemas/v4/wxs"
 UI_NS = "http://wixtoolset.org/schemas/v4/wxs/ui"
@@ -107,8 +107,11 @@ def build_wxs(files: list[Path]) -> None:
         "UpgradeCode": UPGRADE_CODE, "ProductCode": "*", "Scope": "perUserOrMachine",
     })
     # 版本升级时自动卸载同 UpgradeCode 的旧版，避免 1.0.0 / 1.0.1 两个入口并存。
+    # AllowSameVersionUpgrades：同版本号重新打包（版本号没来得及 +1）时也能覆盖安装，
+    # 避免"已安装 1.1.7，新 1.1.7 装不上"的死循环。
     ET.SubElement(package, q("MajorUpgrade"), {
         "Schedule": "afterInstallValidate",
+        "AllowSameVersionUpgrades": "yes",
         "DowngradeErrorMessage": "已安装更新版本的全能工具箱桌面端，无法降级安装。",
     })
     ET.SubElement(package, q("MediaTemplate"), {"EmbedCab": "yes", "CompressionLevel": "high"})

@@ -1,12 +1,12 @@
 {
   "platform": "desktop",
-  "version": "1.1.7",
-  "msi": "dist/Toolbox-Setup-v1.1.7.msi",
+  "version": "1.1.8",
+  "msi": "dist/Toolbox-Setup-v1.1.8.msi",
   "size": 90151840,
-  "sha256": "85e5d0012c337de837f1057945e7c49bc5c257ba95f077c8c58c3c8c7205fdff",
+  "sha256": "38b02d7d4bb5a18d1abe33d98b82cf734d5eb3e33a488f741bc74aa5b21a9a19",
   "mirrors": [
-    "https://gitee.com/tang-rongqiang/VSP/releases/download/desktop-v1.1.7/Toolbox-Setup-v1.1.7.msi",
-    "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.7/Toolbox-Setup-v1.1.7.msi"
+    "https://gitee.com/tang-rongqiang/VSP/releases/download/desktop-v1.1.8/Toolbox-Setup-v1.1.8.msi",
+    "https://github.com/tang536/VSP-/releases/download/desktop-v1.1.8/Toolbox-Setup-v1.1.8.msi"
   ],
-  "page": "https://gitee.com/tang-rongqiang/VSP/releases/tag/desktop-v1.1.7"
+  "page": "https://gitee.com/tang-rongqiang/VSP/releases/tag/desktop-v1.1.8"
 }

@@ -742,8 +742,23 @@ public sealed class MainViewModel : BindableBase
             var statusProgress = new Progress<string>(s => UpdateStatus = s);
             await _services.Updates.DownloadAsync(_update, target,
                 new Progress<double>(p => UpdateProgress = p), statusProgress, CancellationToken.None);
-            UpdateStatus = "安装包已下载：" + target;
-            LocalLibrary.OpenFolder(Path.GetDirectoryName(target)!);
+            UpdateStatus = "安装包已下载，正在启动安装程序…";
+            try
+            {
+                // 直接拉起安装向导，用户不用自己去 Downloads 里找文件。
+                // 安装程序会提示关闭正在运行的全能工具箱后继续。
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "msiexec.exe",
+                    Arguments = $"/i \"{target}\"",
+                    UseShellExecute = true,
+                });
+            }
+            catch (Exception ex)
+            {
+                UpdateStatus = "安装包已下载，但启动安装失败：" + ex.Message + "（文件：" + target + "）";
+                LocalLibrary.OpenFolder(Path.GetDirectoryName(target)!);
+            }
         }
         catch (Exception ex) { UpdateStatus = "下载失败：" + ex.Message; }
         finally { IsUpdating = false; }
