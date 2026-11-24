@@ -10,8 +10,14 @@ namespace VSP.Desktop.Views;
 
 public partial class PreviewView : UserControl
 {
+    // 整个进程共用一个 LibVLC。每次预览都 new LibVLC() 在首次打开时要几百毫秒到一两秒，
+    // 放在 UI 线程上就是用户看到的“点预览卡住”。
+    private static readonly Lazy<LibVLC> SharedVlc = new(() =>
+        new LibVLC("--network-caching=1000", "--no-video-title-show", "--quiet"));
+
     private PreviewViewModel? _bound;
     private Window? _window;
+    private int _generation;
 
     public PreviewView()
     {
@@ -45,47 +51,60 @@ public partial class PreviewView : UserControl
 
     private void OnDataContextChanged()
     {
-        if (DataContext is not PreviewViewModel vm)
-        {
-            if (_bound is not null) _bound.PropertyChanged -= OnVmPropertyChanged;
-            _bound = null;
-            DetachPlayer();
-            return;
-        }
+        var vm = DataContext as PreviewViewModel;
         if (ReferenceEquals(vm, _bound)) return;
 
         if (_bound is not null) _bound.PropertyChanged -= OnVmPropertyChanged;
         _bound = vm;
-        vm.PropertyChanged += OnVmPropertyChanged;
+        _generation++;
         DetachPlayer();
 
+        if (vm is null) return;
+
+        vm.PropertyChanged += OnVmPropertyChanged;
         if (vm.IsImage)
         {
             _ = vm.LoadImageAsync();
             return;
         }
         if (vm.IsAudio) _ = vm.LoadCoverAsync();
+        _ = InitializePlayerAsync(vm, _generation);
+    }
 
+    /// <summary>
+    /// 在后台线程创建 LibVLC / MediaPlayer，主线程先把页面和控制条显示出来，
+    /// 播放器准备好后再挂到 VideoView 上，避免首次预览整窗卡住。
+    /// </summary>
+    private async Task InitializePlayerAsync(PreviewViewModel vm, int generation)
+    {
         try
         {
-            var libvlc = new LibVLC("--network-caching=300", "--no-video-title-show", "--quiet");
-            var player = new MediaPlayer(libvlc);
-            var media = new Media(libvlc, new Uri(vm.Url));
+            var (libvlc, player, media) = await Task.Run(() =>
+            {
+                var vlc = SharedVlc.Value;
+                var p = new MediaPlayer(vlc);
+                var m = new Media(vlc, new Uri(vm.Url));
+                return (vlc, p, m);
+            });
+
+            // 用户可能在加载过程中已经关掉预览或打开了另一个文件。
+            if (generation != _generation || !ReferenceEquals(DataContext, vm))
+            {
+                media.Dispose();
+                player.Dispose();
+                return;
+            }
+
             var view = this.FindControl<VideoView>("VideoView");
             // 音频只播放声音，不需要 NativeControlHost 子窗口
             if (view is not null && !vm.IsAudio) view.MediaPlayer = player;
             vm.Attach(libvlc, player, media);
-            // 首次打开视频时 NativeHost（LibVLC 本机控件）初始化较慢，
-            // 稍延迟一点再播放，避免第一次预览显著滞后。
-            _ = Task.Run(async () =>
-            {
-                try { await Task.Delay(300); } catch { }
-                try { player.Play(media); } catch { }
-            });
+            player.Play(media);
         }
         catch (Exception ex)
         {
-            vm.ReportError("播放器初始化失败：" + ex.Message);
+            if (generation == _generation)
+                vm.ReportError("播放器初始化失败：" + ex.Message);
         }
     }
 

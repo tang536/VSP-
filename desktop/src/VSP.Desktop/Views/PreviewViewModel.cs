@@ -33,6 +33,7 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
     private string _elapsedText = "00:00";
     private string _durationText = "00:00";
     private bool _volumePopupOpen;
+    private bool _isLoading;
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public event Action? CloseRequested;
@@ -49,8 +50,11 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
     public ICommand CloseCommand { get; }
     public ICommand ToggleFullScreenCommand { get; }
 
-    public string Error { get => _error; private set => Set(ref _error, value); }
+    public string Error { get => _error; private set { if (Set(ref _error, value)) { Raise(nameof(ShowMediaError)); Raise(nameof(ShowBarError)); } } }
     public bool HasError => !string.IsNullOrEmpty(Error);
+    public bool ShowMediaError => HasError && IsImage;
+    public bool ShowBarError => HasError && !IsImage;
+    public bool IsLoading { get => _isLoading; private set => Set(ref _isLoading, value); }
     public string ImagePath { get => _imagePath; private set => Set(ref _imagePath, value); }
     public string CoverPath { get => _coverPath; private set => Set(ref _coverPath, value); }
     public bool HasCover => !string.IsNullOrEmpty(CoverPath);
@@ -110,6 +114,7 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
     public PreviewViewModel(PreviewRequest request)
     {
         _request = request;
+        _isLoading = !request.IsImage;
         PlayPauseCommand = new RelayCommand(() =>
         {
             if (_player is null) return;
@@ -138,7 +143,11 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
         _timer.Start();
     }
 
-    public void ReportError(string message) => Error = message;
+    public void ReportError(string message)
+    {
+        IsLoading = false;
+        Error = message;
+    }
 
     public void Attach(LibVLC libvlc, MediaPlayer player, Media media)
     {
@@ -146,8 +155,19 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
         _player = player;
         _media = media;
         try { player.Volume = (int)Math.Round(_volume); } catch { }
-        player.EncounteredError += (_, _) =>
+        // LibVLC 的事件来自原生线程，必须回到 UI 线程再改绑定属性。
+        player.Playing += (_, _) => Dispatcher.UIThread.Post(() =>
+        {
+            IsLoading = false;
+            IsPlaying = true;
+        });
+        player.EncounteredError += (_, _) => Dispatcher.UIThread.Post(() =>
+        {
+            IsLoading = false;
             Error = "播放失败。可尝试更新到最新版解析引擎，或下载后用本地播放器打开。";
+        });
+        player.EndReached += (_, _) => Dispatcher.UIThread.Post(() => IsPlaying = false);
+        player.Stopped += (_, _) => Dispatcher.UIThread.Post(() => IsPlaying = false);
     }
 
     public async Task LoadImageAsync()
@@ -217,7 +237,8 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
         try { _player?.Stop(); } catch { }
         _media?.Dispose();
         _player?.Dispose();
-        _libvlc?.Dispose();
+        // LibVLC 是进程内共享的，这里不能释放，否则下一个预览会失败。
+        _libvlc = null;
     }
 
     private void Raise(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
