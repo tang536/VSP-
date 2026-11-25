@@ -67,7 +67,10 @@
             <!-- 音频控制条：叠在画面底部，鼠标无操作 3 秒自动淡出，移动鼠标立即出现 -->
             <Border x:Name="AudioBar" VerticalAlignment="Bottom" IsVisible="{Binding IsAudio}"
                     Opacity="{Binding ControlsOpacity}" IsHitTestVisible="{Binding AreControlsVisible}"
-                    PointerEntered="OnAudioBarPointerEntered" PointerExited="OnAudioBarPointerExited">
+                    PointerMoved="OnAudioBarPointerMoved"
+                    PointerPressed="OnAudioBarPointerPressed"
+                    PointerReleased="OnAudioBarPointerReleased"
+                    PointerCaptureLost="OnAudioBarPointerCaptureLost">
                 <Border.Transitions>
                     <Transitions>
                         <DoubleTransition Property="Opacity" Duration="0:0:0.24" />
@@ -83,7 +86,7 @@
                 <views:PlayerControls Margin="24,40,24,14" />
             </Border>
 
-            <!-- 图片错误提示（视频/音频的错误显示在控制条里） -->
+            <!-- 图片和音频的错误浮层（视频原生画面会盖住浮层，错误仍显示在控制条里） -->
             <Border Background="#E6202733" CornerRadius="8" Padding="12,8"
                     HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,14,0,0"
                     IsVisible="{Binding ShowMediaError}" MaxWidth="600">

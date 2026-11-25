@@ -35,7 +35,7 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
     private bool _volumePopupOpen;
     private bool _isLoading;
     private readonly DispatcherTimer _hideControlsTimer;
-    private bool _controlsHover;
+    private bool _controlsPressed;
     private bool _areControlsVisible = true;
     private double _controlsOpacity = 1;
     private double _playbackRate = 1.0;
@@ -60,10 +60,12 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
     public ICommand SeekForwardCommand { get; }
     public ICommand CycleRateCommand { get; }
 
-    public string Error { get => _error; private set { if (Set(ref _error, value)) { Raise(nameof(ShowMediaError)); Raise(nameof(ShowBarError)); if (!string.IsNullOrEmpty(value)) ShowControls(autoHide: false); } } }
+    public string Error { get => _error; private set { if (Set(ref _error, value)) { Raise(nameof(ShowMediaError)); Raise(nameof(ShowBarError)); } } }
     public bool HasError => !string.IsNullOrEmpty(Error);
-    public bool ShowMediaError => HasError && IsImage;
-    public bool ShowBarError => HasError && !IsImage;
+    // 图片/音频的错误用画面顶部的独立浮层，控制栏该隐藏时仍然隐藏；
+    // 视频画面是原生子窗口，浮层会被盖住，所以错误仍放在下方控制条里。
+    public bool ShowMediaError => HasError && !IsVideo;
+    public bool ShowBarError => HasError && IsVideo;
     public bool IsLoading { get => _isLoading; private set => Set(ref _isLoading, value); }
     public string ImagePath { get => _imagePath; private set => Set(ref _imagePath, value); }
     public string CoverPath { get => _coverPath; private set => Set(ref _coverPath, value); }
@@ -130,26 +132,39 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
 
     public string RateText => $"倍速 {PlaybackRate:0.0#}x";
 
-    /// <summary>鼠标在媒体区活动：立即显示控制条并重新计时。</summary>
+    /// <summary>鼠标在媒体区或控制条上活动：显示控制条并重新开始 3 秒倒计时。</summary>
     public void NotifyPointerActivity()
     {
         if (IsAudio) ShowControls();
     }
 
-    /// <summary>鼠标进入/离开控制条：进入时保持显示，离开后重新开始 3 秒倒计时。</summary>
-    public void SetControlsHover(bool hover)
+    /// <summary>按住控制条（拖动进度/音量）期间不自动隐藏，松开后重新计时。</summary>
+    public void SetControlsPressed(bool pressed)
     {
-        _controlsHover = hover;
-        if (hover) ShowControls(autoHide: false);
-        else if (IsAudio) RestartHideTimer();
+        _controlsPressed = pressed;
+        if (!IsAudio) return;
+        if (pressed)
+        {
+            ShowControls();
+            _hideControlsTimer.Stop();
+        }
+        else
+        {
+            RestartHideTimer();
+        }
     }
 
-    private void ShowControls(bool autoHide = true)
+    /// <summary>窗口重新激活时把控制条叫出来；失焦后照常由计时器隐藏。</summary>
+    public void NotifyWindowActiveChanged(bool active)
+    {
+        if (active) ShowControls();
+    }
+
+    private void ShowControls()
     {
         AreControlsVisible = true;
         ControlsOpacity = 1;
-        if (autoHide && IsAudio) RestartHideTimer();
-        else _hideControlsTimer.Stop();
+        if (IsAudio && !_controlsPressed) RestartHideTimer();
     }
 
     private void RestartHideTimer()
@@ -160,7 +175,10 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
 
     private void HideControlsIfIdle()
     {
-        if (!IsAudio || _controlsHover) return;
+        if (!IsAudio || _controlsPressed) return;
+
+        // 3 秒内没有鼠标操作就隐藏；即使光标停在控制条上也一样，
+        // 避免鼠标恰好停在底部导致控制条永远不消失。
         _hideControlsTimer.Stop();
         AreControlsVisible = false;
         ControlsOpacity = 0;
@@ -281,7 +299,9 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
         }
         catch (Exception ex)
         {
-            Error = (prefix == "cover-" ? "封面加载失败：" : "图片加载失败：") + ex.Message;
+            // 封面只是装饰，下载失败就回退到占位图标，不要弹错误，
+            // 更不要因为封面失败影响音频控制条的自动隐藏。
+            if (prefix != "cover-") Error = "图片加载失败：" + ex.Message;
             return null;
         }
     }

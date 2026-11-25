@@ -29,15 +29,28 @@ public partial class PreviewView : UserControl
     {
         base.OnAttachedToVisualTree(e);
         _window = TopLevel.GetTopLevel(this) as Window;
-        if (_window is not null) _window.KeyDown += OnKeyDown;
+        if (_window is not null)
+        {
+            _window.KeyDown += OnKeyDown;
+            _window.Activated += OnWindowActivated;
+        }
         if (DataContext is PreviewViewModel vm) ApplyFullScreen(vm.IsFullScreen);
     }
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
-        if (_window is not null) _window.KeyDown -= OnKeyDown;
+        if (_window is not null)
+        {
+            _window.KeyDown -= OnKeyDown;
+            _window.Activated -= OnWindowActivated;
+        }
         _window = null;
         base.OnDetachedFromVisualTree(e);
+    }
+
+    private void OnWindowActivated(object? sender, EventArgs e)
+    {
+        if (DataContext is PreviewViewModel vm) vm.NotifyWindowActiveChanged(true);
     }
 
     private void OnKeyDown(object? sender, KeyEventArgs e)
@@ -61,15 +74,26 @@ public partial class PreviewView : UserControl
         if (DataContext is PreviewViewModel vm) vm.NotifyPointerActivity();
     }
 
-    /// <summary>鼠标停在控制条上时保持可见，移出后重新计时。</summary>
-    private void OnAudioBarPointerEntered(object? sender, PointerEventArgs e)
+    /// <summary>鼠标在控制条上活动时重新计时；停在原处不动仍会隐藏。</summary>
+    private void OnAudioBarPointerMoved(object? sender, PointerEventArgs e)
     {
-        if (DataContext is PreviewViewModel vm) vm.SetControlsHover(true);
+        if (DataContext is PreviewViewModel vm) vm.NotifyPointerActivity();
     }
 
-    private void OnAudioBarPointerExited(object? sender, PointerEventArgs e)
+    /// <summary>按住进度条/音量条拖动期间不自动隐藏。</summary>
+    private void OnAudioBarPointerPressed(object? sender, PointerPressedEventArgs e)
     {
-        if (DataContext is PreviewViewModel vm) vm.SetControlsHover(false);
+        if (DataContext is PreviewViewModel vm) vm.SetControlsPressed(true);
+    }
+
+    private void OnAudioBarPointerReleased(object? sender, PointerReleasedEventArgs e)
+    {
+        if (DataContext is PreviewViewModel vm) vm.SetControlsPressed(false);
+    }
+
+    private void OnAudioBarPointerCaptureLost(object? sender, PointerCaptureLostEventArgs e)
+    {
+        if (DataContext is PreviewViewModel vm) vm.SetControlsPressed(false);
     }
 
     private void OnDataContextChanged()

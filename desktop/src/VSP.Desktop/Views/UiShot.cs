@@ -64,11 +64,11 @@ internal static class UiShot
             audioVm.ToggleVolumePopupCommand.Execute(null);
             await Settle();
             Save(window, Path.Combine(dir, "7d-audio-volume.png"), 1.0);
-            // 鼠标移出控制条后 3 秒应自动隐藏（先清掉示例 URL 的播放错误，
-            // 否则错误状态会有意保持控制条可见）
+            // 模拟按下再松开控制条后停止操作：3 秒后应自动隐藏
             audioVm.ReportError("");
-            audioVm.SetControlsHover(false);
-            audioVm.NotifyPointerActivity();
+            audioVm.NotifyWindowActiveChanged(true);
+            audioVm.SetControlsPressed(true);
+            audioVm.SetControlsPressed(false);
             await Task.Delay(3400);
             Save(window, Path.Combine(dir, "7e-audio-hidden.png"), 1.0);
         }
