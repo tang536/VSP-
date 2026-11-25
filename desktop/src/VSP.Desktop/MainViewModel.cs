@@ -335,6 +335,8 @@ public sealed class MainViewModel : BindableBase
     public ICommand LanAddManualCommand { get; }
     public ICommand LanAcceptPairCommand { get; }
     public ICommand LanRejectPairCommand { get; }
+    public ICommand LanDisconnectCommand { get; }
+    private CancellationTokenSource? _lanConnectCts;
     /// <summary>手动输入 IP 的文本框内容（设备弹窗绑定）。</summary>
     public string LanManualIp { get => _lanManualIp; set => Set(ref _lanManualIp, value); }
     private string _lanManualIp = "";
@@ -410,6 +412,7 @@ public sealed class MainViewModel : BindableBase
         LanAddManualCommand = new RelayCommand(() => _ = LanAddManualAsync());
         LanAcceptPairCommand = new RelayCommand(() => DecideIncomingPair(true));
         LanRejectPairCommand = new RelayCommand(() => DecideIncomingPair(false));
+        LanDisconnectCommand = new RelayCommand(DisconnectLan);
         StartLan();
 
         _services.Downloads.Tasks.CollectionChanged += (_, _) =>
@@ -772,8 +775,11 @@ public sealed class MainViewModel : BindableBase
         {
             _lan = new LanService(Environment.MachineName, DownloadDir);
             _lan.DevicesChanged += () => Dispatch(() => RefreshLanDevices());
+            _lan.ConnectionChanged += () => Dispatch(OnLanConnectionChanged);
             _lan.PairRequested += req => Dispatch(() =>
             {
+                // 已连接时不再弹申请窗（底层已去重，这里再兜一层）
+                if (_lan.IsConnectedTo(req.Id)) return;
                 IncomingPair = req;
                 LanStatus = $"{req.Name} 请求连接，请在弹窗中选择是否同意";
                 RequestPairDialog?.Invoke();
@@ -787,34 +793,79 @@ public sealed class MainViewModel : BindableBase
         }
     }
 
-    /// <summary>向选中设备发起连接申请，轮询对方是否同意，同意后才真正建立连接。</summary>
+    /// <summary>向选中设备发起连接申请，轮询对方是否同意，同意后两端同时进入已连接。</summary>
     private async Task LanConnectAsync(LanDevice dev)
     {
         if (_lan is null) return;
+        if (_lan.IsConnectedTo(dev.Id))
+        {
+            SelectedLanDevice = dev;
+            LanStatus = $"已连接 {dev.Name}，可互传文件或远程控制";
+            RequestCloseLanDevices?.Invoke();
+            return;
+        }
+        _lanConnectCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _lanConnectCts = cts;
         LanPairing = true;
         LanStatus = $"正在请求连接 {dev.Name}，等待对方同意…";
         try
         {
             var sent = await _lan.RequestPairAsync(dev);
-            if (!sent) { LanStatus = "连接申请发送失败，请确认对方在线"; LanPairing = false; return; }
-            for (var i = 0; i < 120; i++) // 最多等 40 秒
+            if (!sent) { if (!cts.IsCancellationRequested) LanStatus = "连接申请发送失败，请确认对方在线"; LanPairing = false; return; }
+            for (var i = 0; i < 120 && !cts.IsCancellationRequested; i++) // 最多等 40 秒
             {
-                await Task.Delay(1000);
+                await Task.Delay(1000, cts.Token);
                 var result = await _lan.PollPairAsync(dev);
-                if (result == "ok")
+                if (result == "ok" || _lan.IsConnectedTo(dev.Id))
                 {
-                    SelectedLanDevice = dev;
-                    LanStatus = "连接成功，可互传文件或远程控制";
+                    // 状态由 ConnectionChanged 事件统一更新，两端同步进入已连接
                     LanPairing = false;
                     RequestCloseLanDevices?.Invoke();
                     return;
                 }
                 if (result == "no") { LanStatus = "对方拒绝了连接申请"; LanPairing = false; return; }
             }
-            LanStatus = "对方未响应，连接超时";
+            if (!cts.IsCancellationRequested) LanStatus = "对方未响应，连接超时";
         }
+        catch (OperationCanceledException) { }
         catch (Exception ex) { LanStatus = "连接失败：" + ex.Message; }
         LanPairing = false;
+    }
+
+    /// <summary>连接状态变化：两端同步刷新"已连接"界面与设备列表标记。</summary>
+    private void OnLanConnectionChanged()
+    {
+        var peer = _lan?.ConnectedPeer;
+        LanPairing = false;
+        if (peer is not null)
+        {
+            if (!ReferenceEquals(SelectedLanDevice, peer))
+            {
+                _lanConnectCts?.Cancel();
+                SelectedLanDevice = peer;
+            }
+            LanStatus = $"已连接 {peer.Name}，可互传文件或远程控制";
+            RequestCloseLanDevices?.Invoke();
+        }
+        else
+        {
+            if (SelectedLanDevice is not null) SelectedLanDevice = null;
+            LanStatus = "已断开连接";
+        }
+        RefreshLanDevices();
+    }
+
+    /// <summary>断开当前连接，并通知对端同步断开。</summary>
+    private void DisconnectLan()
+    {
+        _lanConnectCts?.Cancel();
+        _lan?.Disconnect();
+        if (_lan?.ConnectedPeer is null)
+        {
+            SelectedLanDevice = null;
+            LanStatus = "已断开连接";
+        }
     }
 
     /// <summary>手动按 IP 添加设备（广播发现不可用时兜底）。</summary>
@@ -830,11 +881,12 @@ public sealed class MainViewModel : BindableBase
     private void DecideIncomingPair(bool accept)
     {
         if (_lan is null || IncomingPair is null) return;
-        var name = IncomingPair.Name;
-        _lan.DecidePair(IncomingPair.Id, accept);
+        var req = IncomingPair;
         IncomingPair = null;
-        LanStatus = accept ? $"已同意 {name} 的连接申请" : $"已拒绝 {name} 的连接申请";
         RequestClosePairDialog?.Invoke();
+        _lan.DecidePair(req.Id, accept); // 同意时连接事件会把两端界面切到"已连接"
+        if (!accept) LanStatus = $"已拒绝 {req.Name} 的连接申请";
+        else LanStatus = $"正在连接 {req.Name}…";
     }
 
     /// <summary>UI 事件：连接成功后关闭「附近设备」弹窗。</summary>
@@ -851,9 +903,11 @@ public sealed class MainViewModel : BindableBase
             if (!list.Any(d => d.Id == LanDevices[i].Id)) LanDevices.RemoveAt(i);
         foreach (var d in list)
             if (!LanDevices.Any(x => x.Id == d.Id)) LanDevices.Add(d);
+        // 已连接/正在连接时不要被周期性的设备发现刷掉状态
+        if (_lan.ConnectedPeer is not null || LanPairing) return;
         LanStatus = list.Count == 0
             ? "未发现设备，请确保两端在同一 Wi-Fi"
-            : $"发现 {list.Count} 台设备";
+            : $"发现 {list.Count} 台设备，点击连接（对方同意后两端同时已连接）";
     }
 
     private async Task RefreshLanFilesAsync()

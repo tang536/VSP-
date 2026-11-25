@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
-  <Package Name="全能工具箱 桌面端" Language="2052" Codepage="936" Manufacturer="全能工具箱" Version="1.2.0.0" UpgradeCode="A0A1D4B2-7D6C-4B8E-9F35-1234567890AB" ProductCode="*" Scope="perUserOrMachine">
+  <Package Name="全能工具箱 桌面端" Language="2052" Codepage="936" Manufacturer="全能工具箱" Version="1.2.1.0" UpgradeCode="A0A1D4B2-7D6C-4B8E-9F35-1234567890AB" ProductCode="*" Scope="perUserOrMachine">
     <MajorUpgrade Schedule="afterInstallValidate" AllowSameVersionUpgrades="yes" DowngradeErrorMessage="已安装更新版本的全能工具箱桌面端，无法降级安装。" />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
     <Icon Id="AppIcon" SourceFile="C:\Users\32854\Desktop\university\VSP解析\desktop\packaging\app.ico" />

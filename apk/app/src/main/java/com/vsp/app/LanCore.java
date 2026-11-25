@@ -58,6 +58,7 @@ public final class LanCore {
         public final String id, name, kind, ip;
         public final int port;
         public long lastSeen;
+        public volatile boolean connected;
         public Device(String id, String name, String kind, String ip, int port) {
             this.id = id; this.name = name; this.kind = kind; this.ip = ip; this.port = port;
             this.lastSeen = System.currentTimeMillis();
@@ -87,6 +88,8 @@ public final class LanCore {
         void onStatus(String text);
         /** 对方发来连接申请，UI 应弹窗让用户选择同意/拒绝 */
         default void onPairRequest(PairRequest req) { }
+        /** 连接建立/断开（含对方通过 hello 同步过来的状态） */
+        default void onConnectionChanged() { }
     }
 
     private final Context ctx;
@@ -100,6 +103,9 @@ public final class LanCore {
     private final java.util.Set<String> localIps = new java.util.HashSet<>();
     private final Map<String, PairRequest> pairRequests = new ConcurrentHashMap<>();
     private final Map<String, Boolean> pairAnswers = new ConcurrentHashMap<>();
+    private final Object connLock = new Object();
+    private volatile String connectedPeerId;
+    private volatile Device connectedPeer;
     private android.net.wifi.WifiManager.MulticastLock multicastLock;
 
     private volatile boolean running = false;
@@ -125,6 +131,9 @@ public final class LanCore {
         list.sort(Comparator.comparing((Device d) -> d.isAndroid()).thenComparing(d -> d.name));
         return list;
     }
+    public String getConnectedPeerId() { return connectedPeerId; }
+    public Device getConnectedDevice() { return connectedPeer; }
+    public boolean isConnectedTo(String id) { return id != null && id.equals(connectedPeerId); }
 
     public void start() {
         if (running) return;
@@ -176,13 +185,14 @@ public final class LanCore {
             if (sock == null) { status("发现服务启动失败：端口不可用"); return; }
             udp = sock;
 
-        final byte[] hello = helloJson().getBytes(StandardCharsets.UTF_8);
         // Android 10+ 对受限广播 255.255.255.255 有系统限制，很多机型直接丢弃，
         // 导致 PC 永远收不到 hello。改用每个网卡的子网定向广播地址（如 192.168.1.255），
         // 这是 Android 上可靠发送 UDP 广播的标准做法；全局广播仅作为兜底保留。
         final java.util.List<InetAddress> broadcastTargets = broadcastAddresses();
         pool.execute(() -> {
             while (running) {
+                // 每次重建 hello，使其携带最新的已连接对端 id
+                byte[] hello = helloJson().getBytes(StandardCharsets.UTF_8);
                 for (InetAddress target : broadcastTargets) {
                     try {
                         udp.send(new DatagramPacket(hello, hello.length, target, UDP_PORT));
@@ -199,9 +209,15 @@ public final class LanCore {
                 long cutoff = System.currentTimeMillis() - 9000;
                 boolean removed = false;
                 Iterator<Map.Entry<String, Device>> it = devices.entrySet().iterator();
+                boolean peerGone = false;
                 while (it.hasNext()) {
-                    if (it.next().getValue().lastSeen < cutoff) { it.remove(); removed = true; }
+                    Map.Entry<String, Device> e = it.next();
+                    if (e.getValue().lastSeen < cutoff) {
+                        if (isConnectedTo(e.getKey())) peerGone = true;
+                        it.remove(); removed = true;
+                    }
                 }
+                if (peerGone) clearConnected();
                 if (removed) changed();
             }
         });
@@ -217,9 +233,14 @@ public final class LanCore {
                     if (!TOKEN.equals(o.optString("k"))) continue;
                     String id = o.optString("id");
                     if (id.isEmpty() || id.equals(deviceId)) continue;
+                    String peerConnectedTo = o.optString("c", "");
                     Device d = new Device(id, o.optString("n", "设备"), o.optString("t", "pc"),
                             ip, o.optInt("p", HTTP_PORT));
                     devices.put(id, d);
+                    // 对方 hello 说它连着我 → 两端状态对称；对方不再连我 → 及时清除
+                    if (peerConnectedTo.equals(deviceId) && !isConnectedTo(id)) setConnected(d);
+                    else if (id.equals(connectedPeerId) && !peerConnectedTo.equals(deviceId)) clearConnected();
+                    syncDeviceFlags();
                     changed();
                 } catch (Throwable ignored) { }
             }
@@ -267,6 +288,7 @@ public final class LanCore {
             JSONObject o = new JSONObject();
             o.put("id", deviceId); o.put("n", deviceName); o.put("t", "android");
             o.put("p", HTTP_PORT); o.put("k", TOKEN);
+            o.put("c", connectedPeerId == null ? "" : connectedPeerId);
             return o.toString();
         } catch (Throwable t) { return "{}"; }
     }
@@ -345,23 +367,37 @@ public final class LanCore {
                 String rid = nullToEmpty(uri.getQueryParameter("id"));
                 String rip = nullToEmpty(uri.getQueryParameter("ip"));
                 if (!rid.isEmpty() && isPrivate(rip)) {
-                    PairRequest req = new PairRequest(rid, nullToEmpty(uri.getQueryParameter("n")),
-                            nullToEmpty(uri.getQueryParameter("t")), rip,
-                            parseInt(uri.getQueryParameter("p"), HTTP_PORT));
-                    pairRequests.put(rid, req);
-                    pairAnswers.remove(rid);
-                    try { callback.onPairRequest(req); } catch (Throwable ignored) { }
-                    respond(out, 200, "text/plain", "ok".getBytes());
+                    // 已连接或申请正在处理：直接回应，不重复弹窗
+                    if (isConnectedTo(rid)) {
+                        respond(out, 200, "text/plain", "ok".getBytes());
+                    } else if (pairRequests.containsKey(rid) || pairAnswers.containsKey(rid)) {
+                        respond(out, 200, "text/plain", "wait".getBytes());
+                    } else {
+                        PairRequest req = new PairRequest(rid, nullToEmpty(uri.getQueryParameter("n")),
+                                nullToEmpty(uri.getQueryParameter("t")), rip,
+                                parseInt(uri.getQueryParameter("p"), HTTP_PORT));
+                        pairRequests.put(rid, req);
+                        pairAnswers.remove(rid);
+                        try { callback.onPairRequest(req); } catch (Throwable ignored) { }
+                        respond(out, 200, "text/plain", "ok".getBytes());
+                    }
                 } else {
                     respond(out, 400, "text/plain", "bad request".getBytes());
                 }
             } else if ("/pair-result".equals(path)) {
-                // 发起方轮询：我是否已同意/拒绝它的申请
+                // 发起方轮询：已连接 / 我是否同意 / 拒绝它的申请
                 String rid = nullToEmpty(uri.getQueryParameter("id"));
                 Boolean ans = pairAnswers.get(rid);
-                String result = ans == null ? "wait" : (ans ? "ok" : "no");
+                String result = isConnectedTo(rid) ? "ok" : (ans == null ? "wait" : (ans ? "ok" : "no"));
                 respond(out, 200, "text/plain", result.getBytes(StandardCharsets.UTF_8));
-                if (!"wait".equals(result)) { pairAnswers.remove(rid); pairRequests.remove(rid); }
+                if (!"wait".equals(result) && !isConnectedTo(rid)) {
+                    pairAnswers.remove(rid); pairRequests.remove(rid);
+                }
+            } else if ("/unpair".equals(path)) {
+                // 对端主动断开：同步清除本机状态
+                String rid = nullToEmpty(uri.getQueryParameter("id"));
+                if (isConnectedTo(rid)) clearConnected();
+                respond(out, 200, "text/plain", "ok".getBytes());
             } else if ("/input".equals(path)) {
                 boolean ok = applyInput(body);
                 respond(out, ok ? 200 : 503, "text/plain", (ok ? "ok" : "no accessibility").getBytes());
@@ -516,26 +552,59 @@ public final class LanCore {
         } catch (Throwable t) { return false; }
     }
 
-    /** 轮询对方是否已同意我的申请：wait / ok / no */
+    /** 轮询对方是否已同意我的申请：wait / ok / no。拿到 ok 即两端同时连接。 */
     public String pollPair(Device d) {
         try {
-            String r = httpGet(d, "/pair-result?k=" + TOKEN + "&id=" + urlEnc(deviceId));
-            return nullToEmpty(r).trim();
+            String r = nullToEmpty(httpGet(d, "/pair-result?k=" + TOKEN + "&id=" + urlEnc(deviceId))).trim();
+            if ("ok".equals(r) && !isConnectedTo(d.id)) setConnected(d);
+            return r;
         } catch (Throwable t) { return "wait"; }
     }
 
-    /** 本地审批对方发来的申请；同意则把对方登记为设备。 */
+    /** 本地审批对方发来的申请；同意后本机立即进入已连接状态。 */
     public void decidePair(String reqId, boolean accept) {
         PairRequest req = pairRequests.get(reqId);
         if (req == null) return;
-        // 决定后不再保留申请，避免 map 长期挂死；限速/暴力把设备注册需要用户再点同意，但对方的 poll 应当回 no。
         pairRequests.remove(reqId);
         pairAnswers.put(reqId, accept);
-        if (accept && !req.name.isEmpty()) {
-            Device d = new Device(req.id, req.name, req.kind, req.ip, req.port);
+        if (accept) {
+            Device d = new Device(req.id, req.name.isEmpty() ? req.ip : req.name, req.kind, req.ip, req.port);
             devices.put(req.id, d);
+            setConnected(d);
             changed();
         }
+    }
+
+    /** 断开连接：清除本机状态并通知对端同步清除。 */
+    public void disconnect() {
+        Device d = connectedPeer;
+        if (d == null && connectedPeerId != null) d = devices.get(connectedPeerId);
+        clearConnected();
+        final Device target = d;
+        if (target != null) pool.execute(() -> {
+            try { httpGet(target, "/unpair?k=" + TOKEN + "&id=" + urlEnc(deviceId)); }
+            catch (Throwable ignored) { }
+        });
+    }
+
+    private void setConnected(Device d) {
+        synchronized (connLock) { connectedPeerId = d.id; connectedPeer = d; }
+        syncDeviceFlags();
+        try { callback.onConnectionChanged(); } catch (Throwable ignored) { }
+    }
+
+    private void clearConnected() {
+        boolean changed;
+        synchronized (connLock) { changed = connectedPeerId != null; connectedPeerId = null; connectedPeer = null; }
+        syncDeviceFlags();
+        if (changed) { try { callback.onConnectionChanged(); } catch (Throwable ignored) { } }
+    }
+
+    private void syncDeviceFlags() {
+        for (Device d : devices.values()) d.connected = d.id.equals(connectedPeerId);
+        Device peer = connectedPeer;
+        if (peer != null) peer.connected = true;
+        try { callback.onDevicesChanged(); } catch (Throwable ignored) { }
     }
 
     public List<FileEntry> listRemote(Device d, String dirB64) {

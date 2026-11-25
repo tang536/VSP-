@@ -17,21 +17,51 @@
         </StackPanel>
 
         <Grid Grid.Row="1">
-            <!-- 未选中设备：引导打开附近设备弹窗 -->
-            <Border Classes="card" Padding="32" IsVisible="{Binding !HasSelectedLanDevice}"
+            <!-- 未连接：附近设备直接显示在页面上，不弹窗 -->
+            <Border Classes="card" Padding="24" IsVisible="{Binding !HasSelectedLanDevice}"
                     HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
-                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="14" MaxWidth="520">
-                    <TextBlock Text="⌁" FontSize="46" Foreground="{DynamicResource Accent}"
-                               HorizontalAlignment="Center" />
-                    <TextBlock Text="连接附近设备" Classes="h2" HorizontalAlignment="Center" />
-                    <TextBlock Text="确保两台设备连接同一 Wi-Fi。发现不到时可用对方的本机 IP 直接连接。"
-                               Classes="sub" TextAlignment="Center" TextWrapping="Wrap" />
-                    <Button Classes="primary" Content="查找附近设备" HorizontalAlignment="Center"
-                            Padding="24,10" Command="{Binding OpenLanDevicesCommand}" />
-                    <TextBlock Text="{Binding LanLocalIp, StringFormat=本机地址：{0}}" Classes="dim"
-                               HorizontalAlignment="Center" />
-                    <ProgressBar IsIndeterminate="True" IsVisible="{Binding LanPairing}" Width="160" Height="4" />
-                </StackPanel>
+                <Grid RowDefinitions="Auto,*,Auto">
+                    <StackPanel Grid.Row="0" Spacing="4" Margin="0,0,0,12">
+                        <TextBlock Text="附近设备" Classes="h2" />
+                        <TextBlock Text="确保两台设备连接同一 Wi-Fi。点击连接，对方同意后两端会同时进入已连接状态。"
+                                   Classes="sub" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding LanLocalIp, StringFormat=本机地址：{0}}" Classes="dim" />
+                    </StackPanel>
+
+                    <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Disabled">
+                        <ItemsControl ItemsSource="{Binding LanDevices}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Classes="card" Padding="12" Margin="0,0,0,8">
+                                        <Grid ColumnDefinitions="Auto,*,Auto">
+                                            <Border Grid.Column="0" Width="38" Height="38" CornerRadius="6"
+                                                    Background="{DynamicResource AccentSoft}" Margin="0,0,12,0">
+                                                <TextBlock Text="{Binding Kind}" FontSize="11" Foreground="{DynamicResource Accent}"
+                                                           HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                            </Border>
+                                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
+                                                <TextBlock Text="{Binding Name}" Foreground="{DynamicResource Ink}" FontSize="14" />
+                                                <TextBlock Text="{Binding Ip}" Foreground="{DynamicResource InkDim}" FontSize="11" />
+                                            </StackPanel>
+                                            <Button Grid.Column="2" Classes="primary small" Width="64" Height="32"
+                                                    Content="连接"
+                                                    Command="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).LanConnectCommand}"
+                                                    CommandParameter="{Binding}" />
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+
+                    <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8" Margin="0,12,0,0">
+                        <TextBox PlaceholderText="输入对方 IP，如 192.168.1.5" Text="{Binding LanManualIp}"
+                                 Height="40" VerticalAlignment="Center" />
+                        <Button Classes="primary" Width="96" Height="40" Content="手动连接"
+                                Command="{Binding LanAddManualCommand}" />
+                        <ProgressBar IsIndeterminate="True" IsVisible="{Binding LanPairing}" Width="120" Height="4" />
+                    </StackPanel>
+                </Grid>
             </Border>
 
             <!-- 操作区（已连接设备） -->
@@ -43,6 +73,7 @@
                             <TextBlock Text="{Binding SelectedLanDevice.Name}" Classes="h2" VerticalAlignment="Center" />
                         </Border>
                         <Button Classes="ghost small" Content="切换设备" Command="{Binding OpenLanDevicesCommand}" />
+                        <Button Classes="ghost small" Content="断开连接" Command="{Binding LanDisconnectCommand}" />
                         <TextBlock Text="{Binding LanBreadcrumb}" Classes="h2" VerticalAlignment="Center" Margin="8,0,0,0" />
                         <Button Classes="ghost small" Content="上级" Command="{Binding LanBackDirCommand}" />
                         <Button Classes="primary small" Content="发送文件" Command="{Binding LanUploadCommand}" />

@@ -32,8 +32,12 @@
                                         <TextBlock Text="{Binding Ip}" Foreground="{DynamicResource InkDim}" FontSize="11" />
                                     </StackPanel>
                                     <Button Grid.Column="2" Classes="primary small" Width="64" Height="32" Content="连接"
+                                            IsVisible="{Binding !IsConnected}"
                                             Command="{Binding $parent[Window].((vm:MainViewModel)DataContext).LanConnectCommand}"
                                             CommandParameter="{Binding}" />
+                                    <Button Grid.Column="2" Classes="ghost small" Width="64" Height="32" Content="已连接"
+                                            IsVisible="{Binding IsConnected}"
+                                            Command="{Binding $parent[Window].((vm:MainViewModel)DataContext).LanDisconnectCommand}" />
                                 </Grid>
                             </Border>
                         </DataTemplate>

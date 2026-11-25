@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.ComponentModel;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Net;
@@ -12,7 +13,7 @@ using System.Text.Json.Serialization;
 namespace VSP.Core;
 
 /// <summary>局域网上发现的一台设备（手机或电脑）。</summary>
-public sealed class LanDevice
+public sealed class LanDevice : INotifyPropertyChanged
 {
     public string Id { get; set; } = "";
     public string Name { get; set; } = "";
@@ -21,6 +22,15 @@ public sealed class LanDevice
     public int Port { get; set; }
     public DateTime LastSeen { get; set; }
     public bool IsAndroid => string.Equals(Kind, "android", StringComparison.OrdinalIgnoreCase);
+
+    private bool _isConnected;
+    /// <summary>当前是否已与本设备建立连接（两端状态通过 UDP hello 同步）。</summary>
+    public bool IsConnected
+    {
+        get => _isConnected;
+        set { if (_isConnected != value) { _isConnected = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsConnected))); } }
+    }
+    public event PropertyChangedEventHandler? PropertyChanged;
 }
 
 public sealed class LanFileEntry
@@ -70,6 +80,9 @@ public sealed class LanService : IDisposable
     private readonly ConcurrentDictionary<string, LanPairRequest> _pairRequests = new();
     private readonly ConcurrentDictionary<string, bool> _pairAnswers = new();
     private readonly HttpClient _client = new() { Timeout = TimeSpan.FromSeconds(8) };
+    private readonly object _connLock = new();
+    private string? _connectedPeerId;
+    private LanDevice? _connectedPeer;
     private UdpClient? _udp;
     private TcpListener? _tcp;
     private CancellationTokenSource? _cts;
@@ -82,6 +95,14 @@ public sealed class LanService : IDisposable
     public event Action? DevicesChanged;
     /// <summary>收到一台设备发起的连接申请，UI 应弹窗让用户选择同意/拒绝。</summary>
     public event Action<LanPairRequest>? PairRequested;
+    /// <summary>连接状态变化（建立、断开、对方断开）。两端状态通过 hello 广播同步。</summary>
+    public event Action? ConnectionChanged;
+
+    /// <summary>当前已连接的对端 Id，未连接时为 null。</summary>
+    public string? ConnectedPeerId { get { lock (_connLock) return _connectedPeerId; } }
+    /// <summary>当前已连接的对端设备，未连接时为 null。</summary>
+    public LanDevice? ConnectedPeer { get { lock (_connLock) return _connectedPeer; } }
+    public bool IsConnectedTo(string id) => !string.IsNullOrEmpty(id) && id == ConnectedPeerId;
 
     public LanService(string deviceName, string shareRoot)
     {
@@ -107,11 +128,12 @@ public sealed class LanService : IDisposable
             _udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
             _udp.Client.Bind(new IPEndPoint(IPAddress.Any, UdpPort));
 
-            var hello = JsonSerializer.Serialize(new
+            // hello 携带 c=当前已连接对端的 id，另一端据此实时同步"已连接"状态。
+            byte[] HelloBytes() => Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
             {
-                id = _deviceId, n = _deviceName, t = "pc", p = HttpPort, k = Token
-            });
-            var helloBytes = Encoding.UTF8.GetBytes(hello);
+                id = _deviceId, n = _deviceName, t = "pc", p = HttpPort, k = Token,
+                c = ConnectedPeerId ?? ""
+            }));
             var targets = BroadcastAddresses();
             foreach (var ip in GetLocalPrivateIps()) _localIps.Add(ip);
             LocalIp = _localIps.FirstOrDefault() ?? "127.0.0.1";
@@ -120,6 +142,7 @@ public sealed class LanService : IDisposable
             {
                 while (!ct.IsCancellationRequested)
                 {
+                    var helloBytes = HelloBytes();
                     foreach (var t in targets)
                     {
                         try { await _udp!.SendAsync(helloBytes, new IPEndPoint(t, UdpPort), ct); }
@@ -143,6 +166,7 @@ public sealed class LanService : IDisposable
                         if (!root.TryGetProperty("k", out var k) || k.GetString() != Token) continue;
                         var id = root.GetProperty("id").GetString() ?? "";
                         if (string.IsNullOrEmpty(id) || id == _deviceId) continue;
+                        var peerConnectedTo = root.TryGetProperty("c", out var c) ? c.GetString() ?? "" : "";
                         var dev = new LanDevice
                         {
                             Id = id,
@@ -153,6 +177,13 @@ public sealed class LanService : IDisposable
                             LastSeen = DateTime.Now,
                         };
                         _devices[id] = dev;
+                        // 对方 hello 里说它连着我 → 本机也应进入已连接状态（握手双方对称）。
+                        if (peerConnectedTo == _deviceId && !IsConnectedTo(id))
+                            SetConnected(dev);
+                        // 对方已不再连着我 → 及时清除本机状态。
+                        else if (id == ConnectedPeerId && peerConnectedTo != _deviceId)
+                            ClearConnected();
+                        SyncDeviceFlags();
                         DevicesChanged?.Invoke();
                     }
                     catch (OperationCanceledException) { break; }
@@ -173,6 +204,7 @@ public sealed class LanService : IDisposable
                         if (dead.Count > 0)
                         {
                             foreach (var id in dead) _devices.TryRemove(id, out _);
+                            if (dead.Contains(ConnectedPeerId ?? "")) ClearConnected();
                             DevicesChanged?.Invoke();
                         }
                     }
@@ -310,21 +342,38 @@ public sealed class LanService : IDisposable
                         };
                         if (!string.IsNullOrEmpty(req.Id) && IsPrivateOrLoopback(req.Ip))
                         {
-                            _pairRequests[req.Id] = req;
-                            _pairAnswers.TryRemove(req.Id, out _);
-                            try { PairRequested?.Invoke(req); } catch { }
-                            Respond(stream, 200, "ok");
+                            // 已经和该设备连接，或该设备的申请正在处理：直接回应，绝不重复弹窗。
+                            if (IsConnectedTo(req.Id)) { Respond(stream, 200, "ok"); }
+                            else if (_pairRequests.ContainsKey(req.Id) || _pairAnswers.ContainsKey(req.Id))
+                            { Respond(stream, 200, "wait"); }
+                            else
+                            {
+                                _pairRequests[req.Id] = req;
+                                _pairAnswers.TryRemove(req.Id, out _);
+                                try { PairRequested?.Invoke(req); } catch { }
+                                Respond(stream, 200, "ok");
+                            }
                         }
                         else Respond(stream, 400, "bad request");
                         break;
                     }
                 case "/pair-result":
                     {
-                        // 发起方轮询：我是否已同意/拒绝它的申请。
+                        // 发起方轮询：已连接/我是否同意/拒绝它的申请。
                         var rid = qs.GetValueOrDefault("id") ?? "";
-                        var answer = _pairAnswers.TryGetValue(rid, out var a) ? (a ? "ok" : "no") : "wait";
+                        var answer = IsConnectedTo(rid) ? "ok"
+                            : _pairAnswers.TryGetValue(rid, out var a) ? (a ? "ok" : "no") : "wait";
                         Respond(stream, 200, answer);
-                        if (answer != "wait") { _pairAnswers.TryRemove(rid, out _); _pairRequests.TryRemove(rid, out _); }
+                        if (answer != "wait" && !IsConnectedTo(rid))
+                        { _pairAnswers.TryRemove(rid, out _); _pairRequests.TryRemove(rid, out _); }
+                        break;
+                    }
+                case "/unpair":
+                    {
+                        // 对端主动断开：同步清除本机连接状态。
+                        var rid = qs.GetValueOrDefault("id") ?? "";
+                        if (IsConnectedTo(rid)) ClearConnected();
+                        Respond(stream, 200, "ok");
                         break;
                     }
                 default: Respond(stream, 404, "not found"); break;
@@ -621,24 +670,25 @@ public sealed class LanService : IDisposable
         catch { return false; }
     }
 
-    /// <summary>轮询对方是否已同意我的申请：wait / ok / no。</summary>
+    /// <summary>轮询对方是否已同意我的申请：wait / ok / no。拿到 ok 即双方建立连接。</summary>
     public async Task<string> PollPairAsync(LanDevice dev)
     {
         try
         {
-            var r = await _client.GetStringAsync($"http://{dev.Ip}:{dev.Port}/pair-result?k={Token}&id={Uri.EscapeDataString(DeviceId)}");
-            return r.Trim();
+            var r = (await _client.GetStringAsync($"http://{dev.Ip}:{dev.Port}/pair-result?k={Token}&id={Uri.EscapeDataString(DeviceId)}")).Trim();
+            if (r == "ok" && !IsConnectedTo(dev.Id)) SetConnected(dev);
+            return r;
         }
         catch { return "wait"; }
     }
 
-    /// <summary>本地审批对方发来的连接申请。同意则同时把对方登记为设备。</summary>
+    /// <summary>本地审批对方发来的连接申请。同意后本机立即进入已连接状态。</summary>
     public void DecidePair(string reqId, bool accept)
     {
         if (!_pairRequests.TryGetValue(reqId, out var req)) return;
         _pairRequests.TryRemove(reqId, out _);
         _pairAnswers[reqId] = accept;
-        if (accept && !string.IsNullOrWhiteSpace(req.Name))
+        if (accept)
         {
             var dev = new LanDevice
             {
@@ -646,8 +696,47 @@ public sealed class LanService : IDisposable
                 Ip = req.Ip, Port = req.Port, LastSeen = DateTime.Now,
             };
             _devices[req.Id] = dev;
+            SetConnected(dev);
             DevicesChanged?.Invoke();
         }
+    }
+
+    /// <summary>断开连接：清除本机状态并通知对端同步清除。</summary>
+    public void Disconnect()
+    {
+        LanDevice? dev;
+        lock (_connLock)
+        {
+            dev = _connectedPeer;
+            if (dev is null && _connectedPeerId is not null)
+                _devices.TryGetValue(_connectedPeerId, out dev);
+        }
+        ClearConnected();
+        if (dev is not null)
+            _ = _client.GetStringAsync($"http://{dev.Ip}:{dev.Port}/unpair?k={Token}&id={Uri.EscapeDataString(DeviceId)}");
+    }
+
+    private void SetConnected(LanDevice dev)
+    {
+        lock (_connLock) { _connectedPeerId = dev.Id; _connectedPeer = dev; }
+        SyncDeviceFlags();
+        try { ConnectionChanged?.Invoke(); } catch { }
+    }
+
+    private void ClearConnected()
+    {
+        bool changed;
+        lock (_connLock) { changed = _connectedPeerId is not null; _connectedPeerId = null; _connectedPeer = null; }
+        SyncDeviceFlags();
+        if (changed) { try { ConnectionChanged?.Invoke(); } catch { } }
+    }
+
+    private void SyncDeviceFlags()
+    {
+        var id = ConnectedPeerId;
+        foreach (var d in _devices.Values) d.IsConnected = d.Id == id;
+        var peer = ConnectedPeer;
+        if (peer is not null) peer.IsConnected = true;
     }
 
     private static bool IsPrivateOrLoopback(string ipText)
