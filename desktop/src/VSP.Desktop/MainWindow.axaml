@@ -8,7 +8,14 @@
         Width="1080" Height="620" MinWidth="900" MinHeight="560"
         WindowStartupLocation="CenterScreen"
         Background="{DynamicResource AppBackground}">
-    <Grid RowDefinitions="Auto,*">
+    <Grid x:Name="RootContent" RowDefinitions="Auto,*" Opacity="0"
+          RenderTransform="translateY(12px)">
+        <Grid.Transitions>
+            <Transitions>
+                <DoubleTransition Property="Opacity" Duration="0:0:0.36" />
+                <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.4" />
+            </Transitions>
+        </Grid.Transitions>
         <!-- 顶栏：与 Web 端 topbar 同一结构（橙色 V 品牌 + 导航 + 外观）；播放器全屏时隐藏 -->
         <Border Grid.Row="0" Height="56" IsVisible="{Binding !IsPlayerFullScreen}"
                 Background="{DynamicResource Surface}"
@@ -65,13 +72,13 @@
         </Border>
 
         <Grid Grid.Row="1">
-            <views:HomeView DataContext="{Binding}" IsVisible="{Binding IsHome}" />
-            <views:LocalView DataContext="{Binding}" IsVisible="{Binding IsLocal}" />
-            <views:MeView DataContext="{Binding}" IsVisible="{Binding IsMePage}" />
-            <views:QueueView DataContext="{Binding}" IsVisible="{Binding IsQueuePage}" />
-            <views:StorageView DataContext="{Binding}" IsVisible="{Binding IsStoragePage}" />
-            <views:LanView DataContext="{Binding}" IsVisible="{Binding IsLanPage}" />
-            <Panel IsVisible="{Binding IsPreviewPage}">
+            <views:HomeView x:Name="PageHome" Classes="page" DataContext="{Binding}" IsVisible="{Binding IsHome}" />
+            <views:LocalView x:Name="PageLocal" Classes="page" DataContext="{Binding}" IsVisible="{Binding IsLocal}" />
+            <views:MeView x:Name="PageMe" Classes="page" DataContext="{Binding}" IsVisible="{Binding IsMePage}" />
+            <views:QueueView x:Name="PageQueue" Classes="page" DataContext="{Binding}" IsVisible="{Binding IsQueuePage}" />
+            <views:StorageView x:Name="PageStorage" Classes="page" DataContext="{Binding}" IsVisible="{Binding IsStoragePage}" />
+            <views:LanView x:Name="PageLan" Classes="page" DataContext="{Binding}" IsVisible="{Binding IsLanPage}" />
+            <Panel x:Name="PagePreview" Classes="page" IsVisible="{Binding IsPreviewPage}">
                 <views:PreviewView DataContext="{Binding Preview}" />
             </Panel>
         </Grid>

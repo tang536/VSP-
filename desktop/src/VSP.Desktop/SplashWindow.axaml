@@ -23,10 +23,13 @@
                        Source="avares://VSP.Desktop/Assets/app.png"
                        Width="104" Height="104"
                        HorizontalAlignment="Center"
+                       RenderTransform="scale(0.82)"
                        Opacity="0">
+                    <!-- 手机端开场是「缩放 + 淡入」，初始缩放值在代码里设置 -->
                     <Image.Transitions>
                         <Transitions>
                             <DoubleTransition Property="Opacity" Duration="0:0:0.45" />
+                            <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.5" />
                         </Transitions>
                     </Image.Transitions>
                 </Image>

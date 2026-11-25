@@ -215,6 +215,23 @@
             <Setter Property="FontSize" Value="12" />
         </Style>
 
+        <!-- 播放器控制条按钮：透明底、白色图标/文字，悬停时轻微提亮 -->
+        <Style Selector="Button.player">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="#E6FFFFFF" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="CornerRadius" Value="4" />
+            <Setter Property="Padding" Value="8,0" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Cursor" Value="Hand" />
+        </Style>
+        <Style Selector="Button.player:pointerover /template/ ContentPresenter">
+            <Setter Property="Background" Value="#1FFFFFFF" />
+        </Style>
+        <Style Selector="Button.player:pressed /template/ ContentPresenter">
+            <Setter Property="Background" Value="#33FFFFFF" />
+        </Style>
+
         <Style Selector="Button.nav">
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="Foreground" Value="{DynamicResource InkDim}" />

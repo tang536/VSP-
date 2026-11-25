@@ -34,6 +34,13 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
     private string _durationText = "00:00";
     private bool _volumePopupOpen;
     private bool _isLoading;
+    private readonly DispatcherTimer _hideControlsTimer;
+    private bool _controlsHover;
+    private bool _areControlsVisible = true;
+    private double _controlsOpacity = 1;
+    private double _playbackRate = 1.0;
+
+    private static readonly double[] PlaybackRates = [1.0, 1.25, 1.5, 2.0, 0.75];
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public event Action? CloseRequested;
@@ -49,8 +56,11 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
     public ICommand ToggleVolumePopupCommand { get; }
     public ICommand CloseCommand { get; }
     public ICommand ToggleFullScreenCommand { get; }
+    public ICommand SeekBackCommand { get; }
+    public ICommand SeekForwardCommand { get; }
+    public ICommand CycleRateCommand { get; }
 
-    public string Error { get => _error; private set { if (Set(ref _error, value)) { Raise(nameof(ShowMediaError)); Raise(nameof(ShowBarError)); } } }
+    public string Error { get => _error; private set { if (Set(ref _error, value)) { Raise(nameof(ShowMediaError)); Raise(nameof(ShowBarError)); if (!string.IsNullOrEmpty(value)) ShowControls(autoHide: false); } } }
     public bool HasError => !string.IsNullOrEmpty(Error);
     public bool ShowMediaError => HasError && IsImage;
     public bool ShowBarError => HasError && !IsImage;
@@ -95,13 +105,66 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
     public Avalonia.Media.Geometry? PlayPauseIcon =>
         Application.Current?.FindResource(IsPlaying ? "IconPause" : "IconPlay") as Avalonia.Media.Geometry;
 
-    public bool IsFullScreen { get => _isFullScreen; private set { if (Set(ref _isFullScreen, value)) { Raise(nameof(FullScreenText)); Raise(nameof(ShowControls)); Raise(nameof(ShowHeader)); } } }
+    public bool IsFullScreen { get => _isFullScreen; private set { if (Set(ref _isFullScreen, value)) { Raise(nameof(FullScreenText)); Raise(nameof(ShowVideoControls)); Raise(nameof(ShowHeader)); } } }
     public string FullScreenText => IsFullScreen ? "退出全屏" : "全屏";
-    // 播放器控制层（进度条/音量/全屏按钮）普通视频预览也保持可见；
-    // 之前全屏时隐藏，导致用户找不到进度和音量。
-    public bool ShowControls => !IsImage;
+    // 视频控制条在画面下方单独一行（原生视频窗口无法被 Avalonia 控件覆盖）；
+    // 音频控制条叠在画面底部，并支持 3 秒自动隐藏。
+    public bool ShowVideoControls => IsVideo;
     public bool ShowHeader => !IsFullScreen;
     public void SetFullScreen(bool value) => IsFullScreen = value;
+
+    /// <summary>音频控制条是否可见（也决定是否可点击）。</summary>
+    public bool AreControlsVisible { get => _areControlsVisible; private set => Set(ref _areControlsVisible, value); }
+    /// <summary>用于 Opacity 过渡的数值：1 显示 / 0 淡出。</summary>
+    public double ControlsOpacity { get => _controlsOpacity; private set => Set(ref _controlsOpacity, value); }
+
+    /// <summary>当前播放倍速；点击“倍速”按钮循环切换。</summary>
+    public double PlaybackRate
+    {
+        get => _playbackRate;
+        private set
+        {
+            if (Set(ref _playbackRate, value)) Raise(nameof(RateText));
+        }
+    }
+
+    public string RateText => $"倍速 {PlaybackRate:0.0#}x";
+
+    /// <summary>鼠标在媒体区活动：立即显示控制条并重新计时。</summary>
+    public void NotifyPointerActivity()
+    {
+        if (IsAudio) ShowControls();
+    }
+
+    /// <summary>鼠标进入/离开控制条：进入时保持显示，离开后重新开始 3 秒倒计时。</summary>
+    public void SetControlsHover(bool hover)
+    {
+        _controlsHover = hover;
+        if (hover) ShowControls(autoHide: false);
+        else if (IsAudio) RestartHideTimer();
+    }
+
+    private void ShowControls(bool autoHide = true)
+    {
+        AreControlsVisible = true;
+        ControlsOpacity = 1;
+        if (autoHide && IsAudio) RestartHideTimer();
+        else _hideControlsTimer.Stop();
+    }
+
+    private void RestartHideTimer()
+    {
+        _hideControlsTimer.Stop();
+        _hideControlsTimer.Start();
+    }
+
+    private void HideControlsIfIdle()
+    {
+        if (!IsAudio || _controlsHover) return;
+        _hideControlsTimer.Stop();
+        AreControlsVisible = false;
+        ControlsOpacity = 0;
+    }
 
     // 手机端播放器：当前时间 / 总时长分列进度条两侧
     public string ElapsedText { get => _elapsedText; private set => Set(ref _elapsedText, value); }
@@ -137,6 +200,14 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
         ToggleVolumePopupCommand = new RelayCommand(() => IsVolumePopupOpen = !IsVolumePopupOpen);
         CloseCommand = new RelayCommand(() => CloseRequested?.Invoke());
         ToggleFullScreenCommand = new RelayCommand(() => IsFullScreen = !IsFullScreen);
+        SeekBackCommand = new RelayCommand(() => SeekBy(-10));
+        SeekForwardCommand = new RelayCommand(() => SeekBy(10));
+        CycleRateCommand = new RelayCommand(CyclePlaybackRate);
+
+        _hideControlsTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+        _hideControlsTimer.Tick += (_, _) => HideControlsIfIdle();
+        // 音频打开后控制条先显示，3 秒内没有鼠标活动就自动隐藏。
+        if (request.IsAudio) _hideControlsTimer.Start();
 
         _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
         _timer.Tick += (_, _) => RefreshPosition();
@@ -154,7 +225,12 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
         _libvlc = libvlc;
         _player = player;
         _media = media;
-        try { player.Volume = (int)Math.Round(_volume); } catch { }
+        try
+        {
+            player.Volume = (int)Math.Round(_volume);
+            if (Math.Abs(_playbackRate - 1.0) > 0.001) player.SetRate((float)_playbackRate);
+        }
+        catch { }
         // LibVLC 的事件来自原生线程，必须回到 UI 线程再改绑定属性。
         player.Playing += (_, _) => Dispatcher.UIThread.Post(() =>
         {
@@ -229,11 +305,33 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
         catch { }
     }
 
+    private void SeekBy(int seconds)
+    {
+        if (_player is not { Length: > 0 } player) return;
+        try
+        {
+            var target = Math.Clamp(player.Time + seconds * 1000L, 0, Math.Max(0, player.Length - 500));
+            player.Time = target;
+            NotifyPointerActivity();
+        }
+        catch { }
+    }
+
+    private void CyclePlaybackRate()
+    {
+        var index = Array.IndexOf(PlaybackRates, PlaybackRate);
+        var next = PlaybackRates[(index + 1) % PlaybackRates.Length];
+        PlaybackRate = next;
+        try { _player?.SetRate((float)next); } catch { }
+        NotifyPointerActivity();
+    }
+
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
         _timer.Stop();
+        _hideControlsTimer.Stop();
         try { _player?.Stop(); } catch { }
         _media?.Dispose();
         _player?.Dispose();

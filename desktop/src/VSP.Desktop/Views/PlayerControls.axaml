@@ -1,0 +1,48 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:VSP.Desktop.Views"
+             x:Class="VSP.Desktop.Views.PlayerControls"
+             x:DataType="vm:PreviewViewModel">
+    <!-- 视频/音频共用控制层：上排进度（当前时间 / 进度条 / 总时长），下排播放与右侧功能 -->
+    <StackPanel>
+        <TextBlock Text="{Binding Error}" IsVisible="{Binding ShowBarError}"
+                   Foreground="#FFB4B4" FontSize="12" TextWrapping="Wrap"
+                   MaxLines="2" Margin="2,2,2,2" />
+        <TextBlock Text="正在打开…" IsVisible="{Binding IsLoading}"
+                   Foreground="#B9B9B9" FontSize="11" Margin="2,2,2,2" />
+
+        <Grid ColumnDefinitions="52,*,52" Height="28" VerticalAlignment="Center">
+            <TextBlock Grid.Column="0" Text="{Binding ElapsedText}" FontSize="12"
+                       Foreground="#F2FFFFFF" VerticalAlignment="Center" />
+            <Slider Grid.Column="1" Theme="{StaticResource PlayerSlider}" Margin="8,0"
+                    VerticalAlignment="Center" Value="{Binding Position, Mode=TwoWay}" />
+            <TextBlock Grid.Column="2" Text="{Binding DurationText}" FontSize="12"
+                       Foreground="#B3FFFFFF" TextAlignment="Right" VerticalAlignment="Center" />
+        </Grid>
+
+        <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto,Auto,Auto,Auto" Height="46" VerticalAlignment="Center">
+            <Button Grid.Column="0" Classes="player" Width="44" Height="44"
+                    Command="{Binding PlayPauseCommand}" ToolTip.Tip="播放 / 暂停">
+                <PathIcon Data="{Binding PlayPauseIcon}" Width="24" Height="24" Foreground="#FFFFFF" />
+            </Button>
+            <Button Grid.Column="1" Classes="player" Height="34" Content="−10s" FontSize="11"
+                    Command="{Binding SeekBackCommand}" ToolTip.Tip="后退 10 秒" />
+            <Button Grid.Column="2" Classes="player" Height="34" Content="+10s" FontSize="11"
+                    Command="{Binding SeekForwardCommand}" ToolTip.Tip="前进 10 秒" />
+            <Border Grid.Column="3" />
+            <Button Grid.Column="4" Classes="player" Height="34" Content="{Binding RateText}"
+                    FontSize="12" Command="{Binding CycleRateCommand}" ToolTip.Tip="切换播放速度" />
+            <Button Grid.Column="5" Classes="player" Width="36" Height="36"
+                    Command="{Binding ToggleMuteCommand}" ToolTip.Tip="{Binding MuteText}">
+                <PathIcon Data="{Binding MuteIcon}" Width="18" Height="18" Foreground="#FFFFFF" />
+            </Button>
+            <Slider Grid.Column="6" Width="92" Theme="{StaticResource PlayerSlider}"
+                    Margin="2,0,12,0" VerticalAlignment="Center"
+                    Value="{Binding Volume, Mode=TwoWay}" ToolTip.Tip="{Binding VolumeText}" />
+            <Button Grid.Column="7" Classes="player" Width="36" Height="36"
+                    Command="{Binding ToggleFullScreenCommand}" ToolTip.Tip="{Binding FullScreenText}">
+                <PathIcon Data="{StaticResource IconFullscreen}" Width="18" Height="18" Foreground="#FFFFFF" />
+            </Button>
+        </Grid>
+    </StackPanel>
+</UserControl>

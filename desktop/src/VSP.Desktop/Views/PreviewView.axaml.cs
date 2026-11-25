@@ -49,6 +49,29 @@ public partial class PreviewView : UserControl
         }
     }
 
+    /// <summary>鼠标在媒体区移动时唤醒音频控制条，并重新开始 3 秒自动隐藏计时。</summary>
+    private void OnMediaPointerMoved(object? sender, PointerEventArgs e)
+    {
+        if (DataContext is PreviewViewModel vm) vm.NotifyPointerActivity();
+    }
+
+    /// <summary>控制条隐藏后，单击画面也能把它叫出来。</summary>
+    private void OnMediaPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (DataContext is PreviewViewModel vm) vm.NotifyPointerActivity();
+    }
+
+    /// <summary>鼠标停在控制条上时保持可见，移出后重新计时。</summary>
+    private void OnAudioBarPointerEntered(object? sender, PointerEventArgs e)
+    {
+        if (DataContext is PreviewViewModel vm) vm.SetControlsHover(true);
+    }
+
+    private void OnAudioBarPointerExited(object? sender, PointerEventArgs e)
+    {
+        if (DataContext is PreviewViewModel vm) vm.SetControlsHover(false);
+    }
+
     private void OnDataContextChanged()
     {
         var vm = DataContext as PreviewViewModel;

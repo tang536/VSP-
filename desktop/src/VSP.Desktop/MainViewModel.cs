@@ -303,6 +303,7 @@ public sealed class MainViewModel : BindableBase
     // ---------------- 局域网互传与远控 ----------------
     private LanService? _lan;
     public ObservableCollection<LanDevice> LanDevices { get; } = [];
+    public bool HasNoLanDevices => LanDevices.Count == 0;
     public ObservableCollection<LanFileEntry> LanRemoteFiles { get; } = [];
     public LanDevice? SelectedLanDevice { get => _selectedLan; set { if (Set(ref _selectedLan, value)) { _lanDirStack.Clear(); _ = RefreshLanFilesAsync(); Raise(nameof(HasSelectedLanDevice)); Raise(nameof(LanBreadcrumb)); } } }
     private LanDevice? _selectedLan;
@@ -903,6 +904,7 @@ public sealed class MainViewModel : BindableBase
             if (!list.Any(d => d.Id == LanDevices[i].Id)) LanDevices.RemoveAt(i);
         foreach (var d in list)
             if (!LanDevices.Any(x => x.Id == d.Id)) LanDevices.Add(d);
+        Raise(nameof(HasNoLanDevices));
         // 已连接/正在连接时不要被周期性的设备发现刷掉状态
         if (_lan.ConnectedPeer is not null || LanPairing) return;
         LanStatus = list.Count == 0

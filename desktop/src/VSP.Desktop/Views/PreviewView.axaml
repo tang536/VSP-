@@ -1,6 +1,7 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vlc="clr-namespace:LibVLCSharp.Avalonia;assembly=LibVLCSharp.Avalonia"
+             xmlns:views="clr-namespace:VSP.Desktop.Views"
              xmlns:vm="clr-namespace:VSP.Desktop.Views"
              x:Class="VSP.Desktop.Views.PreviewView"
              x:DataType="vm:PreviewViewModel"
@@ -23,28 +24,66 @@
             </Grid>
         </Border>
 
-        <!-- 媒体区：纯黑底。注意：VideoView 是原生子窗口，Avalonia 控件叠不上去，
-             所以控制条放在下面单独一行，而不是压在画面上。 -->
-        <Grid Grid.Row="1" Background="#000000" ClipToBounds="True">
+        <!-- 媒体区：纯黑底。VideoView 是原生子窗口，Avalonia 控件叠不上去，
+             所以视频控制条放在下面单独一行；音频没有原生窗口，控制条直接叠在画面底部。 -->
+        <Grid Grid.Row="1" x:Name="MediaRoot" Background="#000000" ClipToBounds="True"
+              PointerMoved="OnMediaPointerMoved" PointerPressed="OnMediaPointerPressed">
             <Image Source="{Binding ImagePath}" Stretch="Uniform" IsVisible="{Binding IsImage}" />
             <vlc:VideoView x:Name="VideoView" IsVisible="{Binding IsVideo}" />
 
-            <!-- 音频：居中封面 + 标题 + 时间 -->
-            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"
-                        MaxWidth="620" IsVisible="{Binding IsAudio}">
-                <PathIcon Data="{StaticResource IconVolume}" Width="132" Height="132"
-                          Foreground="#14FFFFFF" HorizontalAlignment="Center" Margin="0,0,0,20">
-                    <PathIcon.Background>
-                        <SolidColorBrush Color="#141414" />
-                    </PathIcon.Background>
-                </PathIcon>
-                <TextBlock Text="{Binding Title}" FontSize="15" Foreground="#F2F2F2"
-                           TextAlignment="Center" TextWrapping="Wrap" MaxLines="2" />
-                <TextBlock Text="{Binding ElapsedText}" FontSize="12" Foreground="#8A8A8A"
-                           TextAlignment="Center" Margin="0,8,0,0" />
-            </StackPanel>
+            <!-- 音频舞台：柔和光晕 + 封面 + 标题 -->
+            <Grid IsVisible="{Binding IsAudio}" Margin="0,0,0,54">
+                <Border Width="460" Height="460" CornerRadius="230" Opacity="0.16"
+                        HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <Border.Background>
+                        <RadialGradientBrush>
+                            <GradientStop Color="#F97316" Offset="0" />
+                            <GradientStop Color="#00F97316" Offset="1" />
+                        </RadialGradientBrush>
+                    </Border.Background>
+                </Border>
 
-            <!-- 图片错误提示（视频/音频的错误显示在下方控制条里） -->
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"
+                            MaxWidth="620" Spacing="0">
+                    <Border Width="210" Height="210" CornerRadius="16" ClipToBounds="True"
+                            Background="#171717" BoxShadow="0 18 50 0 #80000000"
+                            HorizontalAlignment="Center">
+                        <Panel>
+                            <PathIcon Data="{StaticResource IconVolume}" Width="84" Height="84"
+                                      Foreground="#38FFFFFF" HorizontalAlignment="Center"
+                                      VerticalAlignment="Center" IsVisible="{Binding !HasCover}" />
+                            <Image Source="{Binding CoverPath}" Stretch="UniformToFill"
+                                   IsVisible="{Binding HasCover}" />
+                        </Panel>
+                    </Border>
+                    <TextBlock Text="{Binding Title}" FontSize="19" FontWeight="SemiBold"
+                               Foreground="#F2F2F2" TextAlignment="Center" TextWrapping="Wrap"
+                               MaxLines="2" Margin="0,22,0,0" />
+                    <TextBlock Text="音频播放" FontSize="12" Foreground="#8A8A8A"
+                               TextAlignment="Center" Margin="0,8,0,0" />
+                </StackPanel>
+            </Grid>
+
+            <!-- 音频控制条：叠在画面底部，鼠标无操作 3 秒自动淡出，移动鼠标立即出现 -->
+            <Border x:Name="AudioBar" VerticalAlignment="Bottom" IsVisible="{Binding IsAudio}"
+                    Opacity="{Binding ControlsOpacity}" IsHitTestVisible="{Binding AreControlsVisible}"
+                    PointerEntered="OnAudioBarPointerEntered" PointerExited="OnAudioBarPointerExited">
+                <Border.Transitions>
+                    <Transitions>
+                        <DoubleTransition Property="Opacity" Duration="0:0:0.24" />
+                    </Transitions>
+                </Border.Transitions>
+                <Border.Background>
+                    <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                        <GradientStop Color="#00000000" Offset="0" />
+                        <GradientStop Color="#CC000000" Offset="0.5" />
+                        <GradientStop Color="#F2000000" Offset="1" />
+                    </LinearGradientBrush>
+                </Border.Background>
+                <views:PlayerControls Margin="24,40,24,14" />
+            </Border>
+
+            <!-- 图片错误提示（视频/音频的错误显示在控制条里） -->
             <Border Background="#E6202733" CornerRadius="8" Padding="12,8"
                     HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,14,0,0"
                     IsVisible="{Binding ShowMediaError}" MaxWidth="600">
@@ -52,54 +91,11 @@
             </Border>
         </Grid>
 
-        <!-- 控制条：视频 / 音频共用，固定在画面下方一行，原生视频窗口不会遮住它 -->
-        <Border Grid.Row="2" IsVisible="{Binding ShowControls}"
+        <!-- 视频控制条：固定在画面下方一行，原生视频窗口不会遮住它 -->
+        <Border Grid.Row="2" IsVisible="{Binding ShowVideoControls}"
                 Background="#141414" BorderBrush="#22FFFFFF" BorderThickness="0,1,0,0"
                 Padding="16,4,16,8">
-            <StackPanel>
-                <TextBlock Text="{Binding Error}" IsVisible="{Binding ShowBarError}"
-                           Foreground="#FFB4B4" FontSize="12" TextWrapping="Wrap"
-                           MaxLines="2" Margin="0,2,0,2" />
-                <TextBlock Text="正在打开…" IsVisible="{Binding IsLoading}"
-                           Foreground="#B9B9B9" FontSize="11" Margin="2,2,0,2" />
-
-                <!-- 进度行：当前时间 / 进度条 / 总时长 -->
-                <Grid ColumnDefinitions="52,*,52" Height="28" VerticalAlignment="Center">
-                    <TextBlock Grid.Column="0" Text="{Binding ElapsedText}" FontSize="11"
-                               Foreground="#FFFFFF" VerticalAlignment="Center" />
-                    <Slider Grid.Column="1" Theme="{StaticResource PlayerSlider}" Margin="6,0"
-                            VerticalAlignment="Center" Value="{Binding Position, Mode=TwoWay}" />
-                    <TextBlock Grid.Column="2" Text="{Binding DurationText}" FontSize="11"
-                               Foreground="#A8A8A8" TextAlignment="Right" VerticalAlignment="Center" />
-                </Grid>
-
-                <!-- 控制行：播放 / 静音 / 音量滑杆 / 全屏 -->
-                <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto" Height="40" VerticalAlignment="Center">
-                    <Button Grid.Column="0" Width="40" Height="40" Padding="8"
-                            Background="Transparent" BorderThickness="0"
-                            Command="{Binding PlayPauseCommand}" ToolTip.Tip="播放 / 暂停">
-                        <PathIcon Data="{Binding PlayPauseIcon}" Width="20" Height="20"
-                                  Foreground="#FFFFFF" />
-                    </Button>
-                    <Button Grid.Column="1" Width="40" Height="40" Padding="10"
-                            Background="Transparent" BorderThickness="0"
-                            Command="{Binding ToggleMuteCommand}" ToolTip.Tip="{Binding MuteText}">
-                        <PathIcon Data="{Binding MuteIcon}" Width="18" Height="18"
-                                  Foreground="#FFFFFF" />
-                    </Button>
-                    <!-- 音量滑杆常驻，不再藏在弹出层里，保证任何时候都能看见和调节 -->
-                    <Slider Grid.Column="2" Width="104" Theme="{StaticResource PlayerSlider}"
-                            Margin="2,0,10,0" VerticalAlignment="Center"
-                            Value="{Binding Volume, Mode=TwoWay}" ToolTip.Tip="{Binding VolumeText}" />
-                    <Border Grid.Column="3" />
-                    <Button Grid.Column="4" Width="40" Height="40" Padding="10"
-                            Background="Transparent" BorderThickness="0"
-                            Command="{Binding ToggleFullScreenCommand}" ToolTip.Tip="{Binding FullScreenText}">
-                        <PathIcon Data="{StaticResource IconFullscreen}" Width="18" Height="18"
-                                  Foreground="#FFFFFF" />
-                    </Button>
-                </Grid>
-            </StackPanel>
+            <views:PlayerControls />
         </Border>
     </Grid>
 </UserControl>

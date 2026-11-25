@@ -21,45 +21,65 @@
             <Border Classes="card" Padding="24" IsVisible="{Binding !HasSelectedLanDevice}"
                     HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
                 <Grid RowDefinitions="Auto,*,Auto">
-                    <StackPanel Grid.Row="0" Spacing="4" Margin="0,0,0,12">
-                        <TextBlock Text="附近设备" Classes="h2" />
-                        <TextBlock Text="确保两台设备连接同一 Wi-Fi。点击连接，对方同意后两端会同时进入已连接状态。"
+                    <!-- 标题栏：标题 + 本机地址 + 连接进度 -->
+                    <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="0,0,0,14">
+                        <StackPanel Grid.Column="0" Spacing="4">
+                            <TextBlock Text="附近设备" Classes="h2" />
+                            <TextBlock Text="{Binding LanLocalIp, StringFormat=本机地址：{0}}" Classes="dim" />
+                        </StackPanel>
+                        <ProgressBar Grid.Column="1" IsIndeterminate="True" IsVisible="{Binding LanPairing}"
+                                     Width="120" Height="4" VerticalAlignment="Center" />
+                    </Grid>
+
+                    <!-- 设备列表；空时显示引导，而不是大片空白 -->
+                    <Grid Grid.Row="1">
+                        <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+                            <ItemsControl ItemsSource="{Binding LanDevices}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Classes="card" Padding="12" Margin="0,0,0,8">
+                                            <Grid ColumnDefinitions="Auto,*,Auto">
+                                                <Border Grid.Column="0" Width="38" Height="38" CornerRadius="6"
+                                                        Background="{DynamicResource AccentSoft}" Margin="0,0,12,0">
+                                                    <TextBlock Text="{Binding Kind}" FontSize="11" Foreground="{DynamicResource Accent}"
+                                                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                                </Border>
+                                                <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
+                                                    <TextBlock Text="{Binding Name}" Foreground="{DynamicResource Ink}" FontSize="14" />
+                                                    <TextBlock Text="{Binding Ip}" Foreground="{DynamicResource InkDim}" FontSize="11" />
+                                                </StackPanel>
+                                                <Button Grid.Column="2" Classes="primary small" Width="64" Height="32"
+                                                        Content="连接"
+                                                        Command="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).LanConnectCommand}"
+                                                        CommandParameter="{Binding}" />
+                                            </Grid>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+                        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10"
+                                    IsVisible="{Binding HasNoLanDevices}" MaxWidth="360">
+                            <TextBlock Text="⌁" FontSize="42" Foreground="{DynamicResource Accent}"
+                                       HorizontalAlignment="Center" />
+                            <TextBlock Text="未发现附近设备" Classes="h2" HorizontalAlignment="Center" />
+                            <TextBlock Text="确保两台设备连接同一 Wi-Fi 并已打开本功能；也可以直接在下方输入对方 IP 连接。"
+                                       Classes="sub" TextAlignment="Center" TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Grid>
+
+                    <!-- 手动连接：独立分区，紧凑排布 -->
+                    <StackPanel Grid.Row="2" Spacing="8" Margin="0,14,0,0">
+                        <Border Height="1" Background="{DynamicResource Line}" />
+                        <TextBlock Text="手动连接" Classes="h2" />
+                        <TextBlock Text="发现不到设备时，输入对方「本机地址」直接连接。"
                                    Classes="sub" TextWrapping="Wrap" />
-                        <TextBlock Text="{Binding LanLocalIp, StringFormat=本机地址：{0}}" Classes="dim" />
-                    </StackPanel>
-
-                    <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Disabled">
-                        <ItemsControl ItemsSource="{Binding LanDevices}">
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate>
-                                    <Border Classes="card" Padding="12" Margin="0,0,0,8">
-                                        <Grid ColumnDefinitions="Auto,*,Auto">
-                                            <Border Grid.Column="0" Width="38" Height="38" CornerRadius="6"
-                                                    Background="{DynamicResource AccentSoft}" Margin="0,0,12,0">
-                                                <TextBlock Text="{Binding Kind}" FontSize="11" Foreground="{DynamicResource Accent}"
-                                                           HorizontalAlignment="Center" VerticalAlignment="Center" />
-                                            </Border>
-                                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
-                                                <TextBlock Text="{Binding Name}" Foreground="{DynamicResource Ink}" FontSize="14" />
-                                                <TextBlock Text="{Binding Ip}" Foreground="{DynamicResource InkDim}" FontSize="11" />
-                                            </StackPanel>
-                                            <Button Grid.Column="2" Classes="primary small" Width="64" Height="32"
-                                                    Content="连接"
-                                                    Command="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).LanConnectCommand}"
-                                                    CommandParameter="{Binding}" />
-                                        </Grid>
-                                    </Border>
-                                </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
-                    </ScrollViewer>
-
-                    <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8" Margin="0,12,0,0">
-                        <TextBox PlaceholderText="输入对方 IP，如 192.168.1.5" Text="{Binding LanManualIp}"
-                                 Height="40" VerticalAlignment="Center" />
-                        <Button Classes="primary" Width="96" Height="40" Content="手动连接"
-                                Command="{Binding LanAddManualCommand}" />
-                        <ProgressBar IsIndeterminate="True" IsVisible="{Binding LanPairing}" Width="120" Height="4" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <TextBox PlaceholderText="例如 192.168.1.5" Text="{Binding LanManualIp}"
+                                     Width="280" Height="38" VerticalAlignment="Center" />
+                            <Button Classes="primary" Width="88" Height="38" Content="连接"
+                                    Command="{Binding LanAddManualCommand}" />
+                        </StackPanel>
                     </StackPanel>
                 </Grid>
             </Border>
