@@ -109,7 +109,7 @@
                                 <PathIcon Grid.Column="0" Data="{StaticResource IconQueue}"
                                           Foreground="{DynamicResource InkDim}" VerticalAlignment="Center" />
                                 <TextBlock Grid.Column="1" Text="并发下载数" Classes="rowLabel" />
-                                <NumericUpDown Grid.Column="2" Width="110" Minimum="1" Maximum="6"
+                                <NumericUpDown Grid.Column="2" Classes="setting" Width="110" Minimum="1" Maximum="6"
                                                Increment="1" Value="{Binding MaxConcurrentDownloads, Mode=TwoWay}" />
                             </Grid>
                         </Border>
@@ -121,7 +121,7 @@
                                 <PathIcon Grid.Column="0" Data="{StaticResource IconDownload}"
                                           Foreground="{DynamicResource InkDim}" VerticalAlignment="Center" />
                                 <TextBlock Grid.Column="1" Text="下载限速 (KB/s，0 不限)" Classes="rowLabel" />
-                                <NumericUpDown Grid.Column="2" Width="120" Minimum="0" Maximum="20480"
+                                <NumericUpDown Grid.Column="2" Classes="setting" Width="120" Minimum="0" Maximum="20480"
                                                Increment="64" Value="{Binding SpeedLimitKbps, Mode=TwoWay}" />
                             </Grid>
                         </Border>
@@ -130,8 +130,11 @@
 
                         <Border Padding="16,10" MinHeight="50">
                             <Grid ColumnDefinitions="Auto,*,Auto">
-                                <TextBlock Grid.Column="1" Text="命名模板" Classes="rowLabel" />
-                                <TextBox Grid.Column="2" Width="320" HorizontalAlignment="Right"
+                                <PathIcon Grid.Column="0" Data="{StaticResource IconDownload}"
+                                          Foreground="{DynamicResource InkDim}" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="命名模板" Classes="rowLabel"
+                                           VerticalAlignment="Center" />
+                                <TextBox Grid.Column="2" Classes="setting" Width="320" HorizontalAlignment="Right"
                                          Text="{Binding NameTemplate, Mode=TwoWay}"
                                          ToolTip.Tip="支持 {title} / {id} / {uploader} / {quality} / {source} / {date} / {ext}" />
                             </Grid>
@@ -144,7 +147,7 @@
                                 <PathIcon Grid.Column="0" Data="{StaticResource IconHistory}"
                                           Foreground="{DynamicResource InkDim}" VerticalAlignment="Center" />
                                 <TextBlock Grid.Column="1" Text="解析缓存有效期 (秒，0 不缓存)" Classes="rowLabel" />
-                                <NumericUpDown Grid.Column="2" Width="120" Minimum="0" Maximum="86400"
+                                <NumericUpDown Grid.Column="2" Classes="setting" Width="120" Minimum="0" Maximum="86400"
                                                Increment="60" Value="{Binding ParseTtlSeconds, Mode=TwoWay}" />
                             </Grid>
                         </Border>

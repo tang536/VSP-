@@ -131,6 +131,29 @@
     <Application.Styles>
         <FluentTheme />
 
+        <!-- 设置页里的输入控件：去掉 Fluent 默认白底蓝框，跟卡片配色统一 -->
+        <Style Selector="NumericUpDown.setting">
+            <Setter Property="Background" Value="{DynamicResource Surface2}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource Line}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="Padding" Value="6,2" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Foreground" Value="{DynamicResource Ink}" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+        <Style Selector="TextBox.setting">
+            <Setter Property="Background" Value="{DynamicResource Surface2}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource Line}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="Padding" Value="8,4" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Foreground" Value="{DynamicResource Ink}" />
+            <Setter Property="CaretBrush" Value="{DynamicResource Accent}" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+
         <!-- 与 Web 端 App.css / Android 端一致的品牌样式，颜色全部走 DynamicResource，切换主题即时生效 -->
         <Style Selector="TextBlock.h1">
             <Setter Property="FontSize" Value="20" />

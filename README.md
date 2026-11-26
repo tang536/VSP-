@@ -2,7 +2,7 @@
 
 把「在线解析 → 下载 → 本地观看 / 处理」串成一条链的工具，含 **Android app**、**Web 前端**、**Web 后端** 三部分。
 
-- 当前版本：Android **v1.4.3**（versionCode 11403）｜桌面 **v1.2.5**
+- 当前版本：Android **v1.4.4**（versionCode 11404）｜桌面 **v1.2.6**
 - 安装包：[GitHub Releases](https://github.com/tang536/VSP-/releases/latest) ｜ [Gitee Releases](https://gitee.com/tang-rongqiang/VSP/releases/latest)
 - 平台：Android 7.0+（minSdk 24 / targetSdk 36，arm64-v8a）
 

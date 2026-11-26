@@ -174,7 +174,10 @@ public final class LanCore {
         String peer = nullToEmpty(uri.getQueryParameter("id"));
         String p = nullToEmpty(path);
         boolean pairing = "/pair".equals(p) || "/pair-result".equals(p) || "/unpair".equals(p);
-        return sign(peer, method, path, canonical(uri), body, pairing ? TOKEN : null).equalsIgnoreCase(sig);
+        String canon = canonical(uri);
+        if (sign(peer, method, path, canon, body, pairing ? TOKEN : null).equalsIgnoreCase(sig)) return true;
+        // 会话密钥尚未同步时退回静态令牌，避免刚配对成功就丢远控/断开消息。
+        return sign(peer, method, path, canon, body, TOKEN).equalsIgnoreCase(sig);
     }
 
     private String signedUrl(Device d, String path, Map<String, String> params, String method, byte[] body) {
@@ -275,6 +278,13 @@ public final class LanCore {
                         udp.send(new DatagramPacket(hello, hello.length, target, UDP_PORT));
                     } catch (Throwable ignored) { }
                 }
+                // 跨网段/AP 隔离时广播不可达；对已知设备补定向 hello，解决单向发现。
+                for (Device d : new ArrayList<>(devices.values())) {
+                    try {
+                        udp.send(new DatagramPacket(hello, hello.length,
+                                InetAddress.getByName(d.ip), UDP_PORT));
+                    } catch (Throwable ignored) { }
+                }
                 sleep(2000);
             }
         });
@@ -283,18 +293,16 @@ public final class LanCore {
         pool.execute(() -> {
             while (running) {
                 sleep(3000);
-                long cutoff = System.currentTimeMillis() - 9000;
+                long cutoff = System.currentTimeMillis() - 30000;
                 boolean removed = false;
                 Iterator<Map.Entry<String, Device>> it = devices.entrySet().iterator();
-                boolean peerGone = false;
                 while (it.hasNext()) {
                     Map.Entry<String, Device> e = it.next();
                     if (e.getValue().lastSeen < cutoff) {
-                        if (isConnectedTo(e.getKey())) peerGone = true;
+                        // 已连接设备不因超时自动断开；断开只由显式 unpair 触发。
                         it.remove(); removed = true;
                     }
                 }
-                if (peerGone) clearConnected();
                 if (removed) changed();
             }
         });
@@ -314,9 +322,9 @@ public final class LanCore {
                     Device d = new Device(id, o.optString("n", "设备"), o.optString("t", "pc"),
                             ip, o.optInt("p", HTTP_PORT));
                     devices.put(id, d);
-                    // 对方 hello 说它连着我 → 两端状态对称；对方不再连我 → 及时清除
+                    // 对方 hello 说它连着我 → 两端状态对称。
+                    // 不再因为某条 c 不一致就自动断开：手机休眠/多网卡会让 c 短暂滞后。
                     if (peerConnectedTo.equals(deviceId) && !isConnectedTo(id)) setConnected(d);
-                    else if (id.equals(connectedPeerId) && !peerConnectedTo.equals(deviceId)) clearConnected();
                     syncDeviceFlags();
                     changed();
                 } catch (Throwable ignored) { }
@@ -657,9 +665,13 @@ public final class LanCore {
             Map<String, String> p = new HashMap<>();
             p.put("dn", deviceName); p.put("t", "android");
             p.put("p", String.valueOf(HTTP_PORT)); p.put("ip", myIp);
-            String r = nullToEmpty(httpGetRaw(signedUrl(d, "/pair", p, "GET", null))).trim();
-            if (r.startsWith("ok:")) sessionKeys.put(d.id, r.substring(3).trim());
-            return r.equals("ok") || r.startsWith("ok:");
+            for (int i = 0; i < 3; i++) {
+                String r = nullToEmpty(httpGetRaw(signedUrl(d, "/pair", p, "GET", null))).trim();
+                if (r.startsWith("ok:")) sessionKeys.put(d.id, r.substring(3).trim());
+                if (r.equals("ok") || r.startsWith("ok:")) return true;
+                sleep(500);
+            }
+            return false;
         } catch (Throwable t) { return false; }
     }
 

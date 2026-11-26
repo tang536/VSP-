@@ -124,9 +124,15 @@ public sealed class LanService : IDisposable
 
         var peer = qs.GetValueOrDefault("id") ?? "";
         var pairing = path is "/pair" or "/pair-result" or "/unpair";
-        var expected = Sign(peer, method, path, CanonicalQuery(qs), body, pairing ? Token : null);
+        var canonical = CanonicalQuery(qs);
+        var expected = Sign(peer, method, path, canonical, body, pairing ? Token : null);
+        if (CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes(sig.ToLowerInvariant())))
+            return true;
+        // 兼容会话密钥还没同步完成的窗口：静态令牌也认，避免配对刚完成时远控/断开消息丢失。
+        var fallback = Sign(peer, method, path, canonical, body, Token);
         return CryptographicOperations.FixedTimeEquals(
-            Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes(sig.ToLowerInvariant()));
+            Encoding.UTF8.GetBytes(fallback), Encoding.UTF8.GetBytes(sig.ToLowerInvariant()));
     }
 
     private string SignedUrl(LanDevice dev, string path, Dictionary<string, string>? query = null,
@@ -203,6 +209,14 @@ public sealed class LanService : IDisposable
                         try { await _udp!.SendAsync(helloBytes, new IPEndPoint(t, UdpPort), ct); }
                         catch { }
                     }
+                    // 跨网段/AP 隔离时广播到不了对方；对已发现设备补一条定向 hello，
+                    // 让两端都能互相发现（单向发现的主要修复）。
+                    foreach (var dev in _devices.Values.ToArray())
+                    {
+                        if (!IPAddress.TryParse(dev.Ip, out var ip)) continue;
+                        try { await _udp!.SendAsync(helloBytes, new IPEndPoint(ip, UdpPort), ct); }
+                        catch { }
+                    }
                     try { await Task.Delay(2000, ct); } catch { break; }
                 }
             }, ct);
@@ -233,11 +247,10 @@ public sealed class LanService : IDisposable
                         };
                         _devices[id] = dev;
                         // 对方 hello 里说它连着我 → 本机也应进入已连接状态（握手双方对称）。
+                        // 不再因为某一条 c 不一致就自动断开：手机休眠/多网卡/握手竞态都会
+                        // 让 c 短暂为空或滞后，之前这会把已连接状态直接清掉。
                         if (peerConnectedTo == _deviceId && !IsConnectedTo(id))
                             SetConnected(dev);
-                        // 对方已不再连着我 → 及时清除本机状态。
-                        else if (id == ConnectedPeerId && peerConnectedTo != _deviceId)
-                            ClearConnected();
                         SyncDeviceFlags();
                         DevicesChanged?.Invoke();
                     }
@@ -254,12 +267,13 @@ public sealed class LanService : IDisposable
                     try
                     {
                         await Task.Delay(3000, ct);
-                        var cutoff = DateTime.Now.AddSeconds(-9);
+                        var cutoff = DateTime.Now.AddSeconds(-30);
                         var dead = _devices.Values.Where(d => d.LastSeen < cutoff).Select(d => d.Id).ToList();
                         if (dead.Count > 0)
                         {
                             foreach (var id in dead) _devices.TryRemove(id, out _);
-                            if (dead.Contains(ConnectedPeerId ?? "")) ClearConnected();
+                            // 已连接设备超时不再自动断开：手机锁屏 / Wi-Fi 休眠很常见，
+                            // 自动断开会让用户觉得“连上又自己断了”。断开只由显式 unpair 触发。
                             DevicesChanged?.Invoke();
                         }
                     }
@@ -753,9 +767,14 @@ public sealed class LanService : IDisposable
                 ["dn"] = _deviceName, ["t"] = "pc",
                 ["p"] = HttpPort.ToString(), ["ip"] = myIp,
             });
-            var r = (await _client.GetStringAsync(url)).Trim();
-            if (r.StartsWith("ok:", StringComparison.Ordinal)) _sessionKeys[dev.Id] = r[3..].Trim();
-            return r == "ok" || r.StartsWith("ok:", StringComparison.Ordinal);
+            for (var i = 0; i < 3; i++)
+            {
+                var r = (await _client.GetStringAsync(url)).Trim();
+                if (r.StartsWith("ok:", StringComparison.Ordinal)) _sessionKeys[dev.Id] = r[3..].Trim();
+                if (r == "ok" || r.StartsWith("ok:", StringComparison.Ordinal)) return true;
+                await Task.Delay(500);
+            }
+            return false;
         }
         catch { return false; }
     }
