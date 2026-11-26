@@ -214,7 +214,6 @@ public class MainActivity extends Activity {
     private LinearLayout lanFileList;
     private View lanOps, lanFileBar, lanControlPanel, lanDiscovery;
     private LinearLayout lanDeviceList;
-    private android.widget.EditText lanManualIp;
     private AlertDialog lanDevicesDialog;
     private LinearLayout lanDialogList;
     private LanCore.Device lanConnecting;
@@ -1649,16 +1648,6 @@ public class MainActivity extends Activity {
         lanPairingBar = pageLan.findViewById(R.id.lan_pairing);
         lanDiscovery = pageLan.findViewById(R.id.lan_discovery);
         lanDeviceList = pageLan.findViewById(R.id.lan_device_list);
-        lanManualIp = pageLan.findViewById(R.id.lan_manual_ip);
-        pageLan.findViewById(R.id.lan_manual_connect).setOnClickListener(v -> {
-            ensureLan();
-            String ip = lanManualIp.getText().toString().trim();
-            if (ip.isEmpty()) { Toast.makeText(this, "请输入对方 IP", Toast.LENGTH_SHORT).show(); return; }
-            LanCore.Device dev = lan.addManualDevice(ip);
-            if (dev == null) { Toast.makeText(this, "连接失败：请确认对方在线且在同一 Wi-Fi", Toast.LENGTH_SHORT).show(); return; }
-            Toast.makeText(this, "已找到 " + dev.name + "，正在请求连接…", Toast.LENGTH_SHORT).show();
-            connectLanDevice(dev);
-        });
         pageLan.findViewById(R.id.lan_find_devices).setOnClickListener(v -> {
             ensureLan();
             renderLanDevices();
@@ -1758,7 +1747,7 @@ public class MainActivity extends Activity {
         java.util.List<LanCore.Device> list = lan.getDevices();
         if (list.isEmpty()) {
             TextView empty = new TextView(this);
-            empty.setText("未发现设备，请在下方输入对方 IP 连接");
+            empty.setText("未发现设备，请确保两端在同一 Wi-Fi 并已打开本功能");
             empty.setTextColor(P.dim);
             empty.setTextSize(12);
             empty.setGravity(android.view.Gravity.CENTER);
@@ -1804,21 +1793,11 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 弹出「附近设备」对话框：设备列表 + 手动 IP 输入 + 连接（走握手）。 */
+    /** 弹出「附近设备」对话框：只有自动发现的设备列表。 */
     private void showLanDevicesDialog() {
         if (lan == null) return;
         View view = getLayoutInflater().inflate(R.layout.dialog_lan_devices, null);
         lanDialogList = view.findViewById(R.id.ldd_list);
-        final android.widget.EditText ipEdit = view.findViewById(R.id.ldd_ip);
-        final android.widget.Button btnManual = view.findViewById(R.id.ldd_manual);
-        btnManual.setOnClickListener(v -> {
-            String ip = ipEdit.getText().toString().trim();
-            if (ip.isEmpty()) { Toast.makeText(this, "请输入对方 IP", Toast.LENGTH_SHORT).show(); return; }
-            final LanCore.Device dev = lan.addManualDevice(ip);
-            if (dev == null) { Toast.makeText(this, "连接失败：请确认对方在线且在同一 Wi-Fi", Toast.LENGTH_SHORT).show(); return; }
-            Toast.makeText(this, "已找到 " + dev.name + "，正在请求连接…", Toast.LENGTH_SHORT).show();
-            connectLanDevice(dev);
-        });
         fillLanDialogList();
         lanDevicesDialog = new AlertDialog.Builder(this)
                 .setTitle("附近设备")

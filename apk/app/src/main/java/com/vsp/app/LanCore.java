@@ -640,23 +640,7 @@ public final class LanCore {
 
     public String hello(Device d) { return httpGet(d, "/hello?k=" + TOKEN); }
 
-    // ---------------- 连接握手 + 手动直连 ----------------
-
-    /** 按 IP 手动添加设备（发现不可用时兜底），会校验 hello。 */
-    public Device addManualDevice(String ipText) {
-        String ip = nullToEmpty(ipText).trim();
-        if (!isPrivate(ip)) return null;
-        Device probe = new Device("manual-" + ip, ip, "pc", ip, HTTP_PORT);
-        String h = hello(probe);
-        if (h == null) return null;
-        String[] parts = h.split("\\|");
-        String kind = parts.length > 1 ? parts[1] : "pc";
-        String name = parts.length > 0 && !parts[0].isEmpty() ? parts[0] : ip;
-        Device d = new Device("manual-" + ip, name, kind, ip, HTTP_PORT);
-        devices.put(d.id, d);
-        changed();
-        return d;
-    }
+    // ---------------- 连接握手 ----------------
 
     /** 向对方发起连接申请，携带本机信息；对方 UI 会弹窗确认。 */
     public boolean requestPair(Device d) {
