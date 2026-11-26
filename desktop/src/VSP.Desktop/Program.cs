@@ -22,26 +22,21 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
-        // 截图模式（--shot）是开发工具，允许和日常实例并存。
-        var shotMode = Array.IndexOf(args, "--shot") >= 0;
-        if (!shotMode)
+        _instanceMutex = new Mutex(initiallyOwned: true, MutexName, out var createdNew);
+        if (!createdNew)
         {
-            _instanceMutex = new Mutex(initiallyOwned: true, MutexName, out var createdNew);
-            if (!createdNew)
-            {
-                WriteHandoff(args);
-                SignalExistingInstance();
-                return;
-            }
-
-            _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
-            var listener = new Thread(ListenForActivation)
-            {
-                IsBackground = true,
-                Name = "vsp-single-instance",
-            };
-            listener.Start();
+            WriteHandoff(args);
+            SignalExistingInstance();
+            return;
         }
+
+        _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
+        var listener = new Thread(ListenForActivation)
+        {
+            IsBackground = true,
+            Name = "vsp-single-instance",
+        };
+        listener.Start();
 
         BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
         GC.KeepAlive(_instanceMutex);
@@ -52,7 +47,7 @@ internal static class Program
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(HandoffPath)!);
-            // --shot / --verbose 这类开关不转交，只转 URL 和本地文件路径。
+            // 以 -- 开头的开关不转交，只转 URL 和本地文件路径。
             File.WriteAllLines(HandoffPath, args.Where(a => !a.StartsWith("--")).ToArray());
         }
         catch { /* 转交失败最多是这次拖拽/右键没生效，不影响主程序 */ }

@@ -34,36 +34,16 @@ public partial class App : Application
 
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
-            // 开发期验收：--shot <目录> 会依次渲染各页截图后退出，跳过进场动画。
-            var args = Environment.GetCommandLineArgs();
-            var shotIdx = Array.IndexOf(args, "--shot");
-
             var vm = new MainViewModel(Services);
             var window = new MainWindow { DataContext = vm };
             desktop.MainWindow = window;
             desktop.Exit += (_, _) => Services.Dispose();
 
-            if (shotIdx >= 0)
-            {
-                var dir = shotIdx + 1 < args.Length && !args[shotIdx + 1].StartsWith("--")
-                    ? args[shotIdx + 1]
-                    : Path.Combine(AppContext.BaseDirectory, "shots");
-                window.Opened += async (_, _) =>
-                {
-                    try { await Views.UiShot.CaptureAll(window, vm, dir); }
-                    catch (Exception ex) { Console.WriteLine("shot failed: " + ex); }
-                    desktop.Shutdown();
-                };
-                window.Show();
-            }
-            else
-            {
-                SetupTray(desktop, window);
-                // 冷启动进场动画：先显示 Splash，播完后再显示主窗口。
-                var splash = new SplashWindow();
-                splash.Show();
-                _ = ShowMainWindowAsync(desktop, splash, window);
-            }
+            SetupTray(desktop, window);
+            // 冷启动进场动画：先显示 Splash，播完后再显示主窗口。
+            var splash = new SplashWindow();
+            splash.Show();
+            _ = ShowMainWindowAsync(desktop, splash, window);
         }
         base.OnFrameworkInitializationCompleted();
     }
