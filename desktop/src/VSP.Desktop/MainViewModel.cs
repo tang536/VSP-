@@ -280,8 +280,13 @@ public sealed class MainViewModel : BindableBase
     public string AppVersion => $"v{UpdateService.Version}";
     public string UpdateStatus { get => _updateStatus; private set => Set(ref _updateStatus, value); }
     private string _updateStatus = "尚未检查更新";
-    public bool HasUpdate => _update is not null;
-    public bool IsUpdating { get => _isUpdating; private set => Set(ref _isUpdating, value); }
+    // 下载中不再显示"下载更新"按钮，进度条本身已经说明状态。
+    public bool HasUpdate => _update is not null && !IsUpdating;
+    public bool IsUpdating
+    {
+        get => _isUpdating;
+        private set { if (Set(ref _isUpdating, value)) Raise(nameof(HasUpdate)); }
+    }
     private bool _isUpdating;
     public double UpdateProgress { get => _updateProgress; private set => Set(ref _updateProgress, value); }
     private double _updateProgress;
@@ -1030,7 +1035,11 @@ public sealed class MainViewModel : BindableBase
         var list = _lan.Devices;
         // 增量同步，避免重复添加
         for (var i = LanDevices.Count - 1; i >= 0; i--)
-            if (!list.Any(d => d.Id == LanDevices[i].Id)) LanDevices.RemoveAt(i);
+        {
+            var latest = list.FirstOrDefault(d => d.Id == LanDevices[i].Id);
+            if (latest is null) LanDevices.RemoveAt(i);
+            else if (!ReferenceEquals(latest, LanDevices[i])) LanDevices[i] = latest;
+        }
         foreach (var d in list)
             if (!LanDevices.Any(x => x.Id == d.Id)) LanDevices.Add(d);
         Raise(nameof(HasNoLanDevices));

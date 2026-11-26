@@ -99,6 +99,8 @@ public sealed class LanService : IDisposable
     private readonly ConcurrentDictionary<string, bool> _controlAnswers = new();
     private string? _activeControlCid;
     private string? _activeControllerId;
+    // 对端 hello 里声明"连着我"的最后时间；用于 /unpair 丢失时兜底检测断开。
+    private long _peerClaimsMeAt;
     // 配对后为每台设备生成会话密钥，后续请求用 HMAC-SHA256 签名，不再只靠明文静态令牌。
     private readonly ConcurrentDictionary<string, string> _sessionKeys = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, long> _seenNonces = new(StringComparer.OrdinalIgnoreCase);
@@ -257,21 +259,33 @@ public sealed class LanService : IDisposable
                         var id = root.GetProperty("id").GetString() ?? "";
                         if (string.IsNullOrEmpty(id) || id == _deviceId) continue;
                         var peerConnectedTo = root.TryGetProperty("c", out var c) ? c.GetString() ?? "" : "";
-                        var dev = new LanDevice
+                        var name = root.TryGetProperty("n", out var n) ? n.GetString() ?? "设备" : "设备";
+                        var kind = root.TryGetProperty("t", out var t) ? t.GetString() ?? "pc" : "pc";
+                        var port = root.TryGetProperty("p", out var p) ? p.GetInt32() : HttpPort;
+                        // 复用同一个 LanDevice 实例：UI 列表按引用缓存，替换对象会让"已连接"标记刷新不到。
+                        LanDevice dev;
+                        if (_devices.TryGetValue(id, out var existing))
                         {
-                            Id = id,
-                            Name = root.TryGetProperty("n", out var n) ? n.GetString() ?? "设备" : "设备",
-                            Kind = root.TryGetProperty("t", out var t) ? t.GetString() ?? "pc" : "pc",
-                            Ip = ip.ToString(),
-                            Port = root.TryGetProperty("p", out var p) ? p.GetInt32() : HttpPort,
-                            LastSeen = DateTime.Now,
-                        };
-                        _devices[id] = dev;
-                        // 对方 hello 里说它连着我 → 本机也应进入已连接状态（握手双方对称）。
-                        // 不再因为某一条 c 不一致就自动断开：手机休眠/多网卡/握手竞态都会
-                        // 让 c 短暂为空或滞后，之前这会把已连接状态直接清掉。
-                        if (peerConnectedTo == _deviceId && !IsConnectedTo(id))
-                            SetConnected(dev);
+                            dev = existing;
+                            dev.Name = name; dev.Kind = kind; dev.Ip = ip.ToString();
+                            dev.Port = port; dev.LastSeen = DateTime.Now;
+                        }
+                        else
+                        {
+                            dev = new LanDevice
+                            {
+                                Id = id, Name = name, Kind = kind, Ip = ip.ToString(),
+                                Port = port, LastSeen = DateTime.Now,
+                            };
+                            _devices[id] = dev;
+                        }
+                        // 对方 hello 里说它连着我 → 两端状态对称；同时记下心跳时间，
+                        // 之后连续多个 hello 都不再声明连接时才判定对方已断开。
+                        if (peerConnectedTo == _deviceId)
+                        {
+                            Interlocked.Exchange(ref _peerClaimsMeAt, DateTime.UtcNow.Ticks);
+                            if (!IsConnectedTo(id)) SetConnected(dev);
+                        }
                         SyncDeviceFlags();
                         DevicesChanged?.Invoke();
                     }
@@ -293,9 +307,16 @@ public sealed class LanService : IDisposable
                         if (dead.Count > 0)
                         {
                             foreach (var id in dead) _devices.TryRemove(id, out _);
-                            // 已连接设备超时不再自动断开：手机锁屏 / Wi-Fi 休眠很常见，
-                            // 自动断开会让用户觉得“连上又自己断了”。断开只由显式 unpair 触发。
+                            // 已连接设备不因"没收到 hello"直接剔除：手机锁屏/休眠很常见。
                             DevicesChanged?.Invoke();
+                        }
+                        // /unpair 丢包兜底：连续约 12 秒没看到对端声明"连着我"，视为对方已断开。
+                        if (ConnectedPeerId is not null)
+                        {
+                            var last = Interlocked.Read(ref _peerClaimsMeAt);
+                            if (last == 0) Interlocked.Exchange(ref _peerClaimsMeAt, DateTime.UtcNow.Ticks);
+                            else if (DateTime.UtcNow.Ticks - last > TimeSpan.FromSeconds(12).Ticks)
+                                ClearConnected();
                         }
                     }
                     catch (OperationCanceledException) { break; }
@@ -494,8 +515,14 @@ public sealed class LanService : IDisposable
                     {
                         var cid = qs.GetValueOrDefault("cid") ?? "";
                         var rid = qs.GetValueOrDefault("id") ?? "";
-                        if (string.IsNullOrEmpty(cid) || !IsConnectedTo(rid))
-                        { Respond(stream, 403, "not connected"); break; }
+                        if (string.IsNullOrEmpty(cid)) { Respond(stream, 403, "bad request"); break; }
+                        if (!IsConnectedTo(rid))
+                        {
+                            // 会话密钥还在说明之前配对过：借这次申请把两端状态重新同步回来。
+                            if (!_devices.TryGetValue(rid, out var known) || !_sessionKeys.ContainsKey(rid))
+                            { Respond(stream, 403, "not connected"); break; }
+                            SetConnected(known);
+                        }
                         if (IsControlActiveFor(rid))
                         {
                             // 同一台设备重复申请：视为已授权，允许它按新 cid 继续轮询。
@@ -986,12 +1013,22 @@ public sealed class LanService : IDisposable
         if (accept)
         {
             _sessionKeys[reqId] = Guid.NewGuid().ToString("N");
-            var dev = new LanDevice
+            LanDevice dev;
+            if (_devices.TryGetValue(req.Id, out var existing))
             {
-                Id = req.Id, Name = req.Name, Kind = req.Kind,
-                Ip = req.Ip, Port = req.Port, LastSeen = DateTime.Now,
-            };
-            _devices[req.Id] = dev;
+                dev = existing;
+                dev.Name = req.Name; dev.Kind = req.Kind; dev.Ip = req.Ip;
+                dev.Port = req.Port; dev.LastSeen = DateTime.Now;
+            }
+            else
+            {
+                dev = new LanDevice
+                {
+                    Id = req.Id, Name = req.Name, Kind = req.Kind,
+                    Ip = req.Ip, Port = req.Port, LastSeen = DateTime.Now,
+                };
+                _devices[req.Id] = dev;
+            }
             SetConnected(dev);
             DevicesChanged?.Invoke();
         }
@@ -1009,12 +1046,24 @@ public sealed class LanService : IDisposable
         }
         ClearConnected();
         if (dev is not null)
-            _ = _client.GetStringAsync(SignedUrl(dev, "/unpair"));
+        {
+            var target = dev;
+            // 重试几次，避免单个 UDP/TCP 丢包让对端一直留在"已连接"。
+            _ = Task.Run(async () =>
+            {
+                for (var i = 0; i < 3; i++)
+                {
+                    try { await _client.GetStringAsync(SignedUrl(target, "/unpair")); break; }
+                    catch { await Task.Delay(300); }
+                }
+            });
+        }
     }
 
     private void SetConnected(LanDevice dev)
     {
         lock (_connLock) { _connectedPeerId = dev.Id; _connectedPeer = dev; }
+        Interlocked.Exchange(ref _peerClaimsMeAt, DateTime.UtcNow.Ticks);
         SyncDeviceFlags();
         try { ConnectionChanged?.Invoke(); } catch { }
     }
@@ -1023,6 +1072,7 @@ public sealed class LanService : IDisposable
     {
         bool changed;
         lock (_connLock) { changed = _connectedPeerId is not null; _connectedPeerId = null; _connectedPeer = null; }
+        Interlocked.Exchange(ref _peerClaimsMeAt, 0);
         // 断开时立即撤销远控授权，避免旧主控端在重连前继续取帧。
         ClearControlState();
         SyncDeviceFlags();

@@ -136,6 +136,8 @@ public final class LanCore {
     private final Object connLock = new Object();
     private volatile String connectedPeerId;
     private volatile Device connectedPeer;
+    // 对端 hello 声明"连着我"的最后时间，用于 /unpair 丢失时兜底检测断开。
+    private volatile long peerClaimsMeAt;
     private android.net.wifi.WifiManager.MulticastLock multicastLock;
 
     private volatile boolean running = false;
@@ -331,11 +333,19 @@ public final class LanCore {
                 while (it.hasNext()) {
                     Map.Entry<String, Device> e = it.next();
                     if (e.getValue().lastSeen < cutoff) {
-                        // 已连接设备不因超时自动断开；断开只由显式 unpair 触发。
+                        // 已连接设备不因超时自动断开；断开由 /unpair 或下面的心跳兜底处理。
                         it.remove(); removed = true;
                     }
                 }
                 if (removed) changed();
+                if (connectedPeerId != null) {
+                    long last = peerClaimsMeAt;
+                    if (last == 0) peerClaimsMeAt = System.currentTimeMillis();
+                    else if (System.currentTimeMillis() - last > 12000) {
+                        status("对方已断开连接");
+                        clearConnected();
+                    }
+                }
             }
         });
 
@@ -354,9 +364,11 @@ public final class LanCore {
                     Device d = new Device(id, o.optString("n", "设备"), o.optString("t", "pc"),
                             ip, o.optInt("p", HTTP_PORT));
                     devices.put(id, d);
-                    // 对方 hello 说它连着我 → 两端状态对称。
-                    // 不再因为某条 c 不一致就自动断开：手机休眠/多网卡会让 c 短暂滞后。
-                    if (peerConnectedTo.equals(deviceId) && !isConnectedTo(id)) setConnected(d);
+                    if (peerConnectedTo.equals(deviceId)) {
+                        // 对方 hello 声明连着我：刷新心跳并补上连接状态。
+                        peerClaimsMeAt = System.currentTimeMillis();
+                        if (!isConnectedTo(id)) setConnected(d);
+                    }
                     syncDeviceFlags();
                     changed();
                 } catch (Throwable ignored) { }
@@ -535,27 +547,38 @@ public final class LanCore {
             } else if ("/control-request".equals(path)) {
                 String cid = nullToEmpty(uri.getQueryParameter("cid"));
                 String requester = nullToEmpty(uri.getQueryParameter("id"));
-                if (cid.isEmpty() || !isConnectedTo(requester)) {
-                    respond(out, 403, "text/plain", "not connected".getBytes());
-                } else if (isControlActiveFor(requester)) {
-                    // 同一台设备重复申请：直接视为已授权，方便主控端重连。
-                    respond(out, 200, "text/plain", "ok".getBytes());
-                } else if (activeControllerId != null || !controlRequests.isEmpty()) {
-                    respond(out, 200, "text/plain", "busy".getBytes());
+                if (cid.isEmpty()) {
+                    respond(out, 403, "text/plain", "bad request".getBytes());
                 } else {
-                    Device dev = devices.get(requester);
-                    String dn = nullToEmpty(uri.getQueryParameter("dn"));
-                    if (dn.isEmpty() && dev != null) dn = dev.name;
-                    String kind = nullToEmpty(uri.getQueryParameter("t"));
-                    if (kind.isEmpty() && dev != null) kind = dev.kind;
-                    String ip = nullToEmpty(uri.getQueryParameter("ip"));
-                    if (ip.isEmpty() && dev != null) ip = dev.ip;
-                    ControlRequest req = new ControlRequest(cid, requester, dn, kind, ip,
-                            parseInt(uri.getQueryParameter("p"), HTTP_PORT));
-                    controlRequests.put(cid, req);
-                    controlAnswers.remove(cid);
-                    try { callback.onControlRequest(req); } catch (Throwable ignored) { }
-                    respond(out, 200, "text/plain", "ok".getBytes());
+                    if (!isConnectedTo(requester)) {
+                        // 会话密钥还在说明之前配对过：借这次申请把两端状态同步回来。
+                        Device known = devices.get(requester);
+                        if (known == null || !sessionKeys.containsKey(requester)) {
+                            respond(out, 403, "text/plain", "not connected".getBytes());
+                            return;
+                        }
+                        setConnected(known);
+                    }
+                    if (isControlActiveFor(requester)) {
+                        // 同一台设备重复申请：直接视为已授权，方便主控端重连。
+                        respond(out, 200, "text/plain", "ok".getBytes());
+                    } else if (activeControllerId != null || !controlRequests.isEmpty()) {
+                        respond(out, 200, "text/plain", "busy".getBytes());
+                    } else {
+                        Device dev = devices.get(requester);
+                        String dn = nullToEmpty(uri.getQueryParameter("dn"));
+                        if (dn.isEmpty() && dev != null) dn = dev.name;
+                        String kind = nullToEmpty(uri.getQueryParameter("t"));
+                        if (kind.isEmpty() && dev != null) kind = dev.kind;
+                        String ip = nullToEmpty(uri.getQueryParameter("ip"));
+                        if (ip.isEmpty() && dev != null) ip = dev.ip;
+                        ControlRequest req = new ControlRequest(cid, requester, dn, kind, ip,
+                                parseInt(uri.getQueryParameter("p"), HTTP_PORT));
+                        controlRequests.put(cid, req);
+                        controlAnswers.remove(cid);
+                        try { callback.onControlRequest(req); } catch (Throwable ignored) { }
+                        respond(out, 200, "text/plain", "ok".getBytes());
+                    }
                 }
             } else if ("/control-result".equals(path)) {
                 String cid = nullToEmpty(uri.getQueryParameter("cid"));
@@ -844,8 +867,15 @@ public final class LanCore {
         clearConnected();
         final Device target = d;
         if (target != null) pool.execute(() -> {
-            try { httpGetRaw(signedUrl(target, "/unpair", null, "GET", null)); }
-            catch (Throwable ignored) { }
+            // 重试几次，避免一次 UDP/TCP 丢包让对端一直停在"已连接"。
+            for (int i = 0; i < 3; i++) {
+                try {
+                    httpGetRaw(signedUrl(target, "/unpair", null, "GET", null));
+                    break;
+                } catch (Throwable ignored) {
+                    sleep(300);
+                }
+            }
         });
     }
 
@@ -855,6 +885,7 @@ public final class LanCore {
             peerChanged = connectedPeerId != null && !connectedPeerId.equals(d.id);
             connectedPeerId = d.id; connectedPeer = d;
         }
+        peerClaimsMeAt = System.currentTimeMillis();
         // 换成另一台设备时，撤销上一台的远控授权，避免旧主控端继续取帧。
         if (peerChanged) {
             boolean wasControlling = activeControlCid != null;
@@ -868,6 +899,7 @@ public final class LanCore {
     private void clearConnected() {
         boolean changed;
         synchronized (connLock) { changed = connectedPeerId != null; connectedPeerId = null; connectedPeer = null; }
+        peerClaimsMeAt = 0;
         // 断开时立即撤销申请并停止被控：否则对端断开后手机还在后台共享屏幕。
         boolean wasControlling = activeControlCid != null;
         clearControlState();
