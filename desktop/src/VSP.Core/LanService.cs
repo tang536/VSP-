@@ -124,8 +124,7 @@ public sealed class LanService : IDisposable
 
         var peer = qs.GetValueOrDefault("id") ?? "";
         var pairing = path is "/pair" or "/pair-result" or "/unpair";
-        var expected = Sign(peer, method, path, CanonicalQuery(qs), body,
-            pairing ? Token : null);
+        var expected = Sign(peer, method, path, CanonicalQuery(qs), body, pairing ? Token : null);
         return CryptographicOperations.FixedTimeEquals(
             Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes(sig.ToLowerInvariant()));
     }
@@ -814,7 +813,7 @@ public sealed class LanService : IDisposable
         }
         ClearConnected();
         if (dev is not null)
-            _ = _client.GetStringAsync($"http://{dev.Ip}:{dev.Port}/unpair?k={Token}&id={Uri.EscapeDataString(DeviceId)}");
+            _ = _client.GetStringAsync(SignedUrl(dev, "/unpair"));
     }
 
     private void SetConnected(LanDevice dev)

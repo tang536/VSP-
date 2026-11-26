@@ -80,6 +80,19 @@ public partial class App : Application
             window.Hide();
         };
 
+        // 托盘图标必须等窗口进入 Opened 之后再建：更早创建时 Avalonia 的平台托盘服务
+        // 还没准备好，图标会被静默丢弃，结果就是进程留在后台但托盘里什么都看不到。
+        var created = false;
+        window.Opened += (_, _) =>
+        {
+            if (created) return;
+            created = true;
+            CreateTray(desktop, window);
+        };
+    }
+
+    private static void CreateTray(IClassicDesktopStyleApplicationLifetime desktop, MainWindow window)
+    {
         var menu = new NativeMenu();
         var open = new NativeMenuItem("打开主界面");
         open.Click += (_, _) =>
@@ -99,18 +112,18 @@ public partial class App : Application
         menu.Add(new NativeMenuItemSeparator());
         menu.Add(exit);
 
-        var tray = new TrayIcon
-        {
-            Menu = menu,
-            ToolTipText = "全能工具箱",
-            IsVisible = true,
-        };
+        var tray = new TrayIcon { Menu = menu, ToolTipText = "全能工具箱" };
+        // 先设图标再设 IsVisible，顺序反了 Windows 上有机会注册出无图标的空白托盘项。
         try
         {
             using var stream = AssetLoader.Open(new Uri("avares://VSP.Desktop/Assets/app.png"));
             tray.Icon = new WindowIcon(stream);
         }
-        catch { /* 图标加载失败也能用菜单操作 */ }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine("tray icon failed: " + ex.Message);
+        }
+        tray.IsVisible = true;
 
         _tray = tray;
         desktop.Exit += (_, _) =>
