@@ -13,7 +13,7 @@
         <StackPanel Grid.Row="1" Spacing="6" Margin="0,16,0,0">
             <TextBlock Text="{Binding IncomingPair.Name, StringFormat=设备：{0}}" Classes="rowLabel" FontSize="15" />
             <TextBlock Text="{Binding IncomingPair.Ip, StringFormat=地址：{0}}" Classes="sub" />
-            <TextBlock Text="是否同意该设备连接并互传文件、查看屏幕？" Classes="dim" TextWrapping="Wrap" Margin="0,8,0,0" />
+            <TextBlock Text="是否同意该设备连接并互传文件？远程控制需要在本机再次确认。" Classes="dim" TextWrapping="Wrap" Margin="0,8,0,0" />
         </StackPanel>
         <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="10" HorizontalAlignment="Right"
                     VerticalAlignment="Bottom" Margin="0,16,0,0">

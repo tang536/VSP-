@@ -28,6 +28,7 @@ public partial class LanView : UserControl
         _bound = vm;
         vm.RequestOpenLanDevices += OpenDevicesWindow;
         vm.RequestPairDialog += OpenPairWindow;
+        vm.RequestControlDialog += OpenControlWindow;
     }
 
     private void UnbindEvents()
@@ -35,6 +36,7 @@ public partial class LanView : UserControl
         if (_bound is null) return;
         _bound.RequestOpenLanDevices -= OpenDevicesWindow;
         _bound.RequestPairDialog -= OpenPairWindow;
+        _bound.RequestControlDialog -= OpenControlWindow;
         _bound = null;
     }
 
@@ -59,6 +61,15 @@ public partial class LanView : UserControl
         foreach (var w in owner.OwnedWindows)
             if (w is LanPairWindow) { w.Activate(); return; }
         new LanPairWindow(_bound!).Show(owner);
+    }
+
+    private void OpenControlWindow()
+    {
+        var owner = OwnerWindow();
+        if (owner is null) return;
+        foreach (var w in owner.OwnedWindows)
+            if (w is LanControlWindow) { w.Activate(); return; }
+        new LanControlWindow(_bound!).Show(owner);
     }
 
     private void FullScreen_Click(object? sender, Avalonia.Interactivity.RoutedEventArgs e) => ToggleFullscreen();

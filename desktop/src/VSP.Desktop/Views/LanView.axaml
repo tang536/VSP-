@@ -83,7 +83,12 @@
                         <TextBlock Text="{Binding LanBreadcrumb}" Classes="h2" VerticalAlignment="Center" Margin="8,0,0,0" />
                         <Button Classes="ghost small" Content="上级" Command="{Binding LanBackDirCommand}" />
                         <Button Classes="primary small" Content="发送文件" Command="{Binding LanUploadCommand}" />
-                        <Button Classes="ghost small" Content="开始远控" Command="{Binding LanStartControlCommand}" />
+                        <Button Classes="ghost small" Content="开始远控" Command="{Binding LanStartControlCommand}"
+                                IsVisible="{Binding !LanControlPending}" />
+                        <TextBlock Text="正在等待对方授权…" Classes="sub" VerticalAlignment="Center"
+                                   IsVisible="{Binding LanControlPending}" />
+                        <Button Classes="ghost small" Content="取消申请" Command="{Binding LanStopControlCommand}"
+                                IsVisible="{Binding LanControlPending}" />
                     </StackPanel>
 
                     <ScrollViewer Grid.Row="1" MaxHeight="180" Margin="0,12,0,0"

@@ -1,10 +1,10 @@
 {
   "desktop": {
-    "version": "1.2.7"
+    "version": "1.2.8"
   },
   "android": {
-    "version": "1.4.5",
-    "versionCode": 11405
+    "version": "1.4.6",
+    "versionCode": 11406
   },
   "tagPrefix": {
     "desktop": "desktop-v",

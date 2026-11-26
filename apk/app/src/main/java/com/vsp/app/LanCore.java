@@ -88,11 +88,30 @@ public final class LanCore {
         }
     }
 
+    /** 对方发来的远控申请。cid 由主控端生成，用于轮询审批结果。 */
+    public static final class ControlRequest {
+        public final String cid, id, name, kind, ip;
+        public final int port;
+        public final long time;
+        public ControlRequest(String cid, String id, String name, String kind, String ip, int port) {
+            this.cid = cid; this.id = id; this.name = name; this.kind = kind;
+            this.ip = ip; this.port = port; this.time = System.currentTimeMillis();
+        }
+    }
+
+    /** 主控端发起远控后拿到的会话：cid 用于轮询，result 为 ok / wait / busy。 */
+    public static final class ControlSession {
+        public final String cid, result;
+        public ControlSession(String cid, String result) { this.cid = cid; this.result = result; }
+    }
+
     public interface Callback {
         void onDevicesChanged();
         void onStatus(String text);
         /** 对方发来连接申请，UI 应弹窗让用户选择同意/拒绝 */
         default void onPairRequest(PairRequest req) { }
+        /** 对方申请查看/控制本机，UI 必须弹窗询问，不能默认授权 */
+        default void onControlRequest(ControlRequest req) { }
         /** 连接建立/断开（含对方通过 hello 同步过来的状态） */
         default void onConnectionChanged() { }
     }
@@ -108,6 +127,10 @@ public final class LanCore {
     private final java.util.Set<String> localIps = new java.util.HashSet<>();
     private final Map<String, PairRequest> pairRequests = new ConcurrentHashMap<>();
     private final Map<String, Boolean> pairAnswers = new ConcurrentHashMap<>();
+    private final Map<String, ControlRequest> controlRequests = new ConcurrentHashMap<>();
+    private final Map<String, Boolean> controlAnswers = new ConcurrentHashMap<>();
+    private volatile String activeControlCid;
+    private volatile String activeControllerId;
     private final Map<String, String> sessionKeys = new ConcurrentHashMap<>();
     private final Map<String, Long> seenNonces = new ConcurrentHashMap<>();
     private final Object connLock = new Object();
@@ -233,6 +256,13 @@ public final class LanCore {
         } catch (Throwable ignored) { }
         new Thread(this::discoverLoop, "lan-discover").start();
         new Thread(this::httpLoop, "lan-http").start();
+        // 用户在系统通知/设置里停掉屏幕共享时，同步清掉远控会话，避免主控端一直等待。
+        LanScreenService.onStopped = () -> {
+            if (activeControlCid != null) {
+                clearControlState();
+                status("屏幕共享已停止");
+            }
+        };
         status("正在发现附近设备…");
     }
 
@@ -241,6 +271,8 @@ public final class LanCore {
         try { if (udp != null) udp.close(); } catch (Throwable ignored) { }
         try { if (http != null) http.close(); } catch (Throwable ignored) { }
         try { if (multicastLock != null && multicastLock.isHeld()) multicastLock.release(); } catch (Throwable ignored) { }
+        LanScreenService.onStopped = null;
+        clearControlState();
         stopProjectionService();
         pool.shutdownNow();
     }
@@ -455,6 +487,11 @@ public final class LanCore {
                 receiveUpload(decode(uri.getQueryParameter("name")), body, off);
                 respond(out, 200, "text/plain", "ok".getBytes());
             } else if ("/screen".equals(path)) {
+                // 只有当前被授权的主控端才能取帧，防止配对后任意设备直接窥屏。
+                if (!isControlActiveFor(uri.getQueryParameter("id"))) {
+                    respond(out, 403, "text/plain", "control not allowed".getBytes());
+                    return;
+                }
                 byte[] shot = captureScreen();
                 if (shot == null) respond(out, 503, "text/plain", "no projection".getBytes());
                 else respond(out, 200, "image/jpeg", shot);
@@ -491,11 +528,84 @@ public final class LanCore {
                     pairAnswers.remove(rid); pairRequests.remove(rid);
                 }
             } else if ("/unpair".equals(path)) {
-                // 对端主动断开：同步清除本机状态
+                // 对端主动断开：同步清除本机状态（clearConnected 会停止被控共享）
                 String rid = nullToEmpty(uri.getQueryParameter("id"));
                 if (isConnectedTo(rid)) clearConnected();
                 respond(out, 200, "text/plain", "ok".getBytes());
+            } else if ("/control-request".equals(path)) {
+                String cid = nullToEmpty(uri.getQueryParameter("cid"));
+                String requester = nullToEmpty(uri.getQueryParameter("id"));
+                if (cid.isEmpty() || !isConnectedTo(requester)) {
+                    respond(out, 403, "text/plain", "not connected".getBytes());
+                } else if (isControlActiveFor(requester)) {
+                    // 同一台设备重复申请：直接视为已授权，方便主控端重连。
+                    respond(out, 200, "text/plain", "ok".getBytes());
+                } else if (activeControllerId != null || !controlRequests.isEmpty()) {
+                    respond(out, 200, "text/plain", "busy".getBytes());
+                } else {
+                    Device dev = devices.get(requester);
+                    String dn = nullToEmpty(uri.getQueryParameter("dn"));
+                    if (dn.isEmpty() && dev != null) dn = dev.name;
+                    String kind = nullToEmpty(uri.getQueryParameter("t"));
+                    if (kind.isEmpty() && dev != null) kind = dev.kind;
+                    String ip = nullToEmpty(uri.getQueryParameter("ip"));
+                    if (ip.isEmpty() && dev != null) ip = dev.ip;
+                    ControlRequest req = new ControlRequest(cid, requester, dn, kind, ip,
+                            parseInt(uri.getQueryParameter("p"), HTTP_PORT));
+                    controlRequests.put(cid, req);
+                    controlAnswers.remove(cid);
+                    try { callback.onControlRequest(req); } catch (Throwable ignored) { }
+                    respond(out, 200, "text/plain", "ok".getBytes());
+                }
+            } else if ("/control-result".equals(path)) {
+                String cid = nullToEmpty(uri.getQueryParameter("cid"));
+                String requester = nullToEmpty(uri.getQueryParameter("id"));
+                if (!isConnectedTo(requester)) {
+                    respond(out, 403, "text/plain", "not connected".getBytes());
+                } else {
+                    String result;
+                    if (activeControlCid != null && requester.equals(activeControllerId)) {
+                        result = "ok";
+                    } else if (controlAnswers.containsKey(cid)) {
+                        // 已点允许但还没拿到系统屏幕共享授权：保持 wait。
+                        result = controlAnswers.get(cid) ? "wait" : "no";
+                    } else if (controlRequests.containsKey(cid)) {
+                        ControlRequest req = controlRequests.get(cid);
+                        if (req != null && System.currentTimeMillis() - req.time > 60000) {
+                            controlRequests.remove(cid);
+                            result = "no";
+                        } else {
+                            result = "wait";
+                        }
+                    } else {
+                        result = "no";
+                    }
+                    respond(out, 200, "text/plain", result.getBytes(StandardCharsets.UTF_8));
+                    if (!"wait".equals(result)) {
+                        controlAnswers.remove(cid);
+                        controlRequests.remove(cid);
+                    }
+                }
+            } else if ("/control-stop".equals(path)) {
+                String cid = nullToEmpty(uri.getQueryParameter("cid"));
+                String requester = nullToEmpty(uri.getQueryParameter("id"));
+                if (!isConnectedTo(requester)) {
+                    respond(out, 403, "text/plain", "not connected".getBytes());
+                } else {
+                    controlRequests.remove(cid);
+                    controlAnswers.remove(cid);
+                    if (activeControlCid != null && requester.equals(activeControllerId)) {
+                        clearControlState();
+                        stopProjectionService();
+                        status("远控已结束");
+                    }
+                    respond(out, 200, "text/plain", "ok".getBytes());
+                }
             } else if ("/input".equals(path)) {
+                if (!isControlActiveFor(uri.getQueryParameter("id"))) {
+                    respond(out, 403, "text/plain", "control not allowed".getBytes());
+                    return;
+                }
                 boolean ok = applyInput(body);
                 respond(out, ok ? 200 : 503, "text/plain", (ok ? "ok" : "no accessibility").getBytes());
             } else {
@@ -589,7 +699,7 @@ public final class LanCore {
     // ---------------- 被控：截屏与输入 ----------------
 
     /** 由 Activity 在拿到 MediaProjection 授权回调后调用：转交 mediaProjection 前台服务。 */
-    public void startProjection(int resultCode, Intent data) {
+    public boolean startProjection(int resultCode, Intent data) {
         try {
             Intent i = new Intent(ctx, LanScreenService.class);
             i.putExtra(LanScreenService.EXTRA_CODE, resultCode);
@@ -597,7 +707,11 @@ public final class LanCore {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(i);
             else ctx.startService(i);
             status("屏幕共享已开启，电脑可查看并控制本手机");
-        } catch (Throwable t) { status("屏幕共享开启失败：" + t.getMessage()); }
+            return true;
+        } catch (Throwable t) {
+            status("屏幕共享开启失败：" + t.getMessage());
+            return false;
+        }
     }
 
     public void stopProjectionService() {
@@ -605,6 +719,45 @@ public final class LanCore {
     }
 
     public boolean isProjecting() { return LanScreenService.isProjecting(); }
+
+    /** 当前取帧/输入是否来自已被用户授权的那台主控设备。 */
+    public boolean isControlActiveFor(String id) {
+        return id != null && !id.isEmpty() && id.equals(activeControllerId) && activeControlCid != null;
+    }
+
+    /** 弹窗点「允许」前检查申请是否还在，避免对端已取消后仍去申请系统权限。 */
+    public boolean hasControlRequest(String cid) {
+        return cid != null && controlRequests.containsKey(cid);
+    }
+
+    /** 用户拒绝/取消：立即让主控端拿到 no，不再保持等待。 */
+    public void decideControl(String cid, boolean accept) {
+        ControlRequest req = controlRequests.get(cid);
+        if (req == null) return;
+        controlAnswers.put(cid, accept);
+        if (!accept) {
+            controlRequests.remove(cid);
+            status("已拒绝 " + req.name + " 的远控申请");
+        }
+    }
+
+    /** 系统屏幕共享授权成功后调用：正式建立取帧/输入通道。 */
+    public boolean approveControl(String cid) {
+        ControlRequest req = controlRequests.remove(cid);
+        if (req == null) return false;
+        controlAnswers.put(cid, true);
+        activeControlCid = cid;
+        activeControllerId = req.id;
+        status("已允许 " + req.name + " 查看并控制本机");
+        return true;
+    }
+
+    private void clearControlState() {
+        activeControlCid = null;
+        activeControllerId = null;
+        controlRequests.clear();
+        controlAnswers.clear();
+    }
 
     private byte[] captureScreen() {
         return LanScreenService.isProjecting() ? LanScreenService.getLatestFrame() : null;
@@ -697,7 +850,17 @@ public final class LanCore {
     }
 
     private void setConnected(Device d) {
-        synchronized (connLock) { connectedPeerId = d.id; connectedPeer = d; }
+        boolean peerChanged;
+        synchronized (connLock) {
+            peerChanged = connectedPeerId != null && !connectedPeerId.equals(d.id);
+            connectedPeerId = d.id; connectedPeer = d;
+        }
+        // 换成另一台设备时，撤销上一台的远控授权，避免旧主控端继续取帧。
+        if (peerChanged) {
+            boolean wasControlling = activeControlCid != null;
+            clearControlState();
+            if (wasControlling) stopProjectionService();
+        }
         syncDeviceFlags();
         try { callback.onConnectionChanged(); } catch (Throwable ignored) { }
     }
@@ -705,6 +868,10 @@ public final class LanCore {
     private void clearConnected() {
         boolean changed;
         synchronized (connLock) { changed = connectedPeerId != null; connectedPeerId = null; connectedPeer = null; }
+        // 断开时立即撤销申请并停止被控：否则对端断开后手机还在后台共享屏幕。
+        boolean wasControlling = activeControlCid != null;
+        clearControlState();
+        if (wasControlling) stopProjectionService();
         syncDeviceFlags();
         if (changed) { try { callback.onConnectionChanged(); } catch (Throwable ignored) { } }
     }
@@ -775,6 +942,40 @@ public final class LanCore {
             }
             return true;
         } catch (Throwable ignored) { return false; }
+    }
+
+    /** 先向对端申请远控；对方弹窗同意并完成系统授权后才返回 ok。 */
+    public ControlSession requestControl(Device d) {
+        try {
+            String cid = java.util.UUID.randomUUID().toString().replace("-", "");
+            String myIp = nullToEmpty(localIp).isEmpty() ? findPrivateIp() : localIp;
+            Map<String, String> p = new HashMap<>();
+            p.put("cid", cid); p.put("dn", deviceName); p.put("t", "android");
+            p.put("ip", myIp); p.put("p", String.valueOf(HTTP_PORT));
+            String r = nullToEmpty(httpGetRaw(signedUrl(d, "/control-request", p, "GET", null))).trim();
+            if (r.isEmpty()) return null;
+            return new ControlSession(cid, r);
+        } catch (Throwable t) { return null; }
+    }
+
+    /** wait / ok / no / busy。 */
+    public String pollControl(Device d, String cid) {
+        try {
+            Map<String, String> p = new HashMap<>();
+            p.put("cid", cid);
+            String r = nullToEmpty(httpGetRaw(signedUrl(d, "/control-result", p, "GET", null))).trim();
+            return r.isEmpty() ? "wait" : r;
+        } catch (Throwable t) { return "wait"; }
+    }
+
+    /** 主控端停止远控：通知被控端立即关闭屏幕共享。 */
+    public void stopControl(Device d, String cid) {
+        if (d == null || cid == null) return;
+        try {
+            Map<String, String> p = new HashMap<>();
+            p.put("cid", cid);
+            httpGetRaw(signedUrl(d, "/control-stop", p, "GET", null));
+        } catch (Throwable ignored) { }
     }
 
     public byte[] screen(Device d) {

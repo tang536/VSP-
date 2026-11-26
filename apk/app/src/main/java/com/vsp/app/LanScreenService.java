@@ -44,6 +44,8 @@ public final class LanScreenService extends Service {
 
     private static volatile LanScreenService instance;
     private static volatile byte[] latestFrame;
+    /** 系统/用户在通知栏停止共享时通知 LanCore 清理远控会话。 */
+    public static volatile Runnable onStopped;
 
     /** LanCore 的 /screen 取最新帧；isProjecting 判断授权是否仍有效。 */
     public static byte[] getLatestFrame() { return latestFrame; }
@@ -146,6 +148,10 @@ public final class LanScreenService extends Service {
     public void onDestroy() {
         release();
         instance = null;
+        Runnable cb = onStopped;
+        if (cb != null) {
+            try { cb.run(); } catch (Throwable ignored) { }
+        }
         super.onDestroy();
     }
 

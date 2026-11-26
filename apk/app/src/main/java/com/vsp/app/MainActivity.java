@@ -226,7 +226,13 @@ public class MainActivity extends Activity {
     private boolean lanFullscreen = false;
     private LanCore.Device lanSelected;
     private final java.util.Stack<String> lanDirStack = new java.util.Stack<>();
-    private boolean lanControlling = false;
+    private volatile boolean lanControlling = false;
+    private volatile boolean lanControlRequesting = false;
+    private volatile int lanControlToken = 0;
+    private String lanControlCid;
+    private String lanPendingControlCid;
+    private AlertDialog lanControlDialog;
+    private boolean lanAwaitingAccessibility;
     private final Handler lanScreenHandler = new Handler(Looper.getMainLooper());
     private Runnable lanScreenTask;
     // 首页
@@ -1638,6 +1644,9 @@ public class MainActivity extends Activity {
                     showPairRequestDialog(req);
                 });
             }
+            @Override public void onControlRequest(LanCore.ControlRequest req) {
+                ui.post(() -> showControlRequestDialog(req));
+            }
             @Override public void onConnectionChanged() { ui.post(MainActivity.this::applyLanConnection); }
         });
         lan.start();
@@ -1676,26 +1685,21 @@ public class MainActivity extends Activity {
             if (!lanDirStack.isEmpty()) { lanDirStack.pop(); refreshLanFiles(); }
         });
         pageLan.findViewById(R.id.lan_btn_files).setOnClickListener(v -> {
+            stopLanControl(true);
             lanControlPanel.setVisibility(View.GONE);
-            stopLanControlLoop();
             showLanFiles(true);
             refreshLanFiles();
         });
         pageLan.findViewById(R.id.lan_btn_upload).setOnClickListener(v -> pickLanUpload());
         pageLan.findViewById(R.id.lan_btn_control).setOnClickListener(v -> startLanControl());
         pageLan.findViewById(R.id.lan_control_stop).setOnClickListener(v -> {
-            stopLanControlLoop();
+            stopLanControl(true);
             lanControlPanel.setVisibility(View.GONE);
             showLanFiles(true);
         });
         pageLan.findViewById(R.id.lan_key_back).setOnClickListener(v -> sendLanKey("back"));
         pageLan.findViewById(R.id.lan_key_home).setOnClickListener(v -> sendLanKey("home"));
         pageLan.findViewById(R.id.lan_key_recent).setOnClickListener(v -> sendLanKey("recent"));
-        pageLan.findViewById(R.id.lan_enable_control).setOnClickListener(v -> requestProjection());
-        pageLan.findViewById(R.id.lan_open_accessibility).setOnClickListener(v -> {
-            try { startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)); }
-            catch (Throwable t) { Toast.makeText(this, "无法打开无障碍设置", Toast.LENGTH_SHORT).show(); }
-        });
 
         // 远控画面触摸：按下-移动-抬起区分点击 / 滑动，归一化坐标发给对方
         final float[] downX = new float[1];
@@ -1784,8 +1788,13 @@ public class MainActivity extends Activity {
             if (lanSelected != null) {
                 lanSelected = null;
                 lanDirStack.clear();
-                stopLanControlLoop();
+                stopLanControl(false); // 对端已经通过 /unpair 清理，无需再发停止请求
                 lanControlPanel.setVisibility(View.GONE);
+            }
+            lanPendingControlCid = null;
+            if (lanControlDialog != null) {
+                try { lanControlDialog.dismiss(); } catch (Throwable ignored) { }
+                lanControlDialog = null;
             }
             lanOps.setVisibility(View.GONE);
             if (lanDiscovery != null) lanDiscovery.setVisibility(View.VISIBLE);
@@ -1867,7 +1876,7 @@ public class MainActivity extends Activity {
         String type = "android".equalsIgnoreCase(req.kind) ? "手机" : "电脑";
         new AlertDialog.Builder(this)
                 .setTitle("收到连接申请")
-                .setMessage(req.name + "（" + type + " · " + req.ip + "）请求连接本设备，是否同意？\n同意后将允许互传文件与查看/控制屏幕。")
+                .setMessage(req.name + "（" + type + " · " + req.ip + "）请求连接本设备，是否同意？\n同意后可互传文件；远程控制需要在本机再次确认。")
                 .setPositiveButton("同意连接", (dialog, which) -> {
                     if (lan != null) {
                         // 同意后 LanCore 会进入已连接状态并同步两端界面
@@ -1882,6 +1891,56 @@ public class MainActivity extends Activity {
                     }
                 })
                 .setCancelable(false)
+                .show();
+    }
+
+    /** 对方申请远控时才弹窗，并由用户决定是否进入系统屏幕共享授权。 */
+    private void showControlRequestDialog(final LanCore.ControlRequest req) {
+        if (lan == null || !lan.isConnectedTo(req.id)) return;
+        if (lanControlDialog != null && lanControlDialog.isShowing()) {
+            // 同一时间只处理一个申请，避免两个系统授权弹窗互相覆盖。
+            lan.decideControl(req.cid, false);
+            return;
+        }
+        String type = "android".equalsIgnoreCase(req.kind) ? "手机" : "电脑";
+        lanControlDialog = new AlertDialog.Builder(this)
+                .setTitle("远程控制请求")
+                .setMessage(req.name + "（" + type + " · " + req.ip
+                        + "）请求查看并控制本设备。\n\n允许后会弹出系统屏幕共享授权。"
+                        + "若要允许对方点击/滑动，请确保已开启「全能工具箱」无障碍服务。")
+                .setPositiveButton("允许并共享屏幕", (dialog, which) -> {
+                    if (lan == null || !lan.hasControlRequest(req.cid)) {
+                        Toast.makeText(this, "远控请求已失效", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    lanPendingControlCid = req.cid;
+                    Toast.makeText(this, "请在系统弹窗中允许屏幕共享", Toast.LENGTH_SHORT).show();
+                    requestProjection();
+                })
+                .setNegativeButton("拒绝", (dialog, which) -> {
+                    lanPendingControlCid = null;
+                    if (lan != null) lan.decideControl(req.cid, false);
+                })
+                .setCancelable(false)
+                .show();
+        lanControlDialog.setOnDismissListener(d -> lanControlDialog = null);
+    }
+
+    /** 屏幕共享已开但无障碍没开时，明确告知只能看、不能操作。 */
+    private void showAccessibilityTip() {
+        if (LanAccessibilityService.getInstance() != null) return;
+        new AlertDialog.Builder(this)
+                .setTitle("目前仅能查看屏幕")
+                .setMessage("屏幕共享已开启。要让对方点击/滑动，请到系统设置开启「全能工具箱」的无障碍服务。")
+                .setPositiveButton("去开启", (dialog, which) -> {
+                    lanAwaitingAccessibility = true;
+                    try { startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)); }
+                    catch (Throwable t) {
+                        lanAwaitingAccessibility = false;
+                        Toast.makeText(this, "无法打开无障碍设置", Toast.LENGTH_SHORT).show();
+                    }
+                })
+                .setNegativeButton("仅共享屏幕", null)
                 .show();
     }
 
@@ -1950,16 +2009,54 @@ public class MainActivity extends Activity {
         catch (Throwable t) { Toast.makeText(this, "无法打开文件选择器", Toast.LENGTH_SHORT).show(); }
     }
 
+    /** 先向对方申请远控，对方弹窗同意并完成系统授权后才开始拉画面。 */
     private void startLanControl() {
         if (lan == null || lanSelected == null) return;
-        if (lanSelected.isAndroid()) {
-            Toast.makeText(this, "控制手机需对方开启屏幕共享与无障碍服务", Toast.LENGTH_LONG).show();
-        }
-        lanControlling = true;
+        if (lanControlling || lanControlRequesting) return;
+        final LanCore.Device dev = lanSelected;
+        final int token = ++lanControlToken;
+        lanControlRequesting = true;
         lanControlPanel.setVisibility(View.VISIBLE);
         showLanFiles(false);
-        stopLanControlLoop();
-        final LanCore.Device dev = lanSelected;
+        if (lanStatusText != null) lanStatusText.setText("正在请求 " + dev.name + " 授权远程控制…");
+        new Thread(() -> {
+            LanCore.ControlSession session = lan.requestControl(dev);
+            if (token != lanControlToken || !lanControlRequesting) {
+                if (session != null) lan.stopControl(dev, session.cid);
+                return;
+            }
+            if (session == null) { failLanControl(token, "远控请求发送失败，请确认对方在线"); return; }
+            if ("busy".equals(session.result)) { failLanControl(token, dev.name + " 正在被其他设备控制"); return; }
+            if (!"ok".equals(session.result) && !"wait".equals(session.result)) {
+                failLanControl(token, "对方没有允许远程控制");
+                return;
+            }
+            lanControlCid = session.cid;
+            long deadline = System.currentTimeMillis() + 60000;
+            while (token == lanControlToken && lanControlRequesting && System.currentTimeMillis() < deadline) {
+                String r = lan.pollControl(dev, session.cid);
+                if (token != lanControlToken) { lan.stopControl(dev, session.cid); return; }
+                if ("ok".equals(r)) { ui.post(() -> beginLanControl(dev, session.cid, token)); return; }
+                if ("no".equals(r)) { failLanControl(token, "对方拒绝或未完成屏幕共享授权"); return; }
+                if ("busy".equals(r)) { failLanControl(token, "对方正在被其他设备控制"); return; }
+                try { Thread.sleep(700); } catch (InterruptedException e) { return; }
+            }
+            if (token == lanControlToken) {
+                lan.stopControl(dev, session.cid);
+                failLanControl(token, "等待对方授权超时");
+            }
+        }, "lan-control-request").start();
+    }
+
+    private void beginLanControl(final LanCore.Device dev, String cid, int token) {
+        if (token != lanControlToken || lan == null || lanSelected != dev) return;
+        lanControlRequesting = false;
+        lanControlling = true;
+        lanControlCid = cid;
+        lanControlPanel.setVisibility(View.VISIBLE);
+        showLanFiles(false);
+        if (lanStatusText != null) lanStatusText.setText("正在加载 " + dev.name + " 的屏幕…");
+        cancelLanScreenTask();
         lanScreenTask = new Runnable() {
             @Override public void run() {
                 if (!lanControlling || lan == null || lanSelected != dev) return;
@@ -1980,7 +2077,7 @@ public class MainActivity extends Activity {
                         if (!lanControlling || lanSelected != dev) return;
                         if (frame != null) {
                             setLanScreenBitmap(frame);
-                        } else if (!dev.isAndroid()) {
+                        } else if (lanStatusText != null) {
                             lanStatusText.setText("远控画面等待中…");
                         }
                     });
@@ -1991,10 +2088,41 @@ public class MainActivity extends Activity {
         lanScreenHandler.post(lanScreenTask);
     }
 
-    private void stopLanControlLoop() {
-        lanControlling = false;
+    private void failLanControl(int token, String message) {
+        ui.post(() -> {
+            if (token != lanControlToken) return;
+            lanControlRequesting = false;
+            lanControlling = false;
+            lanControlCid = null;
+            if (lanControlPanel != null) lanControlPanel.setVisibility(View.GONE);
+            showLanFiles(true);
+            if (lanStatusText != null) lanStatusText.setText(message);
+        });
+    }
+
+    /** 停止本机拉流；notifyPeer=true 时同时通知对方关闭屏幕共享。 */
+    private void stopLanControl(boolean notifyPeer) {
+        lanControlToken++;
+        lanControlRequesting = false;
+        String cid = lanControlCid;
+        LanCore.Device dev = lanSelected;
+        lanControlCid = null;
+        stopLanControlLoop();
+        if (notifyPeer && cid != null && dev != null && lan != null) {
+            final LanCore.Device target = dev;
+            final String session = cid;
+            new Thread(() -> lan.stopControl(target, session), "lan-control-stop").start();
+        }
+    }
+
+    private void cancelLanScreenTask() {
         setLanFullscreen(false);
         if (lanScreenTask != null) { lanScreenHandler.removeCallbacks(lanScreenTask); lanScreenTask = null; }
+    }
+
+    private void stopLanControlLoop() {
+        lanControlling = false;
+        cancelLanScreenTask();
     }
 
     /** 远控画面同时更新预览和全屏层；旧帧在两个 View 都替换后再回收，避免 recycled bitmap 崩溃 */
@@ -2803,10 +2931,25 @@ public class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQ_LAN_PROJECTION) {
+            String cid = lanPendingControlCid;
+            lanPendingControlCid = null;
             if (resultCode == RESULT_OK && data != null && lan != null) {
-                lan.startProjection(resultCode, data);
-                Toast.makeText(this, "屏幕共享已开启，电脑现在可以查看并控制本手机", Toast.LENGTH_LONG).show();
+                // 只有仍然有效的申请才建立通道；对端可能已经超时/停止。
+                if (cid == null || !lan.hasControlRequest(cid)) {
+                    Toast.makeText(this, "远控请求已失效，未开启屏幕共享", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                if (!lan.startProjection(resultCode, data) || !lan.approveControl(cid)) {
+                    // 服务已起来但审批失效时立刻停掉，绝不留后台截屏。
+                    try { lan.stopProjectionService(); } catch (Throwable ignored) { }
+                    if (lan != null) lan.decideControl(cid, false);
+                    Toast.makeText(this, "屏幕共享开启失败", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                Toast.makeText(this, "屏幕共享已开启，对方现在可以查看本手机", Toast.LENGTH_LONG).show();
+                showAccessibilityTip();
             } else {
+                if (lan != null && cid != null) lan.decideControl(cid, false);
                 Toast.makeText(this, "已取消屏幕共享授权", Toast.LENGTH_SHORT).show();
             }
             return;
@@ -8966,6 +9109,18 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        // 从无障碍设置返回后复查一次，让用户立即知道现在是否可以操作屏幕。
+        if (lanAwaitingAccessibility) {
+            lanAwaitingAccessibility = false;
+            Toast.makeText(this, LanAccessibilityService.getInstance() != null
+                    ? "无障碍服务已开启，对方现在可以点击和滑动"
+                    : "无障碍服务仍未开启，目前只能查看屏幕", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    @Override
     protected void onPause() {
         super.onPause();
         // 进程被系统回收时不一定走 onDestroy，切后台先落一份队列快照
@@ -8988,7 +9143,8 @@ public class MainActivity extends Activity {
         if (taskPoller != null) taskPoller.shutdownNow();
         if (swipePool != null) swipePool.shutdownNow();
         if (thumbPool != null) thumbPool.shutdownNow();
-        stopLanControlLoop();
+        stopLanControl(false);
+        if (lanControlDialog != null) { try { lanControlDialog.dismiss(); } catch (Throwable ignored) { } lanControlDialog = null; }
         if (lan != null) { try { lan.stop(); } catch (Throwable ignored) { } lan = null; }
         ui.removeCallbacksAndMessages(null);
         stopPlayer();

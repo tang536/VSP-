@@ -296,54 +296,6 @@
                         </LinearLayout>
                         </LinearLayout>
 
-                    <!-- 被控授权 -->
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="vertical"
-                        android:background="#171a21"
-                        android:tag="card"
-                        android:padding="14dp"
-                        android:layout_marginTop="18dp">
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="让电脑控制本手机"
-                            android:textColor="#e8eaed"
-                            android:textSize="14sp"
-                            android:textStyle="bold" />
-                        <TextView
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:text="需授权屏幕共享，并开启「全能工具箱」无障碍服务（设置 → 无障碍）"
-                            android:tag="dim"
-                            android:textSize="11sp"
-                            android:layout_marginTop="4dp" />
-                        <LinearLayout
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:orientation="horizontal"
-                            android:layout_marginTop="6dp">
-                            <Button
-                                android:id="@+id/lan_enable_control"
-                                android:layout_width="0dp"
-                                android:layout_height="wrap_content"
-                                android:layout_weight="1"
-                                android:text="授权屏幕共享"
-                                android:tag="soft"
-                        android:textSize="12sp" />
-                            <Button
-                                android:id="@+id/lan_open_accessibility"
-                                android:layout_width="0dp"
-                                android:layout_height="wrap_content"
-                                android:layout_weight="1"
-                                android:text="开启无障碍服务"
-                                android:tag="soft"
-                        android:textSize="12sp"
-                                android:layout_marginStart="8dp" />
-                        </LinearLayout>
-                    </LinearLayout>
-
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"

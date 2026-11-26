@@ -57,6 +57,21 @@ public sealed class LanPairRequest
     public DateTime Time { get; set; } = DateTime.Now;
 }
 
+/// <summary>收到的远程控制申请。RequestId 由主控端生成，用于回传审批结果。</summary>
+public sealed class LanControlRequest
+{
+    public string RequestId { get; set; } = "";
+    public string Id { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string Kind { get; set; } = "android";
+    public string Ip { get; set; } = "";
+    public int Port { get; set; }
+    public DateTime Time { get; set; } = DateTime.Now;
+}
+
+/// <summary>主控端发起远控后的返回值：Cid 用于轮询，Result 为 ok / wait / busy。</summary>
+public sealed record LanControlStart(string Cid, string Result);
+
 /// <summary>
 /// 局域网直连服务：UDP 广播发现 + 内嵌 HTTP 服务（文件互传、屏幕查看、输入注入）。
 /// 两端协议完全一致，全部走局域网 IP，不经公网服务器、不消耗移动流量。
@@ -80,6 +95,10 @@ public sealed class LanService : IDisposable
     private readonly HashSet<string> _localIps = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, LanPairRequest> _pairRequests = new();
     private readonly ConcurrentDictionary<string, bool> _pairAnswers = new();
+    private readonly ConcurrentDictionary<string, LanControlRequest> _controlRequests = new();
+    private readonly ConcurrentDictionary<string, bool> _controlAnswers = new();
+    private string? _activeControlCid;
+    private string? _activeControllerId;
     // 配对后为每台设备生成会话密钥，后续请求用 HMAC-SHA256 签名，不再只靠明文静态令牌。
     private readonly ConcurrentDictionary<string, string> _sessionKeys = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, long> _seenNonces = new(StringComparer.OrdinalIgnoreCase);
@@ -156,6 +175,8 @@ public sealed class LanService : IDisposable
     public event Action? DevicesChanged;
     /// <summary>收到一台设备发起的连接申请，UI 应弹窗让用户选择同意/拒绝。</summary>
     public event Action<LanPairRequest>? PairRequested;
+    /// <summary>收到远程控制申请，UI 必须弹窗让用户选择，不能默认允许。</summary>
+    public event Action<LanControlRequest>? ControlRequested;
     /// <summary>连接状态变化（建立、断开、对方断开）。两端状态通过 hello 广播同步。</summary>
     public event Action? ConnectionChanged;
 
@@ -408,8 +429,17 @@ public sealed class LanService : IDisposable
                 case "/dl": await ServeDownloadAsync(stream, qs.GetValueOrDefault("path"), headers.GetValueOrDefault("Range")); break;
                 case "/ul": await ReceiveUploadAsync(stream, qs.GetValueOrDefault("name"), body,
                                long.TryParse(qs.GetValueOrDefault("off"), out var off) ? off : 0); break;
-                case "/screen": await ServeScreenAsync(stream); break;
-                case "/input": await ReceiveInputAsync(stream, body); break;
+                case "/screen":
+                    // 只有当前被授权的主控端才能取帧，防止配对后任意设备直接窥屏。
+                    if (!IsControlActiveFor(qs.GetValueOrDefault("id")))
+                    { Respond(stream, 403, "control not allowed"); break; }
+                    await ServeScreenAsync(stream);
+                    break;
+                case "/input":
+                    if (!IsControlActiveFor(qs.GetValueOrDefault("id")))
+                    { Respond(stream, 403, "control not allowed"); break; }
+                    await ReceiveInputAsync(stream, body);
+                    break;
                 case "/pair":
                     {
                         // 对方请求连接：记录申请并通知 UI 弹窗；附带把对方登记为设备，便于同意后直接操作。
@@ -457,6 +487,90 @@ public sealed class LanService : IDisposable
                         // 对端主动断开：同步清除本机连接状态。
                         var rid = qs.GetValueOrDefault("id") ?? "";
                         if (IsConnectedTo(rid)) ClearConnected();
+                        Respond(stream, 200, "ok");
+                        break;
+                    }
+                case "/control-request":
+                    {
+                        var cid = qs.GetValueOrDefault("cid") ?? "";
+                        var rid = qs.GetValueOrDefault("id") ?? "";
+                        if (string.IsNullOrEmpty(cid) || !IsConnectedTo(rid))
+                        { Respond(stream, 403, "not connected"); break; }
+                        if (IsControlActiveFor(rid))
+                        {
+                            // 同一台设备重复申请：视为已授权，允许它按新 cid 继续轮询。
+                            Respond(stream, 200, "ok");
+                        }
+                        else if (_activeControllerId is not null || !_controlRequests.IsEmpty)
+                        {
+                            Respond(stream, 200, "busy");
+                        }
+                        else
+                        {
+                            var req = new LanControlRequest
+                            {
+                                RequestId = cid,
+                                Id = rid,
+                                Name = qs.GetValueOrDefault("dn") ?? "设备",
+                                Kind = qs.GetValueOrDefault("t") ?? "android",
+                                Ip = qs.GetValueOrDefault("ip") ?? "",
+                                Port = int.TryParse(qs.GetValueOrDefault("p"), out var cp) ? cp : HttpPort,
+                            };
+                            if (_devices.TryGetValue(rid, out var known))
+                            {
+                                if (req.Name == "设备") req.Name = known.Name;
+                                if (string.IsNullOrEmpty(req.Ip)) req.Ip = known.Ip;
+                            }
+                            _controlRequests[cid] = req;
+                            _controlAnswers.TryRemove(cid, out _);
+                            try { ControlRequested?.Invoke(req); } catch { }
+                            Respond(stream, 200, "ok");
+                        }
+                        break;
+                    }
+                case "/control-result":
+                    {
+                        var cid = qs.GetValueOrDefault("cid") ?? "";
+                        var rid = qs.GetValueOrDefault("id") ?? "";
+                        if (!IsConnectedTo(rid))
+                        { Respond(stream, 403, "not connected"); break; }
+                        string result;
+                        if (_activeControlCid is not null && rid == _activeControllerId)
+                        {
+                            result = "ok";
+                        }
+                        else if (_controlAnswers.TryGetValue(cid, out var answer))
+                        {
+                            result = answer ? "wait" : "no";
+                        }
+                        else if (_controlRequests.TryGetValue(cid, out var pending))
+                        {
+                            if (DateTime.Now - pending.Time > TimeSpan.FromSeconds(60))
+                            {
+                                _controlRequests.TryRemove(cid, out _);
+                                result = "no";
+                            }
+                            else result = "wait";
+                        }
+                        else result = "no";
+                        Respond(stream, 200, result);
+                        if (result != "wait")
+                        {
+                            _controlAnswers.TryRemove(cid, out _);
+                            _controlRequests.TryRemove(cid, out _);
+                        }
+                        break;
+                    }
+                case "/control-stop":
+                    {
+                        var cid = qs.GetValueOrDefault("cid") ?? "";
+                        var rid = qs.GetValueOrDefault("id") ?? "";
+                        if (!IsConnectedTo(rid))
+                        { Respond(stream, 403, "not connected"); break; }
+                        _controlRequests.TryRemove(cid, out _);
+                        _controlAnswers.TryRemove(cid, out _);
+                        if (_activeControlCid is not null && rid == _activeControllerId)
+                            ClearControlState();
                         Respond(stream, 200, "ok");
                         break;
                     }
@@ -734,6 +848,30 @@ public sealed class LanService : IDisposable
         catch { return false; }
     }
 
+    private bool IsControlActiveFor(string? id) =>
+        !string.IsNullOrEmpty(id) && _activeControlCid is not null && id == _activeControllerId;
+
+    private void ClearControlState()
+    {
+        _activeControlCid = null;
+        _activeControllerId = null;
+        _controlRequests.Clear();
+        _controlAnswers.Clear();
+    }
+
+    /// <summary>UI 审批收到的远控申请；允许后本机立即成为被控端。</summary>
+    public bool DecideControl(string requestId, bool accept)
+    {
+        if (!_controlRequests.TryRemove(requestId, out var req)) return false;
+        _controlAnswers[requestId] = accept;
+        if (accept)
+        {
+            _activeControlCid = requestId;
+            _activeControllerId = req.Id;
+        }
+        return true;
+    }
+
     public async Task<byte[]?> GetScreenAsync(LanDevice dev)
     {
         try { return await _client.GetByteArrayAsync(SignedUrl(dev, "/screen")); }
@@ -752,6 +890,45 @@ public sealed class LanService : IDisposable
             return resp.IsSuccessStatusCode;
         }
         catch { return false; }
+    }
+
+    // ---------------- 远程控制申请 ----------------
+
+    /// <summary>向对方发起远控申请；对方弹窗同意并完成授权后才返回 ok。</summary>
+    public async Task<LanControlStart?> RequestControlAsync(LanDevice dev)
+    {
+        try
+        {
+            var cid = Guid.NewGuid().ToString("N");
+            var myIp = GetLocalPrivateIps().FirstOrDefault() ?? LocalIp;
+            var url = SignedUrl(dev, "/control-request", new()
+            {
+                ["cid"] = cid, ["dn"] = _deviceName, ["t"] = "pc",
+                ["ip"] = myIp, ["p"] = HttpPort.ToString(),
+            });
+            var r = (await _client.GetStringAsync(url)).Trim();
+            return r is "ok" or "wait" or "busy" ? new LanControlStart(cid, r) : null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>轮询对方是否已允许远控：wait / ok / no / busy。</summary>
+    public async Task<string> PollControlAsync(LanDevice dev, string cid)
+    {
+        try
+        {
+            var url = SignedUrl(dev, "/control-result", new() { ["cid"] = cid });
+            var r = (await _client.GetStringAsync(url)).Trim();
+            return r is "ok" or "wait" or "no" or "busy" ? r : "wait";
+        }
+        catch { return "wait"; }
+    }
+
+    /// <summary>主控端停止远控：通知被控端关闭屏幕共享。</summary>
+    public async Task StopControlAsync(LanDevice dev, string cid)
+    {
+        try { await _client.GetStringAsync(SignedUrl(dev, "/control-stop", new() { ["cid"] = cid })); }
+        catch { }
     }
 
     // ---------------- 连接握手 ----------------
@@ -846,6 +1023,8 @@ public sealed class LanService : IDisposable
     {
         bool changed;
         lock (_connLock) { changed = _connectedPeerId is not null; _connectedPeerId = null; _connectedPeer = null; }
+        // 断开时立即撤销远控授权，避免旧主控端在重连前继续取帧。
+        ClearControlState();
         SyncDeviceFlags();
         if (changed) { try { ConnectionChanged?.Invoke(); } catch { } }
     }

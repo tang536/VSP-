@@ -358,6 +358,9 @@ public sealed class MainViewModel : BindableBase
     private byte[]? _lanScreenBytes;
     public bool IsRemoteControlling { get => _remoteCtl; private set => Set(ref _remoteCtl, value); }
     private bool _remoteCtl;
+    /// <summary>正在等待对方同意远控申请（尚未开始拉画面）。</summary>
+    public bool LanControlPending { get => _lanControlPending; private set => Set(ref _lanControlPending, value); }
+    private bool _lanControlPending;
     public ICommand ShowLanCommand { get; }
     public ICommand SelectLanDeviceCommand { get; }
     public ICommand LanOpenDirCommand { get; }
@@ -373,11 +376,18 @@ public sealed class MainViewModel : BindableBase
     public ICommand LanConnectCommand { get; }
     public ICommand LanAcceptPairCommand { get; }
     public ICommand LanRejectPairCommand { get; }
+    public ICommand LanAcceptControlCommand { get; }
+    public ICommand LanRejectControlCommand { get; }
     public ICommand LanDisconnectCommand { get; }
     private CancellationTokenSource? _lanConnectCts;
+    private CancellationTokenSource? _lanControlCts;
+    private string? _lanControlCid;
     /// <summary>收到的连接申请（弹窗显示）。</summary>
     public LanPairRequest? IncomingPair { get => _incomingPair; private set => Set(ref _incomingPair, value); }
     private LanPairRequest? _incomingPair;
+    /// <summary>收到的远程控制申请（弹窗显示）。</summary>
+    public LanControlRequest? IncomingControl { get => _incomingControl; private set => Set(ref _incomingControl, value); }
+    private LanControlRequest? _incomingControl;
     /// <summary>是否正在等待对方同意我的连接申请。</summary>
     public bool LanPairing { get => _lanPairing; private set => Set(ref _lanPairing, value); }
     private bool _lanPairing;
@@ -385,6 +395,10 @@ public sealed class MainViewModel : BindableBase
     public event Action? RequestOpenLanDevices;
     /// <summary>UI 事件：收到连接申请，请求弹窗确认。</summary>
     public event Action? RequestPairDialog;
+    /// <summary>UI 事件：收到远程控制申请，请求弹窗确认。</summary>
+    public event Action? RequestControlDialog;
+    /// <summary>UI 事件：远控申请审批完成后关闭弹窗。</summary>
+    public event Action? RequestCloseControlDialog;
 
     public bool IsHome => _page == 0;
     public bool IsLocal => _page == 1;
@@ -449,6 +463,8 @@ public sealed class MainViewModel : BindableBase
         LanConnectCommand = new RelayCommand(p => { if (p is LanDevice d) _ = LanConnectAsync(d); });
         LanAcceptPairCommand = new RelayCommand(() => DecideIncomingPair(true));
         LanRejectPairCommand = new RelayCommand(() => DecideIncomingPair(false));
+        LanAcceptControlCommand = new RelayCommand(() => DecideIncomingControl(true));
+        LanRejectControlCommand = new RelayCommand(() => DecideIncomingControl(false));
         LanDisconnectCommand = new RelayCommand(DisconnectLan);
         StartLan();
 
@@ -880,6 +896,16 @@ public sealed class MainViewModel : BindableBase
                 LanStatus = $"{req.Name} 请求连接，请在弹窗中选择是否同意";
                 RequestPairDialog?.Invoke();
             });
+            _lan.ControlRequested += req => Dispatch(() =>
+            {
+                // 未连接或已连接其他设备时不允许远控，避免陌生设备弹窗骚扰。
+                if (!_lan.IsConnectedTo(req.Id)) return;
+                // 同一时间只处理一个申请，后来的直接拒绝，避免覆盖正在显示的申请。
+                if (IncomingControl is not null) { _lan.DecideControl(req.RequestId, false); return; }
+                IncomingControl = req;
+                LanStatus = $"{req.Name} 请求远程控制本机，请在弹窗中选择是否允许";
+                RequestControlDialog?.Invoke();
+            });
             _lan.Start();
             Dispatch(() => { Raise(nameof(LanLocalIp)); LanStatus = "正在发现附近设备…"; });
         }
@@ -946,6 +972,7 @@ public sealed class MainViewModel : BindableBase
         }
         else
         {
+            AbortLanControl();
             if (SelectedLanDevice is not null) SelectedLanDevice = null;
             LanStatus = "已断开连接";
         }
@@ -973,6 +1000,23 @@ public sealed class MainViewModel : BindableBase
         _lan.DecidePair(req.Id, accept); // 同意时连接事件会把两端界面切到"已连接"
         if (!accept) LanStatus = $"已拒绝 {req.Name} 的连接申请";
         else LanStatus = $"正在连接 {req.Name}…";
+    }
+
+    /// <summary>审批对方的远控申请：桌面端不需要额外的系统屏幕授权。</summary>
+    private void DecideIncomingControl(bool accept)
+    {
+        if (_lan is null || IncomingControl is null) return;
+        var req = IncomingControl;
+        IncomingControl = null;
+        RequestCloseControlDialog?.Invoke();
+        if (!_lan.DecideControl(req.RequestId, accept))
+        {
+            LanStatus = "该远控申请已失效";
+            return;
+        }
+        LanStatus = accept
+            ? $"已允许 {req.Name} 远程控制本机"
+            : $"已拒绝 {req.Name} 的远控申请";
     }
 
     /// <summary>UI 事件：连接成功后关闭「附近设备」弹窗。</summary>
@@ -1055,21 +1099,112 @@ public sealed class MainViewModel : BindableBase
     private async Task StartLanControlAsync()
     {
         if (_lan is null || SelectedLanDevice is null) return;
-        IsRemoteControlling = true;
-        LanStatus = "远控中";
-        while (IsRemoteControlling && SelectedLanDevice is not null)
+        if (IsRemoteControlling || LanControlPending) return;
+        var dev = SelectedLanDevice;
+        _lanControlCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _lanControlCts = cts;
+        LanControlPending = true;
+        LanStatus = $"正在请求 {dev.Name} 授权远程控制…";
+        try
         {
-            var bytes = await _lan.GetScreenAsync(SelectedLanDevice);
-            if (bytes is not null) Dispatch(() => LanScreenBytes = bytes);
-            await Task.Delay(600);
+            var start = await _lan.RequestControlAsync(dev);
+            if (cts.IsCancellationRequested)
+            {
+                if (start is not null) await _lan.StopControlAsync(dev, start.Cid);
+                return;
+            }
+            if (start is null) { LanStatus = "远控请求发送失败，请确认对方在线"; return; }
+            if (start.Result == "busy") { LanStatus = $"{dev.Name} 正在被其他设备控制"; return; }
+            if (start.Result != "ok" && start.Result != "wait")
+            {
+                LanStatus = "对方没有允许远程控制";
+                return;
+            }
+
+            _lanControlCid = start.Cid;
+            var result = start.Result;
+            if (result != "ok")
+                LanStatus = $"已发送远控申请，等待 {dev.Name} 同意…";
+
+            var deadline = DateTime.UtcNow.AddSeconds(60);
+            while (result != "ok")
+            {
+                if (cts.IsCancellationRequested) return;
+                if (DateTime.UtcNow >= deadline)
+                {
+                    LanStatus = "等待对方授权超时";
+                    return;
+                }
+                try { await Task.Delay(700, cts.Token); }
+                catch (OperationCanceledException) { return; }
+                result = await _lan.PollControlAsync(dev, start.Cid);
+                if (result == "no") { LanStatus = "对方拒绝或未完成屏幕共享授权"; return; }
+                if (result == "busy") { LanStatus = "对方正在被其他设备控制"; return; }
+            }
+
+            if (cts.IsCancellationRequested) return;
+            IsRemoteControlling = true;
+            LanStatus = "远控中";
+            var ticks = 0;
+            while (IsRemoteControlling && !cts.IsCancellationRequested)
+            {
+                var bytes = await _lan.GetScreenAsync(dev);
+                if (cts.IsCancellationRequested || !IsRemoteControlling) break;
+                if (bytes is not null) Dispatch(() => LanScreenBytes = bytes);
+                // 每 5 秒左右确认一次对方是否已停止共享，避免画面卡在最后一帧。
+                if (++ticks % 8 == 0)
+                {
+                    var state = await _lan.PollControlAsync(dev, start.Cid);
+                    if (cts.IsCancellationRequested || !IsRemoteControlling) break;
+                    if (state == "no")
+                    {
+                        LanStatus = "对方已停止屏幕共享";
+                        break;
+                    }
+                }
+                try { await Task.Delay(600, cts.Token); }
+                catch (OperationCanceledException) { break; }
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { LanStatus = "远控失败：" + ex.Message; }
+        finally
+        {
+            LanControlPending = false;
+            IsRemoteControlling = false;
+            Dispatch(() => LanScreenBytes = null);
+            // 正常停止时 StopLanControl 已经取走 cid 并通知过对方；这里只为异常/超时兜底。
+            var cid = _lanControlCid;
+            _lanControlCid = null;
+            if (cid is not null) _ = _lan.StopControlAsync(dev, cid);
         }
     }
 
     private void StopLanControl()
     {
+        _lanControlCts?.Cancel();
+        _lanControlCts = null;
+        var cid = _lanControlCid;
+        _lanControlCid = null;
+        var dev = SelectedLanDevice;
+        IsRemoteControlling = false;
+        LanControlPending = false;
+        Dispatch(() => LanScreenBytes = null);
+        if (cid is not null && dev is not null && _lan is not null)
+            _ = _lan.StopControlAsync(dev, cid);
+        LanStatus = "已停止远控";
+    }
+
+    /// <summary>连接断开时本地收尾，不再向已离线设备发请求。</summary>
+    private void AbortLanControl()
+    {
+        _lanControlCts?.Cancel();
+        _lanControlCts = null;
+        _lanControlCid = null;
+        LanControlPending = false;
         IsRemoteControlling = false;
         Dispatch(() => LanScreenBytes = null);
-        LanStatus = "已停止远控";
     }
 
     private async Task LanTapAsync(object? p)
