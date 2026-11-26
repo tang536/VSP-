@@ -68,8 +68,9 @@ def emit(obj):
     sys.stdout.flush()
 
 
-def cmd_parse(url):
+def cmd_parse(url, ttl=600):
     try:
+        vsp.set_parse_ttl(ttl)
         data = vsp.parse(url)
     except Exception as e:
         sys.stderr.write(str(e) + "\n")
@@ -81,12 +82,16 @@ def cmd_parse(url):
     return 0
 
 
-def cmd_download(page_url, format_id, title, out_dir):
+def cmd_download(page_url, format_id, title, out_dir, limit_kbps=0,
+                 name_template="", media_id="", uploader="", source=""):
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
         vsp.set_private_dir(out_dir)
+    vsp.set_speed_limit(limit_kbps)
     install_patient_watchdog()
-    tid = vsp.start_download(page_url, format_id, title or "download")
+    tid = vsp.start_download(page_url, format_id, title or "download",
+                             media_id=media_id, uploader=uploader, source=source,
+                             name_template=name_template)
     last_state = None
     last_bytes = 0
     last_bytes_at = time.time()
@@ -113,6 +118,7 @@ def cmd_download(page_url, format_id, title, out_dir):
             if state != last_state:
                 last_state = state
                 emit({
+                    "taskId": str(tid),
                     "status": me.get("status") or "running",
                     "progress": float(me.get("progress") or 0),
                     "speed": speed,
@@ -135,19 +141,86 @@ def cmd_download(page_url, format_id, title, out_dir):
         time.sleep(0.25)
 
 
+def cmd_control(action, out_dir, value=None):
+    """暂停/继续/取消/限速：写控制文件，由正在下载的子进程轮询生效。"""
+    target_dir = out_dir or vsp.get_download_dir()
+    os.makedirs(target_dir, exist_ok=True)
+    path = os.path.join(target_dir, "vsp_control.json")
+    data = {}
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+    if action == "speed":
+        try:
+            data["__speed__"] = max(0, int(value or 0))
+        except Exception:
+            data["__speed__"] = 0
+    else:
+        data[str(value)] = action
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, path)
+    emit({"status": "ok", "action": action, "value": value})
+    return 0
+
+
+def cmd_rules(action, out_dir=None, value=None):
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+        vsp.set_private_dir(out_dir)
+    if action == "rules":
+        emit({"status": "ok", "rules": vsp.describe_rules()})
+        return 0
+    if action == "ttl":
+        vsp.set_parse_ttl(value or 600)
+        emit({"status": "ok", "ttl": vsp._parse_ttl[0]})
+        return 0
+    if action == "clearcache":
+        vsp.clear_parse_cache()
+        emit({"status": "ok", "action": "clearcache"})
+        return 0
+    return 64
+
+
 def main(argv):
     if len(argv) < 2:
-        sys.stderr.write("usage: vsp_cli.py parse <url> | download <pageUrl> <formatId> <title> <outDir>\n")
+        sys.stderr.write("usage: vsp_cli.py parse <url> | download <pageUrl> <formatId> <title> <outDir> "
+                         "[limitKBps] [nameTemplate] [id] [uploader] [source] | "
+                         "pause|resume|cancel <engineTaskId> <outDir> | speed <kbps> <outDir> | "
+                         "rules [outDir] | ttl <seconds> [outDir] | clearcache [outDir]\n")
         return 64
     cmd = argv[1]
     if cmd == "parse":
         if len(argv) < 3:
             return 64
-        return cmd_parse(argv[2])
+        ttl = int(argv[3]) if len(argv) > 3 else 600
+        return cmd_parse(argv[2], ttl)
     if cmd == "download":
         if len(argv) < 6:
             return 64
-        return cmd_download(argv[2], argv[3], argv[4], argv[5])
+        extra = argv[6:] + [""] * (5 - min(5, len(argv[6:])))
+        return cmd_download(argv[2], argv[3], argv[4], argv[5],
+                            extra[0], extra[1], extra[2], extra[3], extra[4])
+    if cmd in ("pause", "resume", "cancel"):
+        if len(argv) < 5:
+            return 64
+        return cmd_control(cmd, argv[4], argv[3])
+    if cmd == "speed":
+        if len(argv) < 4:
+            return 64
+        return cmd_control("speed", argv[3], argv[2])
+    if cmd == "rules":
+        return cmd_rules("rules", argv[3] if len(argv) > 3 else None)
+    if cmd == "ttl":
+        if len(argv) < 3:
+            return 64
+        return cmd_rules("ttl", argv[3] if len(argv) > 3 else None, int(argv[2]))
+    if cmd == "clearcache":
+        return cmd_rules("clearcache", argv[3] if len(argv) > 3 else None)
     sys.stderr.write("unknown command: %s\n" % cmd)
     return 64
 

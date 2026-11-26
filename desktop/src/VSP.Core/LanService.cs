@@ -6,6 +6,7 @@ using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -79,6 +80,9 @@ public sealed class LanService : IDisposable
     private readonly HashSet<string> _localIps = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, LanPairRequest> _pairRequests = new();
     private readonly ConcurrentDictionary<string, bool> _pairAnswers = new();
+    // 配对后为每台设备生成会话密钥，后续请求用 HMAC-SHA256 签名，不再只靠明文静态令牌。
+    private readonly ConcurrentDictionary<string, string> _sessionKeys = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, long> _seenNonces = new(StringComparer.OrdinalIgnoreCase);
     private readonly HttpClient _client = new() { Timeout = TimeSpan.FromSeconds(8) };
     private readonly object _connLock = new();
     private string? _connectedPeerId;
@@ -87,6 +91,58 @@ public sealed class LanService : IDisposable
     private TcpListener? _tcp;
     private CancellationTokenSource? _cts;
     private string DeviceId => _deviceId;
+
+    private static string CanonicalQuery(IEnumerable<KeyValuePair<string, string>> qs) =>
+        string.Join("&", qs
+            .Where(x => !string.Equals(x.Key, "k", StringComparison.OrdinalIgnoreCase)
+                     && !string.Equals(x.Key, "s", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(x => x.Key, StringComparer.Ordinal)
+            .Select(x => $"{x.Key}={x.Value}"));
+
+    private string Sign(string peerId, string method, string path, string canonical, byte[] body,
+                        string? keyOverride = null)
+    {
+        // 配对阶段双方还没有会话密钥，必须用静态令牌签名，否则握手会死锁。
+        var key = keyOverride ?? (_sessionKeys.TryGetValue(peerId, out var k) ? k : Token);
+        // 必须与 Java 端 sha256Hex() 同为小写，否则 HMAC 签名跨平台永远不匹配。
+        var bodyHash = Convert.ToHexString(SHA256.HashData(body)).ToLowerInvariant();
+        var data = $"{method}\n{path}\n{canonical}\n{bodyHash}";
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(key));
+        return Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(data))).ToLowerInvariant();
+    }
+
+    private bool Verify(IReadOnlyDictionary<string, string> qs, string method, string path, byte[] body)
+    {
+        if (!qs.TryGetValue("v", out var v) || v != "2") return true; // 兼容旧版客户端
+        if (!qs.TryGetValue("s", out var sig) || string.IsNullOrEmpty(sig)) return false;
+        if (!qs.TryGetValue("n", out var nonce) || string.IsNullOrEmpty(nonce)) return false;
+
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        foreach (var (key, seen) in _seenNonces)
+            if (now - seen > 5 * 60 * 1000) _seenNonces.TryRemove(key, out _);
+        if (!_seenNonces.TryAdd(nonce, now)) return false;
+
+        var peer = qs.GetValueOrDefault("id") ?? "";
+        var pairing = path is "/pair" or "/pair-result" or "/unpair";
+        var expected = Sign(peer, method, path, CanonicalQuery(qs), body,
+            pairing ? Token : null);
+        return CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes(sig.ToLowerInvariant()));
+    }
+
+    private string SignedUrl(LanDevice dev, string path, Dictionary<string, string>? query = null,
+                             string method = "GET", byte[]? body = null)
+    {
+        query ??= [];
+        query["id"] = DeviceId;
+        query["n"] = Guid.NewGuid().ToString("N");
+        query["v"] = "2";
+        var pairing = path is "/pair" or "/pair-result" or "/unpair";
+        query["s"] = Sign(dev.Id, method, path, CanonicalQuery(query), body ?? [],
+            pairing ? Token : null);
+        var text = string.Join("&", query.Select(x => $"{x.Key}={Uri.EscapeDataString(x.Value)}"));
+        return $"http://{dev.Ip}:{dev.Port}{path}?k={Token}&{text}";
+    }
 
     public string LocalIp { get; private set; } = "127.0.0.1";
     public string ShareRoot => _shareRoot;
@@ -296,12 +352,17 @@ public sealed class LanService : IDisposable
 
             const long maxBody = 64L * 1024L * 1024L;
             long contentLen = 0;
+            var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             string? line;
             while (!string.IsNullOrEmpty(line = await ReadLineAsync(stream)))
             {
-                if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase)
-                    && long.TryParse(line[(line.IndexOf(':') + 1)..].Trim(), out var cl))
-                    contentLen = cl;
+                var colon = line.IndexOf(':');
+                if (colon <= 0) continue;
+                var key = line[..colon].Trim();
+                var val = line[(colon + 1)..].Trim();
+                headers[key] = val;
+                if (key.Equals("Content-Length", StringComparison.OrdinalIgnoreCase)
+                    && long.TryParse(val, out var cl)) contentLen = cl;
             }
             if (contentLen < 0 || contentLen > maxBody)
             {
@@ -321,12 +382,19 @@ public sealed class LanService : IDisposable
                 }
             }
 
+            if (!Verify(qs, parts[0], path, body))
+            {
+                Respond(stream, 403, "bad signature");
+                return;
+            }
+
             switch (path)
             {
                 case "/hello": Respond(stream, 200, $"{_deviceName}|pc"); break;
                 case "/files": await RespondJsonAsync(stream, ListFiles(qs.GetValueOrDefault("dir"))); break;
-                case "/dl": await ServeDownloadAsync(stream, qs.GetValueOrDefault("path")); break;
-                case "/ul": await ReceiveUploadAsync(stream, qs.GetValueOrDefault("name"), body); break;
+                case "/dl": await ServeDownloadAsync(stream, qs.GetValueOrDefault("path"), headers.GetValueOrDefault("Range")); break;
+                case "/ul": await ReceiveUploadAsync(stream, qs.GetValueOrDefault("name"), body,
+                               long.TryParse(qs.GetValueOrDefault("off"), out var off) ? off : 0); break;
                 case "/screen": await ServeScreenAsync(stream); break;
                 case "/input": await ReceiveInputAsync(stream, body); break;
                 case "/pair":
@@ -335,7 +403,7 @@ public sealed class LanService : IDisposable
                         var req = new LanPairRequest
                         {
                             Id = qs.GetValueOrDefault("id") ?? "",
-                            Name = qs.GetValueOrDefault("n") ?? "设备",
+                            Name = qs.GetValueOrDefault("dn") ?? "设备",
                             Kind = qs.GetValueOrDefault("t") ?? "android",
                             Ip = qs.GetValueOrDefault("ip") ?? "",
                             Port = int.TryParse(qs.GetValueOrDefault("p"), out var pp) ? pp : HttpPort,
@@ -363,6 +431,9 @@ public sealed class LanService : IDisposable
                         var rid = qs.GetValueOrDefault("id") ?? "";
                         var answer = IsConnectedTo(rid) ? "ok"
                             : _pairAnswers.TryGetValue(rid, out var a) ? (a ? "ok" : "no") : "wait";
+                        // 同意配对时把本次会话密钥交给发起方，之后的请求用 HMAC 签名。
+                        if (answer == "ok" && _sessionKeys.TryGetValue(rid, out var sessionKey))
+                            answer += ":" + sessionKey;
                         Respond(stream, 200, answer);
                         if (answer != "wait" && !IsConnectedTo(rid))
                         { _pairAnswers.TryRemove(rid, out _); _pairRequests.TryRemove(rid, out _); }
@@ -439,7 +510,7 @@ public sealed class LanService : IDisposable
         return result.OrderBy(x => !x.IsDir).ThenBy(x => x.Name).ToList();
     }
 
-    private async Task ServeDownloadAsync(NetworkStream stream, string? pathB64)
+    private async Task ServeDownloadAsync(NetworkStream stream, string? pathB64, string? range)
     {
         try
         {
@@ -447,7 +518,24 @@ public sealed class LanService : IDisposable
             var full = Path.GetFullPath(Path.Combine(_shareRoot, rel));
             if (!IsUnderRoot(full) || !File.Exists(full)) { Respond(stream, 404, "missing"); return; }
             using var file = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, useAsync: true);
-            await WriteResponseHeadAsync(stream, 200, "application/octet-stream", file.Length);
+
+            var start = 0L;
+            if (!string.IsNullOrEmpty(range) && range.StartsWith("bytes=", StringComparison.OrdinalIgnoreCase))
+            {
+                var part = range[6..].Split('-')[0];
+                if (long.TryParse(part, out var parsed) && parsed >= 0 && parsed < file.Length) start = parsed;
+            }
+            if (start > 0) file.Position = start;
+            var length = file.Length - start;
+
+            var code = start > 0 ? 206 : 200;
+            var reason = code == 200 ? "OK" : "Partial Content";
+            var head = new StringBuilder($"HTTP/1.1 {code} {reason}\r\nContent-Type: application/octet-stream\r\n");
+            head.Append($"Content-Length: {length}\r\n");
+            if (start > 0) head.Append($"Content-Range: bytes {start}-{file.Length - 1}/{file.Length}\r\n");
+            head.Append("Accept-Ranges: bytes\r\nConnection: close\r\n\r\n");
+            await stream.WriteAsync(Encoding.ASCII.GetBytes(head.ToString()).AsMemory());
+            await stream.FlushAsync();
             await file.CopyToAsync(stream);
         }
         catch { }
@@ -466,7 +554,7 @@ public sealed class LanService : IDisposable
         catch { }
     }
 
-    private async Task ReceiveUploadAsync(NetworkStream stream, string? nameB64, byte[] body)
+    private async Task ReceiveUploadAsync(NetworkStream stream, string? nameB64, byte[] body, long offset)
     {
         var name = DecodePath(nameB64);
         if (string.IsNullOrWhiteSpace(name)) { Respond(stream, 400, "no name"); return; }
@@ -474,7 +562,9 @@ public sealed class LanService : IDisposable
         try
         {
             var full = Path.Combine(_shareRoot, name);
-            await File.WriteAllBytesAsync(full, body);
+            var mode = offset > 0 && File.Exists(full) ? FileMode.Append : FileMode.Create;
+            await using var fs = new FileStream(full, mode, FileAccess.Write, FileShare.None, 81920, true);
+            await fs.WriteAsync(body.AsMemory());
             Respond(stream, 200, "ok");
         }
         catch (Exception ex) { Respond(stream, 500, ex.Message); }
@@ -559,11 +649,7 @@ public sealed class LanService : IDisposable
 
     public async Task<string?> HelloAsync(LanDevice dev)
     {
-        try
-        {
-            var r = await _client.GetStringAsync($"http://{dev.Ip}:{dev.Port}/hello?k={Token}");
-            return r;
-        }
+        try { return await _client.GetStringAsync(SignedUrl(dev, "/hello")); }
         catch { return null; }
     }
 
@@ -571,8 +657,8 @@ public sealed class LanService : IDisposable
     {
         try
         {
-            var json = await _client.GetStringAsync(
-                $"http://{dev.Ip}:{dev.Port}/files?k={Token}&dir={Uri.EscapeDataString(dirB64 ?? "")}");
+            var json = await _client.GetStringAsync(SignedUrl(dev, "/files",
+                new() { ["dir"] = dirB64 ?? "" }));
             return JsonSerializer.Deserialize<List<LanFileEntry>>(json) ?? [];
         }
         catch { return []; }
@@ -583,15 +669,19 @@ public sealed class LanService : IDisposable
     {
         try
         {
-            using var resp = await _client.GetAsync(
-                $"http://{dev.Ip}:{dev.Port}/dl?k={Token}&path={Uri.EscapeDataString(entry.Path)}",
-                HttpCompletionOption.ResponseHeadersRead);
+            var url = SignedUrl(dev, "/dl", new() { ["path"] = entry.Path });
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            var have = File.Exists(localPath) ? new FileInfo(localPath).Length : 0;
+            if (have > 0) req.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(have, null);
+            using var resp = await _client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead);
             resp.EnsureSuccessStatusCode();
-            var total = resp.Content.Headers.ContentLength ?? 0;
+            var append = have > 0 && resp.StatusCode == HttpStatusCode.PartialContent;
+            var total = (resp.Content.Headers.ContentLength ?? 0) + (append ? have : 0);
             await using var src = await resp.Content.ReadAsStreamAsync();
-            await using var dst = File.Create(localPath);
+            await using var dst = new FileStream(localPath, append ? FileMode.Append : FileMode.Create,
+                FileAccess.Write, FileShare.None, 81920, true);
             var buf = new byte[81920];
-            long read = 0;
+            long read = append ? have : 0;
             int n;
             while ((n = await src.ReadAsync(buf)) > 0)
             {
@@ -604,23 +694,36 @@ public sealed class LanService : IDisposable
         catch { return false; }
     }
 
-    public async Task<bool> UploadAsync(LanDevice dev, string localPath)
+    public async Task<bool> UploadAsync(LanDevice dev, string localPath,
+        IProgress<double>? progress = null)
     {
         try
         {
-            var name = Path.GetFileName(localPath);
+            var name = EncodePath(Path.GetFileName(localPath));
+            const int chunk = 4 * 1024 * 1024;
             await using var fs = File.OpenRead(localPath);
-            using var content = new StreamContent(fs);
-            var url = $"http://{dev.Ip}:{dev.Port}/ul?k={Token}&name={Uri.EscapeDataString(EncodePath(name))}";
-            var resp = await _client.PostAsync(url, content);
-            return resp.IsSuccessStatusCode;
+            var buf = new byte[chunk];
+            long off = 0;
+            int n;
+            while ((n = await fs.ReadAsync(buf)) > 0)
+            {
+                var piece = buf.AsMemory(0, n).ToArray();
+                var url = SignedUrl(dev, "/ul",
+                    new() { ["name"] = name, ["off"] = off.ToString() }, "POST", piece);
+                using var content = new ByteArrayContent(piece);
+                var resp = await _client.PostAsync(url, content);
+                resp.EnsureSuccessStatusCode();
+                off += n;
+                progress?.Report(fs.Length > 0 ? (double)off / fs.Length : 1);
+            }
+            return true;
         }
         catch { return false; }
     }
 
     public async Task<byte[]?> GetScreenAsync(LanDevice dev)
     {
-        try { return await _client.GetByteArrayAsync($"http://{dev.Ip}:{dev.Port}/screen?k={Token}"); }
+        try { return await _client.GetByteArrayAsync(SignedUrl(dev, "/screen")); }
         catch { return null; }
     }
 
@@ -628,33 +731,17 @@ public sealed class LanService : IDisposable
     {
         try
         {
-            var json = JsonSerializer.Serialize(payload);
-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            var resp = await _client.PostAsync($"http://{dev.Ip}:{dev.Port}/input?k={Token}", content);
+            var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload));
+            var url = SignedUrl(dev, "/input", method: "POST", body: body);
+            using var content = new ByteArrayContent(body);
+            content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+            var resp = await _client.PostAsync(url, content);
             return resp.IsSuccessStatusCode;
         }
         catch { return false; }
     }
 
-    // ---------------- 连接握手 + 手动直连 ----------------
-
-    /// <summary>手动按 IP 添加设备（广播发现不可用时兜底；会校验 hello）。</summary>
-    public async Task<(bool ok, string msg)> AddManualDeviceAsync(string ipText)
-    {
-        var ip = ipText.Trim();
-        if (string.IsNullOrEmpty(ip) || !IsPrivateOrLoopback(ip))
-            return (false, "请输入有效的局域网 IP（192.168.* / 10.* / 172.16~31.*）");
-        var dev = new LanDevice { Id = "manual-" + ip, Name = ip, Kind = "pc", Ip = ip, Port = HttpPort, LastSeen = DateTime.Now };
-        var hello = await HelloAsync(dev);
-        if (hello is null) return (false, "连接失败：请确认对方已打开本功能，且未开启 AP 隔离/防火墙拦截");
-        var parts = hello.Split('|');
-        if (parts.Length > 1) dev.Kind = parts[1];
-        if (parts.Length > 0 && !string.IsNullOrWhiteSpace(parts[0])) dev.Name = parts[0];
-        dev.Id = "manual-" + ip; // 保持固定，避免被超时剔除后又与发现的设备冲突
-        _devices[dev.Id] = dev;
-        DevicesChanged?.Invoke();
-        return (true, $"已添加：{dev.Name}（{ip}）");
-    }
+    // ---------------- 连接握手 ----------------
 
     /// <summary>向对方发起连接申请，携带本机信息；对方 UI 会弹窗确认。</summary>
     public async Task<bool> RequestPairAsync(LanDevice dev)
@@ -662,22 +749,35 @@ public sealed class LanService : IDisposable
         try
         {
             var myIp = GetLocalPrivateIps().FirstOrDefault() ?? LocalIp;
-            var url = $"http://{dev.Ip}:{dev.Port}/pair?k={Token}&id={Uri.EscapeDataString(DeviceId)}"
-                      + $"&n={Uri.EscapeDataString(_deviceName)}&t=pc&p={HttpPort}&ip={Uri.EscapeDataString(myIp)}";
-            var r = await _client.GetStringAsync(url);
-            return r.Trim() == "ok";
+            var url = SignedUrl(dev, "/pair", new()
+            {
+                ["dn"] = _deviceName, ["t"] = "pc",
+                ["p"] = HttpPort.ToString(), ["ip"] = myIp,
+            });
+            var r = (await _client.GetStringAsync(url)).Trim();
+            if (r.StartsWith("ok:", StringComparison.Ordinal)) _sessionKeys[dev.Id] = r[3..].Trim();
+            return r == "ok" || r.StartsWith("ok:", StringComparison.Ordinal);
         }
         catch { return false; }
     }
 
-    /// <summary>轮询对方是否已同意我的申请：wait / ok / no。拿到 ok 即双方建立连接。</summary>
+    private void ApplyPairAnswer(LanDevice dev, string answer)
+    {
+        if (answer.StartsWith("ok:", StringComparison.Ordinal))
+            _sessionKeys[dev.Id] = answer[3..].Trim();
+        if ((answer == "ok" || answer.StartsWith("ok:", StringComparison.Ordinal)) && !IsConnectedTo(dev.Id))
+            SetConnected(dev);
+    }
+
+    /// <summary>轮询对方是否已同意我的申请：wait / ok[:sessionKey] / no。</summary>
     public async Task<string> PollPairAsync(LanDevice dev)
     {
         try
         {
-            var r = (await _client.GetStringAsync($"http://{dev.Ip}:{dev.Port}/pair-result?k={Token}&id={Uri.EscapeDataString(DeviceId)}")).Trim();
-            if (r == "ok" && !IsConnectedTo(dev.Id)) SetConnected(dev);
-            return r;
+            var url = SignedUrl(dev, "/pair-result");
+            var r = (await _client.GetStringAsync(url)).Trim();
+            ApplyPairAnswer(dev, r);
+            return r.StartsWith("ok:", StringComparison.Ordinal) ? "ok" : r;
         }
         catch { return "wait"; }
     }
@@ -690,6 +790,7 @@ public sealed class LanService : IDisposable
         _pairAnswers[reqId] = accept;
         if (accept)
         {
+            _sessionKeys[reqId] = Guid.NewGuid().ToString("N");
             var dev = new LanDevice
             {
                 Id = req.Id, Name = req.Name, Kind = req.Kind,

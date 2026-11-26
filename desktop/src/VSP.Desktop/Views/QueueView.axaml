@@ -79,11 +79,23 @@
 
                                     <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Right"
                                                 IsVisible="{Binding IsRunning}">
+                                        <Button Classes="ghost small" Command="{Binding PauseCommand}">
+                                            <TextBlock Text="暂停" FontSize="12" VerticalAlignment="Center" />
+                                        </Button>
                                         <Button Classes="ghost small" Command="{Binding CancelCommand}">
                                             <StackPanel Orientation="Horizontal" Spacing="4">
                                                 <PathIcon Data="{StaticResource IconClose}" Width="12" Height="12" />
                                                 <TextBlock Text="取消" FontSize="12" VerticalAlignment="Center" />
                                             </StackPanel>
+                                        </Button>
+                                    </StackPanel>
+                                    <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Right"
+                                                IsVisible="{Binding IsPaused}">
+                                        <Button Classes="ghost small" Command="{Binding ResumeCommand}">
+                                            <TextBlock Text="继续" FontSize="12" VerticalAlignment="Center" />
+                                        </Button>
+                                        <Button Classes="ghost small" Command="{Binding CancelCommand}">
+                                            <TextBlock Text="取消" FontSize="12" VerticalAlignment="Center" />
                                         </Button>
                                     </StackPanel>
                                     <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Right"

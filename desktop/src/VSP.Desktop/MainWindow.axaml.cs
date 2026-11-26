@@ -2,6 +2,8 @@ using System.ComponentModel;
 using Avalonia;
 using Avalonia.Animation;
 using Avalonia.Controls;
+using Avalonia.Input;
+using Avalonia.Platform.Storage;
 using Avalonia.Media.Transformation;
 using Avalonia.Platform;
 using Avalonia.Threading;
@@ -32,6 +34,38 @@ public partial class MainWindow : Window
             PlayEntrance();
         };
         DataContextChanged += (_, _) => BindViewModel();
+        AddHandler(DragDrop.DragOverEvent, OnDragOver);
+        AddHandler(DragDrop.DropEvent, OnDrop);
+    }
+
+    private static void OnDragOver(object? sender, DragEventArgs e)
+    {
+        var hasFiles = e.DataTransfer.TryGetFiles()?.Length > 0;
+        var hasText = !string.IsNullOrEmpty(e.DataTransfer.TryGetText());
+        e.DragEffects = hasFiles || hasText ? DragDropEffects.Copy : DragDropEffects.None;
+    }
+
+    private void OnDrop(object? sender, DragEventArgs e)
+    {
+        if (_vm is null) return;
+        var paths = e.DataTransfer.TryGetFiles()?
+            .OfType<IStorageFile>()
+            .Select(f => f.TryGetLocalPath())
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .ToArray();
+        if (paths is { Length: > 0 })
+        {
+            _vm.HandleCommandLine(paths!);
+            e.Handled = true;
+            return;
+        }
+
+        var text = e.DataTransfer.TryGetText();
+        if (!string.IsNullOrWhiteSpace(text))
+        {
+            _vm.HandleCommandLine([text]);
+            e.Handled = true;
+        }
     }
 
     private void BindViewModel()

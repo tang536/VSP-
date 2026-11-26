@@ -12,6 +12,9 @@ internal static class Program
     // 第二个进程只负责把已有窗口叫到前台，然后立刻退出。
     private const string MutexName = @"Local\VSP.Desktop.SingleInstance";
     private const string ShowEventName = @"Local\VSP.Desktop.ShowWindow";
+    // 单实例命令行转交文件：第二个进程把 URL / 文件路径写进去，主实例激活时读取。
+    private static readonly string HandoffPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VSP解析", "incoming.txt");
 
     private static Mutex? _instanceMutex;
     private static EventWaitHandle? _showEvent;
@@ -26,6 +29,7 @@ internal static class Program
             _instanceMutex = new Mutex(initiallyOwned: true, MutexName, out var createdNew);
             if (!createdNew)
             {
+                WriteHandoff(args);
                 SignalExistingInstance();
                 return;
             }
@@ -41,6 +45,30 @@ internal static class Program
 
         BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
         GC.KeepAlive(_instanceMutex);
+    }
+
+    private static void WriteHandoff(string[] args)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(HandoffPath)!);
+            // --shot / --verbose 这类开关不转交，只转 URL 和本地文件路径。
+            File.WriteAllLines(HandoffPath, args.Where(a => !a.StartsWith("--")).ToArray());
+        }
+        catch { /* 转交失败最多是这次拖拽/右键没生效，不影响主程序 */ }
+    }
+
+    /// <summary>主实例读取并清空转交参数，避免下次激活重复处理。</summary>
+    public static string[] ConsumeHandoff()
+    {
+        try
+        {
+            if (!File.Exists(HandoffPath)) return [];
+            var lines = File.ReadAllLines(HandoffPath);
+            File.Delete(HandoffPath);
+            return lines;
+        }
+        catch { return []; }
     }
 
     /// <summary>第二个进程：通知正在运行的实例显示窗口。</summary>
@@ -98,6 +126,10 @@ internal static class Program
         }
 
         BringToFront(window);
+
+        var incoming = ConsumeHandoff();
+        if (incoming.Length > 0 && window.DataContext is MainViewModel vm)
+            vm.HandleCommandLine(incoming);
     }
 
     private static void OnMainWindowOpened(object? sender, EventArgs e)
@@ -105,6 +137,10 @@ internal static class Program
         if (sender is not Window window) return;
         window.Opened -= OnMainWindowOpened;
         BringToFront(window);
+
+        var incoming = ConsumeHandoff();
+        if (incoming.Length > 0 && window.DataContext is MainViewModel vm)
+            vm.HandleCommandLine(incoming);
     }
 
     private static void BringToFront(Window window)

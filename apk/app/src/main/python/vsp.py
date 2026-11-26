@@ -112,6 +112,27 @@ def _play_headers(url):
     return headers
 
 
+# 下载限速（KB/s），0 表示不限。yt-dlp 与自实现 HTTP/HLS 下载都会用到。
+_speed_limit_kbps = [0]
+
+
+def set_speed_limit(kbps):
+    try:
+        _speed_limit_kbps[0] = max(0, int(kbps or 0))
+    except Exception:
+        _speed_limit_kbps[0] = 0
+
+
+def _pace(tid, nbytes):
+    """按全局限速Sleep一小会儿，避免自实现下载器绕过 yt-dlp 的 ratelimit。"""
+    limit = _speed_limit_kbps[0]
+    if not limit:
+        return
+    need = nbytes / max(1, limit * 1024.0)
+    if need > 0:
+        time.sleep(need)
+
+
 def _ydl_opts(url, **over):
     """统一的 yt-dlp 选项：桌面 UA + 站点 Referer + 不写缓存目录。"""
     opts = {
@@ -122,6 +143,8 @@ def _ydl_opts(url, **over):
         'cachedir': False,
         'http_headers': _play_headers(url),
     }
+    if _speed_limit_kbps[0] > 0:
+        opts['ratelimit'] = _speed_limit_kbps[0] * 1024
     opts.update(over)
     return opts
 
@@ -217,6 +240,30 @@ def pick_media(paths):
 def _safe_name(title, ext):
     name = re.sub(r'[\\/:*?"<>|\r\n\t]', '_', title or '').strip()[:80]
     return (name or 'cover') + ext
+
+
+def _target_name(task, fpath):
+    """按命名模板生成最终文件名；模板支持 {title}/{id}/{uploader}/{quality}/{source}/{date}/{ext}。"""
+    ext = os.path.splitext(fpath)[1] or ".mp4"
+    template = task.get("nameTemplate") or ""
+    if not template:
+        return os.path.basename(fpath)
+    fields = {
+        "title": task.get("title") or "",
+        "id": task.get("id") or "",
+        "uploader": task.get("uploader") or "",
+        "quality": task.get("formatId") or "",
+        "source": task.get("source") or "",
+        "date": time.strftime("%Y%m%d"),
+        "ext": ext.lstrip("."),
+    }
+    try:
+        name = template.format(**fields)
+    except Exception:
+        name = template
+    if ext and not name.lower().endswith(ext.lower()):
+        name += ext
+    return _safe_name(name, "")
 
 
 def human_size(n):
@@ -688,28 +735,99 @@ def _bilibili_parse(url):
     }
 
 
+# ---------------------------------------------------------------- 站点规则注册表
+# 内置规则与用户规则共用一条链：站点专用 -> 用户规则 -> yt-dlp -> HTML 兜底。
+_SITE_RULES = []
+_parse_cache = {}
+_parse_ttl = [600]          # 解析结果 TTL（秒），直链过期时播放器另有自动重解析
+
+
+def register_site(name, hosts, parser):
+    _SITE_RULES.append({"name": name, "hosts": tuple(hosts), "parser": parser})
+
+
+register_site("bilibili", ("bilibili.com", "b23.tv"),
+              lambda u: json.dumps(_bilibili_parse(u), ensure_ascii=False))
+register_site("douyin", ("douyin.com", "iesdouyin.com"),
+              lambda u: json.dumps(_douyin_parse(u), ensure_ascii=False))
+
+
+def set_parse_ttl(seconds):
+    try:
+        _parse_ttl[0] = max(0, int(seconds or 0))
+    except Exception:
+        _parse_ttl[0] = 600
+
+
+def clear_parse_cache():
+    _parse_cache.clear()
+
+
+def _rules_file():
+    base = _private_dir or get_download_dir()
+    return os.path.join(base, "vsp_rules.json") if base else None
+
+
+def _load_user_rules():
+    """用户规则：放在下载目录的 vsp_rules.json，可补充 host / Referer / 直链规则。"""
+    path = _rules_file()
+    if not path or not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def describe_rules():
+    rules = [{"name": r["name"], "hosts": list(r["hosts"]), "builtin": True} for r in _SITE_RULES]
+    for r in _load_user_rules():
+        rules.append({"name": r.get("name") or "custom", "hosts": list(r.get("hosts") or []),
+                      "builtin": False, "kind": r.get("kind") or "referer"})
+    return rules
+
+
 def parse(url):
-    """解析入口：B 站 / 抖音专用 -> yt-dlp -> HTML 通用兜底。"""
+    """解析入口：注册表顺序 -> yt-dlp -> HTML 通用兜底，并带 TTL 缓存。"""
     url = (url or "").strip()
     if not url.lower().startswith(("http://", "https://")):
         raise Exception("请输入完整的 http(s) 链接")
 
-    # B 站先走合流接口：yt-dlp 的 DASH 流是画面和音轨分离的，播出来没有声音
-    bili_error = ""
-    if _host_is(url, "bilibili.com", "b23.tv"):
-        try:
-            return json.dumps(_bilibili_parse(url), ensure_ascii=False)
-        except Exception as e:
-            bili_error = str(e)
+    cached = _parse_cache.get(url)
+    if cached and time.time() - cached[0] < _parse_ttl[0]:
+        return cached[1]
 
-    if _host_is(url, "douyin.com", "iesdouyin.com"):
-        try:
-            return json.dumps(_douyin_parse(url), ensure_ascii=False)
-        except Exception as e:
-            # 抖音专用通道失败后仍尝试 yt-dlp，最后的错误信息取更具体的那个
-            dy_error = str(e)
-    else:
-        dy_error = ""
+    def finish(text):
+        if _parse_ttl[0] > 0:
+            _parse_cache[url] = (time.time(), text)
+        return text
+
+    errors = {}
+    for rule in _SITE_RULES:
+        if _host_is(url, *rule["hosts"]):
+            try:
+                return finish(rule["parser"](url))
+            except Exception as e:
+                errors[rule["name"]] = str(e)
+
+    for rule in _load_user_rules():
+        hosts = [h for h in (rule.get("hosts") or []) if h]
+        if not hosts or not _host_is(url, *hosts):
+            continue
+        ref = rule.get("referer")
+        if ref:
+            for h in hosts:
+                _SITE_REFERERS[h] = ref
+        if rule.get("kind") == "direct":
+            title = url.rstrip("/").split("/")[-1].split("?")[0] or "页面直链"
+            data = {
+                "title": title, "videos": [_direct_format(url, 0)],
+                "audios": [], "images": [], "source": rule.get("name") or "custom",
+                "webpageUrl": url,
+            }
+            return finish(json.dumps(data, ensure_ascii=False))
 
     real = _resolve_short(url)
     try:
@@ -723,18 +841,18 @@ def parse(url):
                 _remember_formats(real, info)
                 data = normalize(info)
                 if data["videos"] or data["audios"] or data["images"]:
-                    return json.dumps(data, ensure_ascii=False)
-    except Exception:
-        pass
+                    return finish(json.dumps(data, ensure_ascii=False))
+    except Exception as e:
+        errors["ytdlp"] = str(e)
 
     data = _generic_parse(real)
     if not data["videos"] and not data["images"]:
-        if bili_error:
-            raise Exception("B 站解析失败：" + bili_error)
-        if dy_error:
-            raise Exception(dy_error)
+        if "bilibili" in errors:
+            raise Exception("B 站解析失败：" + errors["bilibili"])
+        if "douyin" in errors:
+            raise Exception(errors["douyin"])
         raise Exception("该页面找不到可下载的音视频直链（可能需要登录或由脚本动态加载）")
-    return json.dumps(data, ensure_ascii=False)
+    return finish(json.dumps(data, ensure_ascii=False))
 
 
 def normalize(info):
@@ -822,7 +940,8 @@ def _download_thumb(url, title, tmpdir):
 # 下载进度节流写入（最多 2 秒一次），关键节点立即写入。
 TASKS_FILE_NAME = "vsp_tasks.json"
 _PERSIST_KEYS = ("taskId", "title", "status", "progress", "speed", "filename",
-                 "error", "thumb", "total", "downloaded", "url", "formatId", "needsMerge")
+                 "error", "thumb", "total", "downloaded", "url", "formatId", "needsMerge",
+                 "id", "uploader", "source", "nameTemplate")
 _last_save = [0.0]
 
 tasks = {}
@@ -950,10 +1069,45 @@ def _wake(tid):
             cond.notify_all()
 
 
+def _control_file():
+    base = _private_dir or get_download_dir()
+    return os.path.join(base, "vsp_control.json") if base else None
+
+
+def _apply_control_file(tid):
+    """跨进程控制：桌面端/手机端的暂停、继续、取消命令写在下载目录的控制文件里。"""
+    path = _control_file()
+    if not path or not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("__speed__") is not None:
+            set_speed_limit(data["__speed__"])
+        key = str(tid)
+        cmd = data.get(key)
+        if cmd:
+            if cmd == "pause":
+                pause_flags[tid] = True
+            elif cmd == "resume":
+                pause_flags[tid] = False
+                _wake(tid)
+            elif cmd == "cancel":
+                cancel_flags[tid] = True
+            data.pop(key, None)
+            with open(path + ".tmp", "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(path + ".tmp", path)
+    except Exception:
+        pass
+
+
 def _wait_if_paused(tid):
+    _apply_control_file(tid)
     cond = pause_conds.get(tid)
     if cond is not None:
         while pause_flags.get(tid) and not cancel_flags.get(tid):
+            _apply_control_file(tid)
             with cond:
                 cond.wait(0.5)
     if cancel_flags.get(tid):
@@ -963,6 +1117,7 @@ def _wait_if_paused(tid):
 
 
 def _check_abort(tid):
+    _apply_control_file(tid)
     if cancel_flags.get(tid):
         raise Exception("已取消")
     if abort_flags.get(tid):
@@ -1022,7 +1177,8 @@ def _merge_av(video_path, audio_path, out_path):
         return False
 
 
-def start_download(url, format_id, title, thumb="", needs_merge=False):
+def start_download(url, format_id, title, thumb="", needs_merge=False,
+                   media_id="", uploader="", source="", name_template=""):
     with task_lock:
         task_counter[0] += 1
         tid = task_counter[0]
@@ -1032,6 +1188,8 @@ def start_download(url, format_id, title, thumb="", needs_merge=False):
                       "total": 0, "downloaded": 0, "thumb": thumb or "",
                       # 保存原始参数，失败后「重试」要按同样的清晰度重新拉取
                       "url": url, "formatId": format_id,
+                      "id": media_id or "", "uploader": uploader or "",
+                      "source": source or "", "nameTemplate": name_template or "",
                       "needsMerge": bool(needs_merge),
                       # 旧线程收尾时用它判断自己是否已被新一轮重试取代
                       "_worker": worker_token}
@@ -1404,6 +1562,7 @@ def _http_stream(url, dest, tid, headers=None, on_progress=None,
                         f.write(piece)
                         done += len(piece)
                         got += len(piece)
+                        _pace(tid, len(piece))
                         _touch(tid)
                         if on_progress:
                             on_progress(done, total)
@@ -2064,7 +2223,13 @@ def _start_worker(tid, url, format_id, title, needs_merge, worker_token):
                     _set_task(tid, status="error", error="已取消", speed="")
                 return
             target_dir = get_download_dir()
-            dest = os.path.join(target_dir, os.path.basename(fpath))
+            dest = os.path.join(target_dir, _target_name(tasks.get(tid, {}), fpath))
+            if os.path.exists(dest) and os.path.abspath(dest) != os.path.abspath(fpath):
+                stem, suffix = os.path.splitext(dest)
+                index = 2
+                while os.path.exists("%s (%d)%s" % (stem, index, suffix)):
+                    index += 1
+                dest = "%s (%d)%s" % (stem, index, suffix)
             try:
                 # HLS 已经直接拼在下载目录里了，再复制一次等于白占一份空间
                 if os.path.abspath(fpath) != os.path.abspath(dest):

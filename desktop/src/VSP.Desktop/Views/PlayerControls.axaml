@@ -10,6 +10,9 @@
                    MaxLines="2" Margin="2,2,2,2" />
         <TextBlock Text="正在打开…" IsVisible="{Binding IsLoading}"
                    Foreground="#B9B9B9" FontSize="11" Margin="2,2,2,2" />
+        <TextBlock Text="{Binding SnapshotMessage}" IsVisible="{Binding HasSnapshotMessage}"
+                   Foreground="#FFD9A0" FontSize="12" TextWrapping="Wrap"
+                   MaxLines="2" Margin="2,2,2,2" />
 
         <Grid ColumnDefinitions="52,*,52" Height="28" VerticalAlignment="Center">
             <TextBlock Grid.Column="0" Text="{Binding ElapsedText}" FontSize="12"
@@ -20,7 +23,7 @@
                        Foreground="#B3FFFFFF" TextAlignment="Right" VerticalAlignment="Center" />
         </Grid>
 
-        <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto,Auto,Auto,Auto" Height="46" VerticalAlignment="Center">
+        <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto,Auto,Auto,Auto,Auto,Auto" Height="46" VerticalAlignment="Center">
             <Button Grid.Column="0" Classes="player" Width="44" Height="44"
                     Command="{Binding PlayPauseCommand}" ToolTip.Tip="播放 / 暂停">
                 <PathIcon Data="{Binding PlayPauseIcon}" Width="24" Height="24" Foreground="#FFFFFF" />
@@ -40,6 +43,12 @@
                     Margin="2,0,12,0" VerticalAlignment="Center"
                     Value="{Binding Volume, Mode=TwoWay}" ToolTip.Tip="{Binding VolumeText}" />
             <Button Grid.Column="7" Classes="player" Width="36" Height="36"
+                    Command="{Binding SnapshotCommand}" ToolTip.Tip="保存当前画面 (S)">
+                <PathIcon Data="{StaticResource IconSnapshot}" Width="18" Height="18" Foreground="#FFFFFF" />
+            </Button>
+            <Button Grid.Column="8" Classes="player" Height="34" Content="片段"
+                    FontSize="11" Command="{Binding ClipCommand}" ToolTip.Tip="截取当前位置起 15 秒" />
+            <Button Grid.Column="9" Classes="player" Width="36" Height="36"
                     Command="{Binding ToggleFullScreenCommand}" ToolTip.Tip="{Binding FullScreenText}">
                 <PathIcon Data="{StaticResource IconFullscreen}" Width="18" Height="18" Foreground="#FFFFFF" />
             </Button>

@@ -20,7 +20,7 @@
             <!-- 未连接：附近设备直接显示在页面上，不弹窗 -->
             <Border Classes="card" Padding="24" IsVisible="{Binding !HasSelectedLanDevice}"
                     HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
-                <Grid RowDefinitions="Auto,*,Auto">
+                <Grid RowDefinitions="Auto,*">
                     <!-- 标题栏：标题 + 本机地址 + 连接进度 -->
                     <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="0,0,0,14">
                         <StackPanel Grid.Column="0" Spacing="4">
@@ -63,24 +63,10 @@
                             <TextBlock Text="⌁" FontSize="42" Foreground="{DynamicResource Accent}"
                                        HorizontalAlignment="Center" />
                             <TextBlock Text="未发现附近设备" Classes="h2" HorizontalAlignment="Center" />
-                            <TextBlock Text="确保两台设备连接同一 Wi-Fi 并已打开本功能；也可以直接在下方输入对方 IP 连接。"
+                            <TextBlock Text="确保两台设备连接同一 Wi-Fi 并已打开本功能，稍等几秒即可发现对方。"
                                        Classes="sub" TextAlignment="Center" TextWrapping="Wrap" />
                         </StackPanel>
                     </Grid>
-
-                    <!-- 手动连接：独立分区，紧凑排布 -->
-                    <StackPanel Grid.Row="2" Spacing="8" Margin="0,14,0,0">
-                        <Border Height="1" Background="{DynamicResource Line}" />
-                        <TextBlock Text="手动连接" Classes="h2" />
-                        <TextBlock Text="发现不到设备时，输入对方「本机地址」直接连接。"
-                                   Classes="sub" TextWrapping="Wrap" />
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <TextBox PlaceholderText="例如 192.168.1.5" Text="{Binding LanManualIp}"
-                                     Width="280" Height="38" VerticalAlignment="Center" />
-                            <Button Classes="primary" Width="88" Height="38" Content="连接"
-                                    Command="{Binding LanAddManualCommand}" />
-                        </StackPanel>
-                    </StackPanel>
                 </Grid>
             </Border>
 

@@ -29,13 +29,18 @@ public sealed class DownloadTaskInfo : BindableBase
     public string Kind { get; init; } = "";
     public string SaveDir { get; init; } = "";
     public string Title { get; init; } = "download";
+    public string MediaId { get; init; } = "";
+    public string Uploader { get; init; } = "";
+    public string Source { get; init; } = "";
     public DateTime StartedAt { get; } = DateTime.Now;
+    /// <summary>解析引擎内部任务 ID，用于跨进程 pause / resume / cancel。</summary>
+    public string EngineTaskId { get; set; } = "";
 
     private string _status = "running";
     public string Status
     {
         get => _status;
-        set { if (Set(ref _status, value)) { Raise(nameof(StatusText)); Raise(nameof(CanCancel)); } }
+        set { if (Set(ref _status, value)) { Raise(nameof(StatusText)); Raise(nameof(CanCancel)); Raise(nameof(CanPause)); Raise(nameof(CanResume)); } }
     }
 
     private double _progress;
@@ -69,25 +74,59 @@ public sealed class DownloadTaskInfo : BindableBase
         ? $"{MediaUtil.FormatSize(DownloadedBytes)} / {MediaUtil.FormatSize(TotalBytes)}"
         : MediaUtil.FormatSize(DownloadedBytes);
 
-    public bool CanCancel => Status == "running";
+    public bool CanCancel => Status is "running" or "paused";
+    public bool CanPause => Status == "running";
+    public bool CanResume => Status == "paused";
 }
 
 public sealed record DownloadRequest(
-    string Url, string FormatId, string DirectUrl, string Title, string Kind, string SaveDir);
+    string Url, string FormatId, string DirectUrl, string Title, string Kind, string SaveDir,
+    string MediaId = "", string Uploader = "", string Source = "");
 
 public sealed class DownloadManager
 {
     private readonly PythonEngine _engine;
+    private readonly SettingsService _settings;
+    private readonly Func<DownloadTaskInfo, Task>? _postProcess;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, CancellationTokenSource> _cancellations = new();
     private readonly HttpClient _client;
+    private readonly object _slotLock = new();
+    private SemaphoreSlim _slots;
+    private int _slotCapacity;
 
     public ObservableCollection<DownloadTaskInfo> Tasks { get; } = [];
 
-    public DownloadManager(PythonEngine engine)
+    public DownloadManager(PythonEngine engine, SettingsService settings,
+                           Func<DownloadTaskInfo, Task>? postProcess = null)
     {
         _engine = engine;
+        _settings = settings;
+        _postProcess = postProcess;
+        _slotCapacity = settings.MaxConcurrentDownloads;
+        _slots = new SemaphoreSlim(_slotCapacity);
         var handler = new HttpClientHandler { AllowAutoRedirect = true, AutomaticDecompression = System.Net.DecompressionMethods.None };
         _client = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
+    }
+
+    private SemaphoreSlim Slots
+    {
+        get
+        {
+            var want = _settings.MaxConcurrentDownloads;
+            if (want != _slotCapacity)
+            {
+                lock (_slotLock)
+                {
+                    if (want != _slotCapacity)
+                    {
+                        _slots.Dispose();
+                        _slots = new SemaphoreSlim(want);
+                        _slotCapacity = want;
+                    }
+                }
+            }
+            return _slots;
+        }
     }
 
     public DownloadTaskInfo Start(DownloadRequest request)
@@ -96,6 +135,7 @@ public sealed class DownloadManager
         {
             Url = request.Url, FormatId = request.FormatId, DirectUrl = request.DirectUrl,
             Title = request.Title, Kind = request.Kind, SaveDir = request.SaveDir,
+            MediaId = request.MediaId, Uploader = request.Uploader, Source = request.Source,
         };
         Tasks.Insert(0, task);
         Run(task, request);
@@ -108,8 +148,11 @@ public sealed class DownloadManager
         _cancellations[task.TaskId] = cts;
         _ = Task.Run(async () =>
         {
+            var acquired = false;
             try
             {
+                await Slots.WaitAsync(cts.Token);
+                acquired = true;
                 var direct = !string.IsNullOrEmpty(request.DirectUrl) &&
                              (request.FormatId.StartsWith("url:", StringComparison.Ordinal) ||
                               request.Kind == "image" ||
@@ -130,9 +173,15 @@ public sealed class DownloadManager
                             task.Filename = p.Filename;
                             task.TotalBytes = p.Total;
                             task.DownloadedBytes = p.Downloaded;
+                            if (!string.IsNullOrEmpty(p.TaskId)) task.EngineTaskId = p.TaskId;
                             if (!string.IsNullOrEmpty(p.Error)) task.Error = p.Error;
-                        }, cts.Token);
+                        }, cts.Token, _settings.SpeedLimitKbps, _settings.NameTemplate,
+                           request.MediaId, request.Uploader, request.Source);
                 if (task.Status == "running") { task.Status = "done"; task.Progress = 100; task.Speed = ""; }
+                if (task.Status == "done" && _postProcess is not null)
+                {
+                    try { await _postProcess(task); } catch { }
+                }
             }
             catch (OperationCanceledException)
             {
@@ -146,6 +195,7 @@ public sealed class DownloadManager
             }
             finally
             {
+                if (acquired) Slots.Release();
                 _cancellations.TryRemove(task.TaskId, out var old);
                 old?.Dispose();
             }
@@ -181,11 +231,32 @@ public sealed class DownloadManager
         task.Filename = name;
     }
 
+    public void Pause(string taskId)
+    {
+        var task = Tasks.FirstOrDefault(t => t.TaskId == taskId);
+        if (task is null || task.Status != "running") return;
+        if (!string.IsNullOrEmpty(task.EngineTaskId))
+            _ = _engine.ControlAsync("pause", task.EngineTaskId, task.SaveDir);
+        task.Status = "paused";
+        task.Speed = "";
+    }
+
+    public void Resume(string taskId)
+    {
+        var task = Tasks.FirstOrDefault(t => t.TaskId == taskId);
+        if (task is null || task.Status != "paused") return;
+        if (!string.IsNullOrEmpty(task.EngineTaskId))
+            _ = _engine.ControlAsync("resume", task.EngineTaskId, task.SaveDir);
+        task.Status = "running";
+    }
+
     public void Cancel(string taskId)
     {
-        if (_cancellations.TryGetValue(taskId, out var cts)) cts.Cancel();
         var task = Tasks.FirstOrDefault(t => t.TaskId == taskId);
-        if (task is { Status: "running" }) { task.Status = "error"; task.Error = "已取消"; task.Speed = ""; }
+        if (task is { } && !string.IsNullOrEmpty(task.EngineTaskId))
+            _ = _engine.ControlAsync("cancel", task.EngineTaskId, task.SaveDir);
+        if (_cancellations.TryGetValue(taskId, out var cts)) cts.Cancel();
+        if (task is { Status: "running" or "paused" }) { task.Status = "error"; task.Error = "已取消"; task.Speed = ""; }
     }
 
     public void Retry(string taskId)
@@ -194,7 +265,7 @@ public sealed class DownloadManager
         if (task is null) return;
         var request = new DownloadRequest(task.Url, task.FormatId, task.DirectUrl, task.Title, task.Kind, task.SaveDir);
         task.Status = "running"; task.Error = ""; task.Progress = 0; task.Speed = "";
-        task.DownloadedBytes = 0; task.TotalBytes = 0;
+        task.DownloadedBytes = 0; task.TotalBytes = 0; task.EngineTaskId = "";
         Run(task, request);
     }
 

@@ -39,6 +39,7 @@ import android.provider.Settings;
 import android.util.Base64;
 import android.util.Log;
 import android.util.Size;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
 import android.view.View;
@@ -149,6 +150,10 @@ public class MainActivity extends Activity {
     private static final int RECENT_MAX = 8;
     private static final String PREF = "vsp_prefs";
     private static final String RECENT_KEY = "vsp_recent";
+    /** 系统分享 / 浏览器打开传进来的 Intent，等 Python 引擎就绪后再处理 */
+    private Intent pendingIntent;
+    /** 恢复的解析结果已过期，等 Python 就绪后自动重新解析 */
+    private boolean pendingReparse;
 
     /** 真·检查更新：GitHub + Gitee 双源，取版本更高的那个 */
     private static final String UPDATE_REPO = "tang536/VSP-";
@@ -624,6 +629,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        pendingIntent = getIntent();
         try {
             prefs = getSharedPreferences(PREF, MODE_PRIVATE);
             recentPrefs = getSharedPreferences(RECENT_KEY, MODE_PRIVATE);
@@ -698,6 +704,7 @@ public class MainActivity extends Activity {
                     File privateDir = new File(base, "VSP解析");
                     privateDir.mkdirs();
                     py.getModule("vsp").callAttr("set_private_dir", privateDir.getAbsolutePath());
+                    py.getModule("vsp").callAttr("set_parse_ttl", prefs.getInt("parse_ttl", 600));
                     downloadDir = py.getModule("vsp").callAttr("get_save_dir").toString();
                     pyReady = true;
                     // 恢复上次退出前的下载队列；浏览器内下载走的也是同一套任务表
@@ -709,6 +716,11 @@ public class MainActivity extends Activity {
                     }
                     startTaskPolling();
                     ui.post(this::refreshStorage);
+                    ui.post(this::consumePendingIntent);
+                    if (pendingReparse) {
+                        pendingReparse = false;
+                        ui.post(this::doParse);
+                    }
                 } catch (Throwable t) {
                     ui.post(() -> Toast.makeText(this, "Python 初始化失败: " + t.getMessage(), Toast.LENGTH_LONG).show());
                 }
@@ -718,6 +730,74 @@ public class MainActivity extends Activity {
             String msg = t.toString();
             if (t.getCause() != null) msg += "\nCause: " + t.getCause();
             Toast.makeText(this, "启动失败: " + msg, Toast.LENGTH_LONG).show();
+        }
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        pendingIntent = intent;
+        if (pyReady) ui.post(this::consumePendingIntent);
+    }
+
+    /** 系统分享 / 浏览器打开：链接直接解析，媒体文件复制到下载目录后打开。 */
+    private void consumePendingIntent() {
+        Intent intent = pendingIntent;
+        if (intent == null) return;
+        pendingIntent = null;
+        String action = intent.getAction();
+        if (Intent.ACTION_SEND.equals(action)) {
+            String type = intent.getType();
+            if ("text/plain".equals(type)) {
+                String text = intent.getStringExtra(Intent.EXTRA_TEXT);
+                if (text != null) {
+                    String url = text.trim();
+                    int i = url.indexOf("http");
+                    if (i > 0) url = url.substring(i);
+                    if (url.startsWith("http://") || url.startsWith("https://")) {
+                        urlInput.setText(url);
+                        doParse();
+                        return;
+                    }
+                }
+            } else if (type != null && (type.startsWith("video/") || type.startsWith("audio/") || type.startsWith("image/"))) {
+                Uri uri = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+                if (uri != null) importSharedMedia(uri, type);
+                return;
+            }
+            Toast.makeText(this, "暂不支持的分享内容", Toast.LENGTH_SHORT).show();
+        } else if (Intent.ACTION_VIEW.equals(action)) {
+            Uri data = intent.getData();
+            if (data != null && ("http".equals(data.getScheme()) || "https".equals(data.getScheme()))) {
+                urlInput.setText(data.toString());
+                doParse();
+            }
+        }
+    }
+
+    private void importSharedMedia(Uri uri, String mime) {
+        try {
+            String name = null;
+            android.database.Cursor c = getContentResolver().query(uri, null, null, null, null);
+            if (c != null && c.moveToFirst()) {
+                int idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
+                if (idx >= 0) name = c.getString(idx);
+                c.close();
+            }
+            if (name == null || name.isEmpty()) name = "share-" + System.currentTimeMillis();
+            File dir = mediaOutputDir();
+            File dest = new File(dir, new File(name).getName());
+            try (java.io.InputStream in = getContentResolver().openInputStream(uri);
+                 java.io.OutputStream out = new java.io.FileOutputStream(dest)) {
+                byte[] buf = new byte[16384];
+                int n;
+                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            }
+            int type = mime.startsWith("image/") ? TYPE_IMAGE : (mime.startsWith("audio/") ? TYPE_AUDIO : TYPE_VIDEO);
+            openPlayer(dest.getAbsolutePath(), type, dest.getName(), true);
+            Toast.makeText(this, "已导入：" + dest.getName(), Toast.LENGTH_SHORT).show();
+        } catch (Throwable t) {
+            Toast.makeText(this, "导入失败：" + t.getMessage(), Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -842,6 +922,30 @@ public class MainActivity extends Activity {
         silentSwitch.setOnCheckedChangeListener((b, checked) -> {
             if (!suppressSilentSwitch) setSilentMode(checked);
         });
+
+        // 命名模板与解析缓存：与桌面端共用同名设置语义
+        EditText nameTpl = pageMe.findViewById(R.id.name_template_input);
+        nameTpl.setText(nameTemplate());
+        nameTpl.addTextChangedListener(new android.text.TextWatcher() {
+            public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
+            public void onTextChanged(CharSequence s, int a, int b, int c) { }
+            public void afterTextChanged(android.text.Editable s) {
+                prefs.edit().putString("name_template", s.toString()).apply();
+            }
+        });
+        EditText ttlInput = pageMe.findViewById(R.id.parse_ttl_input);
+        ttlInput.setText(String.valueOf(prefs.getInt("parse_ttl", 600)));
+        ttlInput.addTextChangedListener(new android.text.TextWatcher() {
+            public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
+            public void onTextChanged(CharSequence s, int a, int b, int c) { }
+            public void afterTextChanged(android.text.Editable s) {
+                try {
+                    int v = Integer.parseInt(s.toString());
+                    prefs.edit().putInt("parse_ttl", Math.max(0, v)).apply();
+                } catch (Throwable ignored) { }
+            }
+        });
+
         pageMe.findViewById(R.id.row_storage).setOnClickListener(v -> switchPage(PAGE_STORAGE));
         pageMe.findViewById(R.id.row_update).setOnClickListener(v -> checkUpdate());
         avatar.setOnClickListener(v -> showAvatarViewer());
@@ -1428,6 +1532,11 @@ public class MainActivity extends Activity {
     }
 
     /** 下载浏览器嗅探到的资源：直链走 vsp 的 url: 前缀机制，复用下载队列 */
+    /** 下载命名模板，与桌面端共用同一套占位符。 */
+    private String nameTemplate() {
+        return prefs.getString("name_template", "{title} [{quality}]");
+    }
+
     private void downloadBrowserResource(BrowserResource res) {
         if (!pyReady) {
             Toast.makeText(this, "正在初始化，请稍候…", Toast.LENGTH_SHORT).show();
@@ -1436,7 +1545,7 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             try {
                 py.getModule("vsp").callAttr("start_download", res.url, "url:" + res.url,
-                        res.name, "", false);
+                        res.name, "", false, "", "", "", nameTemplate());
                 lastTasksJson = "";
                 refreshTasks();
                 ui.post(() -> Toast.makeText(this, "已加入下载队列：" + res.name, Toast.LENGTH_SHORT).show());
@@ -2210,7 +2319,8 @@ public class MainActivity extends Activity {
                 boolean merge = fmt != null && fmt.optBoolean("needsMerge", false);
                 py.getModule("vsp").callAttr("start_download",
                         previewPageUrl != null && previewPageUrl.startsWith("http") ? previewPageUrl : source,
-                        fmtId, title, currentThumb == null ? "" : currentThumb, merge);
+                        fmtId, title, currentThumb == null ? "" : currentThumb, merge,
+                        "", "", "", nameTemplate());
                 lastTasksJson = "";
                 refreshTasks();
                 ui.post(() -> Toast.makeText(this, "已加入下载队列 · 我的 → 下载队列", Toast.LENGTH_SHORT).show());
@@ -2246,15 +2356,63 @@ public class MainActivity extends Activity {
         PopupMenu menu = new PopupMenu(this, anchor);
         menu.getMenu().add(0, 1, 0, "提取视频配乐");
         menu.getMenu().add(0, 2, 1, "扫描本地媒体");
+        menu.getMenu().add(0, 3, 2, "查找重复文件");
         menu.setOnMenuItemClickListener(item -> {
             if (item.getItemId() == 1) {
                 openVideosPage();
+            } else if (item.getItemId() == 3) {
+                scanDuplicates();
             } else {
                 switchPage(PAGE_SCAN);
             }
             return true;
         });
         menu.show();
+    }
+
+    /** 按大小预筛 + SHA-256 精确比对下载目录里的重复文件。 */
+    private void scanDuplicates() {
+        Toast.makeText(this, "正在扫描重复文件…", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            try {
+                java.util.Map<Long, java.util.List<File>> bySize = new java.util.HashMap<>();
+                File root = new File(downloadDir);
+                java.util.Deque<File> stack = new java.util.ArrayDeque<>();
+                stack.push(root);
+                while (!stack.isEmpty()) {
+                    File f = stack.pop();
+                    File[] children = f.listFiles();
+                    if (children == null) continue;
+                    for (File c : children) {
+                        if (c.isDirectory()) stack.push(c);
+                        else if (c.isFile() && !c.getName().endsWith(".json"))
+                            bySize.computeIfAbsent(c.length(), k -> new java.util.ArrayList<>()).add(c);
+                    }
+                }
+                int groups = 0, files = 0;
+                for (java.util.List<File> list : bySize.values()) {
+                    if (list.size() < 2) continue;
+                    java.util.Map<String, Integer> hashes = new java.util.HashMap<>();
+                    for (File f : list) {
+                        try {
+                            byte[] bytes = java.nio.file.Files.readAllBytes(f.toPath());
+                            String hash = android.util.Base64.encodeToString(
+                                    java.security.MessageDigest.getInstance("SHA-256").digest(bytes),
+                                    android.util.Base64.NO_WRAP);
+                            hashes.put(hash, hashes.getOrDefault(hash, 0) + 1);
+                        } catch (Throwable ignored) { }
+                    }
+                    for (int n : hashes.values()) if (n > 1) { groups++; files += n; }
+                }
+                final int g = groups, n = files;
+                ui.post(() -> Toast.makeText(this,
+                        g == 0 ? "未发现重复文件"
+                               : "发现 " + g + " 组重复文件，共 " + n + " 个文件",
+                        Toast.LENGTH_LONG).show());
+            } catch (Throwable t) {
+                ui.post(() -> Toast.makeText(this, "扫描失败：" + t.getMessage(), Toast.LENGTH_SHORT).show());
+            }
+        }, "vsp-dup-scan").start();
     }
 
     // ---------------- 主题 ----------------
@@ -3382,7 +3540,11 @@ public class MainActivity extends Activity {
         final boolean needsMerge = fmt.optBoolean("needsMerge", false);
         new Thread(() -> {
             try {
-                py.getModule("vsp").callAttr("start_download", url, formatId, title, thumb, needsMerge);
+                py.getModule("vsp").callAttr("start_download", url, formatId, title, thumb, needsMerge,
+                        parsedData == null ? "" : parsedData.optString("id", ""),
+                        parsedData == null ? "" : parsedData.optString("uploader", ""),
+                        parsedData == null ? "" : parsedData.optString("source", ""),
+                        nameTemplate());
                 lastTasksJson = "";
                 refreshTasks();
                 if (!quiet) {
@@ -4504,9 +4666,26 @@ public class MainActivity extends Activity {
                     .show();
             return;
         }
-        CharSequence[] items = {"用其他应用打开", "重新加载", "退出观看"};
+        java.util.List<CharSequence> items = new java.util.ArrayList<>();
+        final int extra;
+        if (playerType == TYPE_VIDEO) {
+            items.add("保存当前画面");
+            items.add("截取 15 秒片段");
+            extra = 2;
+        } else {
+            extra = 0;
+        }
+        items.add("用其他应用打开");
+        items.add("重新加载");
+        items.add("退出观看");
         new AlertDialog.Builder(this)
-                .setItems(items, (d, which) -> {
+                .setItems(items.toArray(new CharSequence[0]), (d, picked) -> {
+                    if (picked < extra) {
+                        if (picked == 0) saveSnapshot();
+                        else saveClip(15_000_000L);
+                        return;
+                    }
+                    int which = picked - extra;
                     if (which == 0) {
                         try {
                             MediaItem m = currentWatchItem();
@@ -5031,11 +5210,16 @@ public class MainActivity extends Activity {
 
     /** 视频第一帧，用作相邻页预览；取不到返回 null */
     private Bitmap videoCoverFrame(String src, boolean isContent) {
+        return videoFrameAt(src, isContent, 0);
+    }
+
+    /** 取指定时间点的画面帧，用于「保存当前画面」；时间单位微秒。 */
+    private Bitmap videoFrameAt(String src, boolean isContent, long timeUs) {
         android.media.MediaMetadataRetriever r = new android.media.MediaMetadataRetriever();
         try {
             if (isContent) r.setDataSource(this, Uri.parse(src));
             else r.setDataSource(src);
-            Bitmap full = r.getFrameAtTime(0,
+            Bitmap full = r.getFrameAtTime(Math.max(0, timeUs),
                     android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
             if (full == null) return null;
             int w = full.getWidth();
@@ -5054,6 +5238,101 @@ public class MainActivity extends Activity {
             } catch (Throwable ignored) {
             }
         }
+    }
+
+    /** 保存当前帧到图片目录，并通知系统媒体库扫描。 */
+    private void saveSnapshot() {
+        final String src = watchSource;
+        if (src == null || src.isEmpty() || playerType == TYPE_IMAGE) {
+            Toast.makeText(this, "当前媒体没有可保存的画面", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        final long timeUs = currentPositionUs();
+        final boolean content = src.startsWith("content://") || src.startsWith("file://");
+        new Thread(() -> {
+            Bitmap b = videoFrameAt(src, content, timeUs);
+            if (b == null) {
+                ui.post(() -> Toast.makeText(this, "取帧失败", Toast.LENGTH_SHORT).show());
+                return;
+            }
+            File out = new File(mediaOutputDir(), "截图-" + System.currentTimeMillis() + ".jpg");
+            try (java.io.OutputStream os = new java.io.FileOutputStream(out)) {
+                b.compress(Bitmap.CompressFormat.JPEG, 92, os);
+                b.recycle();
+                sendBroadcast(new Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, Uri.fromFile(out)));
+                ui.post(() -> Toast.makeText(this, "已保存截图：" + out.getName(), Toast.LENGTH_SHORT).show());
+            } catch (Throwable t) {
+                ui.post(() -> Toast.makeText(this, "保存失败：" + t.getMessage(), Toast.LENGTH_SHORT).show());
+            }
+        }, "vsp-snapshot").start();
+    }
+
+    /** 截取当前位置起 15 秒片段；在线流不支持时用原文件地址。 */
+    private void saveClip(final long durationUs) {
+        final String src = watchSource;
+        if (src == null || src.isEmpty() || playerType != TYPE_VIDEO) {
+            Toast.makeText(this, "只有视频可以截取片段", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        final long startUs = Math.max(0, currentPositionUs());
+        new Thread(() -> {
+            File out = new File(mediaOutputDir(), "片段-" + System.currentTimeMillis() + ".mp4");
+            boolean ok = MediaUtil.clip(getApplicationContext(), src, out.getAbsolutePath(),
+                    startUs, startUs + durationUs);
+            final boolean result = ok && out.length() > 0;
+            ui.post(() -> {
+                if (result) {
+                    sendBroadcast(new Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, Uri.fromFile(out)));
+                    Toast.makeText(this, "已保存片段：" + out.getName(), Toast.LENGTH_SHORT).show();
+                } else {
+                    Toast.makeText(this, "截取失败：该源可能不支持本地片段复制", Toast.LENGTH_LONG).show();
+                }
+            });
+        }, "vsp-clip").start();
+    }
+
+    private long currentPositionUs() {
+        try {
+            if (exoPlayer != null) return exoPlayer.getCurrentPosition() * 1000L;
+            if (playerType == TYPE_VIDEO && playerVideo != null) return playerVideo.getCurrentPosition() * 1000L;
+            if (playerType == TYPE_AUDIO && currentMp != null) return currentMp.getCurrentPosition() * 1000L;
+        } catch (Throwable ignored) { }
+        return 0;
+    }
+
+    /** 快捷键：空格播放/暂停，左右键 10 秒，F 全屏，S 截图。 */
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if (playerPanel != null && playerPanel.getParent() != null) {
+            try {
+                switch (keyCode) {
+                    case KeyEvent.KEYCODE_SPACE:
+                        togglePlay(); return true;
+                    case KeyEvent.KEYCODE_DPAD_LEFT:
+                        seekBy(-10_000L); return true;
+                    case KeyEvent.KEYCODE_DPAD_RIGHT:
+                        seekBy(10_000L); return true;
+                    case KeyEvent.KEYCODE_F:
+                        enterFullPlay(); return true;
+                    case KeyEvent.KEYCODE_S:
+                        saveSnapshot(); return true;
+                }
+            } catch (Throwable ignored) { }
+        }
+        return super.onKeyDown(keyCode, event);
+    }
+
+    private void seekBy(long deltaUs) {
+        try {
+            if (exoPlayer != null) {
+                exoPlayer.seekTo(exoPlayer.getCurrentPosition() + deltaUs / 1000L);
+            } else if (playerType == TYPE_VIDEO && playerVideo != null) {
+                playerVideo.seekTo((int) (playerVideo.getCurrentPosition() + deltaUs / 1000L));
+            } else if (currentMp != null) {
+                currentMp.seekTo((int) (currentMp.getCurrentPosition() + deltaUs / 1000L));
+            }
+            showPlayerOverlay();
+        } catch (Throwable ignored) { }
     }
 
     /**
@@ -6328,6 +6607,11 @@ public class MainActivity extends Activity {
             String tab = root.optString("tab", "videos");
             if (!tab.isEmpty()) currentTab = tab;
             if (!currentUrl.isEmpty() && urlInput != null) urlInput.setText(currentUrl);
+            // 上次解析结果超过有效期就自动重解析，避免直链过期后用户对着旧列表发呆。
+            long savedAt = root.optLong("ts", 0);
+            int ttl = prefs.getInt("parse_ttl", 600);
+            if (savedAt > 0 && ttl > 0 && System.currentTimeMillis() - savedAt > ttl * 1000L)
+                pendingReparse = true;
             resultMeta.setVisibility(View.VISIBLE);
             tabs.setVisibility(View.VISIBLE);
             formatHint.setVisibility(View.VISIBLE);

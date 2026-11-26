@@ -39,6 +39,8 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
     private bool _areControlsVisible = true;
     private double _controlsOpacity = 1;
     private double _playbackRate = 1.0;
+    private string _snapshotMessage = "";
+    private readonly DispatcherTimer _snapshotMessageTimer;
 
     private static readonly double[] PlaybackRates = [1.0, 1.25, 1.5, 2.0, 0.75];
 
@@ -59,6 +61,13 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
     public ICommand SeekBackCommand { get; }
     public ICommand SeekForwardCommand { get; }
     public ICommand CycleRateCommand { get; }
+    public ICommand SnapshotCommand { get; }
+    public ICommand ClipCommand { get; }
+
+    /// <summary>截图保存目录，由 View 在挂载时注入（LibVLC 的 --snapshot-path）。</summary>
+    public string SnapshotDirectory { get; set; } = "";
+    public string SnapshotMessage { get => _snapshotMessage; private set { if (Set(ref _snapshotMessage, value)) Raise(nameof(HasSnapshotMessage)); } }
+    public bool HasSnapshotMessage => !string.IsNullOrEmpty(SnapshotMessage);
 
     public string Error { get => _error; private set { if (Set(ref _error, value)) { Raise(nameof(ShowMediaError)); Raise(nameof(ShowBarError)); } } }
     public bool HasError => !string.IsNullOrEmpty(Error);
@@ -135,7 +144,10 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
     /// <summary>鼠标在媒体区或控制条上活动：显示控制条并重新开始 3 秒倒计时。</summary>
     public void NotifyPointerActivity()
     {
-        if (IsAudio) ShowControls();
+        if (!IsAudio || AreControlsVisible || _controlsPressed) return;
+        // 控制条已经显示时不再重置计时器：系统偶尔重复投递 PointerMoved，
+        // 若每次都续 3 秒就永远不会隐藏，这正是用户看到「鼠标不动也不消失」的原因。
+        ShowControls();
     }
 
     /// <summary>按住控制条（拖动进度/音量）期间不自动隐藏，松开后重新计时。</summary>
@@ -221,6 +233,11 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
         SeekBackCommand = new RelayCommand(() => SeekBy(-10));
         SeekForwardCommand = new RelayCommand(() => SeekBy(10));
         CycleRateCommand = new RelayCommand(CyclePlaybackRate);
+        SnapshotCommand = new RelayCommand(TakeSnapshot);
+        ClipCommand = new RelayCommand(() => _ = ExportClipAsync());
+
+        _snapshotMessageTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3.5) };
+        _snapshotMessageTimer.Tick += (_, _) => { _snapshotMessageTimer.Stop(); SnapshotMessage = ""; };
 
         _hideControlsTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
         _hideControlsTimer.Tick += (_, _) => HideControlsIfIdle();
@@ -346,12 +363,92 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
         NotifyPointerActivity();
     }
 
+    /// <summary>滚轮 / 上下键调整音量。</summary>
+    public void ChangeVolume(double delta) => Volume += delta;
+
+    /// <summary>用 LibVLC 快照当前视频帧；目录由 LibVLC 启动参数指定。</summary>
+    private void TakeSnapshot()
+    {
+        if (_player is null || IsImage)
+        {
+            SnapshotMessage = IsImage ? "图片可直接另存" : "画面尚未就绪";
+        }
+        else
+        {
+            try
+            {
+                var ok = _player.TakeSnapshot(0, null, 0, 0);
+                SnapshotMessage = ok
+                    ? $"截图已保存到 {SnapshotDirectory}"
+                    : "截图失败，请确认媒体已开始播放";
+            }
+            catch (Exception ex)
+            {
+                SnapshotMessage = "截图失败：" + ex.Message;
+            }
+        }
+        _snapshotMessageTimer.Stop();
+        _snapshotMessageTimer.Start();
+        NotifyPointerActivity();
+    }
+
+    /// <summary>用 LibVLC 的 sout 把当前位置起 15 秒直接封装成 mp4（不重编码）。</summary>
+    private async Task ExportClipAsync()
+    {
+        if (_player is null || _libvlc is null || IsImage)
+        {
+            SnapshotMessage = "当前媒体不支持片段截取";
+            return;
+        }
+
+        var start = Math.Max(0.0, Math.Min(_player.Length / 1000.0 - 15, _player.Time / 1000.0));
+        var end = start + 15;
+        var outPath = Path.Combine(SnapshotDirectory, $"clip-{DateTime.Now:yyyyMMdd-HHmmss}.mp4");
+
+        try
+        {
+            Directory.CreateDirectory(SnapshotDirectory);
+            var dst = outPath.Replace('\\', '/');
+            string[] options =
+            [
+                $":start-time={start:0.000}",
+                $":stop-time={end:0.000}",
+                $":sout=#std{{access=file,mux=mp4,dst={dst}}}",
+                ":sout-all",
+                ":sout-keep",
+            ];
+
+            using var media = new Media(_libvlc, new Uri(Url), options);
+            using var clipPlayer = new MediaPlayer(_libvlc);
+            var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            clipPlayer.EndReached += (_, _) => done.TrySetResult(true);
+            clipPlayer.EncounteredError += (_, _) => done.TrySetResult(false);
+            clipPlayer.Play(media);
+            SnapshotMessage = $"正在截取 15 秒片段：{Path.GetFileName(outPath)}";
+            _snapshotMessageTimer.Stop();
+
+            var finished = await Task.WhenAny(done.Task, Task.Delay(TimeSpan.FromSeconds(40)));
+            if (finished == done.Task && done.Task.Result)
+                SnapshotMessage = $"片段已保存：{outPath}";
+            else
+                SnapshotMessage = "片段截取超时或失败";
+        }
+        catch (Exception ex)
+        {
+            SnapshotMessage = "片段截取失败：" + ex.Message;
+        }
+
+        _snapshotMessageTimer.Start();
+        NotifyPointerActivity();
+    }
+
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
         _timer.Stop();
         _hideControlsTimer.Stop();
+        _snapshotMessageTimer.Stop();
         try { _player?.Stop(); } catch { }
         _media?.Dispose();
         _player?.Dispose();

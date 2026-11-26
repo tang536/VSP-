@@ -5,7 +5,8 @@ using System.Text.Json;
 namespace VSP.Core;
 
 public sealed record DownloadProgress(
-    string Status, double Progress, string Speed, string Error, string Filename, long Total, long Downloaded);
+    string Status, double Progress, string Speed, string Error, string Filename, long Total, long Downloaded,
+    string TaskId = "");
 
 /// <summary>
 /// Bridges to the same vsp.py engine used by the Android and Web builds.
@@ -51,12 +52,13 @@ public sealed class PythonEngine
         return psi;
     }
 
-    public async Task<string> ParseAsync(string url, CancellationToken ct)
+    public async Task<string> ParseAsync(string url, CancellationToken ct, int ttlSeconds = 600)
     {
         var psi = CreatePsi();
         psi.ArgumentList.Add(ScriptPath);
         psi.ArgumentList.Add("parse");
         psi.ArgumentList.Add(url);
+        psi.ArgumentList.Add(ttlSeconds.ToString());
 
         using var proc = new Process { StartInfo = psi };
         using var registration = ct.Register(() => Kill(proc));
@@ -86,7 +88,9 @@ public sealed class PythonEngine
     }
 
     public async Task RunDownloadAsync(string pageUrl, string formatId, string title, string dir,
-                                       Action<DownloadProgress> report, CancellationToken ct)
+                                       Action<DownloadProgress> report, CancellationToken ct,
+                                        int speedLimitKbps = 0, string nameTemplate = "",
+                                        string mediaId = "", string uploader = "", string source = "")
     {
         Directory.CreateDirectory(dir);
         var psi = CreatePsi();
@@ -96,6 +100,11 @@ public sealed class PythonEngine
         psi.ArgumentList.Add(formatId);
         psi.ArgumentList.Add(title);
         psi.ArgumentList.Add(dir);
+        psi.ArgumentList.Add(speedLimitKbps.ToString());
+        psi.ArgumentList.Add(nameTemplate);
+        psi.ArgumentList.Add(mediaId);
+        psi.ArgumentList.Add(uploader);
+        psi.ArgumentList.Add(source);
 
         using var proc = new Process { StartInfo = psi };
         using var registration = ct.Register(() => Kill(proc));
@@ -114,7 +123,8 @@ public sealed class PythonEngine
                     report(new DownloadProgress(
                         Json.Str(root, "status"), Json.Num(root, "progress"), Json.Str(root, "speed"),
                         Json.Str(root, "error"), Json.Str(root, "filename"),
-                        (long)Json.Num(root, "total"), (long)Json.Num(root, "downloaded")));
+                        (long)Json.Num(root, "total"), (long)Json.Num(root, "downloaded"),
+                        Json.Str(root, "taskId")));
                 }
                 catch { }
             }
@@ -129,6 +139,43 @@ public sealed class PythonEngine
             Kill(proc);
             throw;
         }
+    }
+
+    /// <summary>读取当前站点规则链（内置 + 用户 vsp_rules.json）。</summary>
+    public async Task<string> DescribeRulesAsync(string dir)
+    {
+        Directory.CreateDirectory(dir);
+        var psi = CreatePsi();
+        psi.ArgumentList.Add(ScriptPath);
+        psi.ArgumentList.Add("rules");
+        psi.ArgumentList.Add(dir);
+        using var proc = new Process { StartInfo = psi };
+        try
+        {
+            proc.Start();
+            var text = await proc.StandardOutput.ReadToEndAsync();
+            await proc.WaitForExitAsync();
+            return text.Trim();
+        }
+        catch { return "[]"; }
+    }
+
+    /// <summary>通过控制文件指挥正在运行的下载进程：pause / resume / cancel / speed。</summary>
+    public async Task ControlAsync(string action, string value, string dir)
+    {
+        Directory.CreateDirectory(dir);
+        var psi = CreatePsi();
+        psi.ArgumentList.Add(ScriptPath);
+        psi.ArgumentList.Add(action);
+        psi.ArgumentList.Add(value);
+        psi.ArgumentList.Add(dir);
+        using var proc = new Process { StartInfo = psi };
+        try
+        {
+            proc.Start();
+            await proc.WaitForExitAsync();
+        }
+        catch { /* 控制命令失败只影响一次操作，不影响主下载进程 */ }
     }
 
     private static void Kill(Process proc)

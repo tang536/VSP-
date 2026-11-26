@@ -99,9 +99,12 @@ public sealed class TaskItemViewModel : IDisposable
     public double Progress => Task.Progress;
     public string ProgressText => $"{Task.Progress:0.0}% · {Task.SizeText}";
     public bool IsRunning => Task.Status == "running";
+    public bool IsPaused => Task.Status == "paused";
     public bool IsDone => Task.Status == "done";
     public bool HasError => !string.IsNullOrEmpty(Task.Error) || Task.Status == "error";
     public bool HasSpeed => !string.IsNullOrWhiteSpace(Task.Speed);
+    public ICommand PauseCommand { get; }
+    public ICommand ResumeCommand { get; }
     public ICommand CancelCommand { get; }
     public ICommand RetryCommand { get; }
     public ICommand RemoveCommand { get; }
@@ -112,6 +115,8 @@ public sealed class TaskItemViewModel : IDisposable
         _owner = owner;
         Task = task;
         task.PropertyChanged += OnTaskChanged;
+        PauseCommand = new RelayCommand(() => owner.PauseTask(task));
+        ResumeCommand = new RelayCommand(() => owner.ResumeTask(task));
         CancelCommand = new RelayCommand(() => owner.CancelTask(task));
         RetryCommand = new RelayCommand(() => owner.RetryTask(task));
         RemoveCommand = new RelayCommand(() => owner.RemoveTask(task));
@@ -123,8 +128,8 @@ public sealed class TaskItemViewModel : IDisposable
         if (e.PropertyName is null) return;
         if (e.PropertyName is nameof(DownloadTaskInfo.Status) or nameof(DownloadTaskInfo.Error))
         {
-            foreach (var name in new[] { nameof(StatusText), nameof(IsRunning), nameof(IsDone),
-                                         nameof(HasError), nameof(Error) })
+            foreach (var name in new[] { nameof(StatusText), nameof(IsRunning), nameof(IsPaused),
+                                         nameof(IsDone), nameof(HasError), nameof(Error) })
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
         }
         if (e.PropertyName is nameof(DownloadTaskInfo.Progress) or nameof(DownloadTaskInfo.DownloadedBytes)
@@ -224,6 +229,36 @@ public sealed class MainViewModel : BindableBase
     public string FormatCountText => $"共 {CurrentFormats.Count} 项";
 
     public string DownloadDir { get => _services.Settings.DownloadDir; set => _services.Settings.DownloadDir = value; }
+
+    public int MaxConcurrentDownloads
+    {
+        get => _services.Settings.MaxConcurrentDownloads;
+        set { _services.Settings.MaxConcurrentDownloads = value; Raise(nameof(MaxConcurrentDownloads)); }
+    }
+    public int SpeedLimitKbps
+    {
+        get => _services.Settings.SpeedLimitKbps;
+        set { _services.Settings.SpeedLimitKbps = value; Raise(nameof(SpeedLimitKbps)); }
+    }
+    public string NameTemplate
+    {
+        get => _services.Settings.NameTemplate;
+        set { _services.Settings.NameTemplate = value; Raise(nameof(NameTemplate)); }
+    }
+    public bool ClassifyAfterDownload
+    {
+        get => _services.Settings.ClassifyAfterDownload;
+        set
+        {
+            _services.Settings.ClassifyAfterDownload = value;
+            Raise(nameof(ClassifyAfterDownload));
+        }
+    }
+    public int ParseTtlSeconds
+    {
+        get => _services.Settings.ParseTtlSeconds;
+        set { _services.Settings.ParseTtlSeconds = value; Raise(nameof(ParseTtlSeconds)); }
+    }
     public string EngineStatus => _services.Engine.IsReady
         ? "解析引擎已就绪（内嵌 Python 3.13 + yt-dlp，与 App / Web 同源）"
         : "解析引擎缺失：请重新安装本程序";
@@ -294,6 +329,9 @@ public sealed class MainViewModel : BindableBase
     public ICommand PickFolderCommand { get; }
     public ICommand ApplyDownloadDirCommand { get; }
     public ICommand ToggleThemeCommand { get; }
+    public ICommand ToggleClassifyCommand { get; }
+    public ICommand ScanDuplicatesCommand { get; }
+    public ICommand ShowRulesCommand { get; }
     public ICommand CheckUpdateCommand { get; }
     public ICommand DownloadUpdateCommand { get; }
     public ICommand OpenReleaseCommand { get; }
@@ -333,14 +371,10 @@ public sealed class MainViewModel : BindableBase
     public ICommand LanKeyCommand { get; }
     public ICommand OpenLanDevicesCommand { get; }
     public ICommand LanConnectCommand { get; }
-    public ICommand LanAddManualCommand { get; }
     public ICommand LanAcceptPairCommand { get; }
     public ICommand LanRejectPairCommand { get; }
     public ICommand LanDisconnectCommand { get; }
     private CancellationTokenSource? _lanConnectCts;
-    /// <summary>手动输入 IP 的文本框内容（设备弹窗绑定）。</summary>
-    public string LanManualIp { get => _lanManualIp; set => Set(ref _lanManualIp, value); }
-    private string _lanManualIp = "";
     /// <summary>收到的连接申请（弹窗显示）。</summary>
     public LanPairRequest? IncomingPair { get => _incomingPair; private set => Set(ref _incomingPair, value); }
     private LanPairRequest? _incomingPair;
@@ -390,6 +424,9 @@ public sealed class MainViewModel : BindableBase
         PickFolderCommand = new RelayCommand(() => _ = PickFolderAsync());
         ApplyDownloadDirCommand = new RelayCommand(() => { Directory.CreateDirectory(DownloadDir); RefreshLocal(); Status = "下载目录已更新"; });
         ToggleThemeCommand = new RelayCommand(ToggleTheme);
+        ToggleClassifyCommand = new RelayCommand(() => ClassifyAfterDownload = !ClassifyAfterDownload);
+        ScanDuplicatesCommand = new RelayCommand(() => _ = ScanDuplicatesAsync());
+        ShowRulesCommand = new RelayCommand(() => _ = ShowRulesAsync());
         CheckUpdateCommand = new RelayCommand(() => _ = CheckUpdateAsync());
         DownloadUpdateCommand = new RelayCommand(() => _ = DownloadUpdateAsync());
         OpenReleaseCommand = new RelayCommand(() => LocalLibrary.OpenUrl(UpdateService.PageUrl));
@@ -410,7 +447,6 @@ public sealed class MainViewModel : BindableBase
         LanKeyCommand = new RelayCommand(p => _ = LanSendKeyAsync(p?.ToString() ?? ""));
         OpenLanDevicesCommand = new RelayCommand(() => RequestOpenLanDevices?.Invoke());
         LanConnectCommand = new RelayCommand(p => { if (p is LanDevice d) _ = LanConnectAsync(d); });
-        LanAddManualCommand = new RelayCommand(() => _ = LanAddManualAsync());
         LanAcceptPairCommand = new RelayCommand(() => DecideIncomingPair(true));
         LanRejectPairCommand = new RelayCommand(() => DecideIncomingPair(false));
         LanDisconnectCommand = new RelayCommand(DisconnectLan);
@@ -464,7 +500,8 @@ public sealed class MainViewModel : BindableBase
         Status = "正在解析…";
         try
         {
-            var json = await _services.Engine.ParseAsync(Url.Trim(), CancellationToken.None);
+            var json = await _services.Engine.ParseAsync(Url.Trim(), CancellationToken.None,
+                _services.Settings.ParseTtlSeconds);
             var result = ParseResult.Parse(json);
             if (result.IsEmpty)
             {
@@ -537,7 +574,8 @@ public sealed class MainViewModel : BindableBase
     {
         var title = MediaUtil.SafeFileName(string.IsNullOrWhiteSpace(_result?.Title) ? format.FormatId : _result.Title);
         var req = new DownloadRequest(_result?.WebpageUrl ?? Url, format.FormatId, format.Url, title,
-                                      format.IsImage ? "image" : "video", DownloadDir);
+                                      format.IsImage ? "image" : "video", DownloadDir,
+                                      _result?.Id ?? "", _result?.Uploader ?? "", _result?.Source ?? "");
         if (_services.Downloads.Tasks.Any(t =>
                 (t.Status == "running" || t.Status == "paused")
                 && string.Equals(t.Url, req.Url, StringComparison.OrdinalIgnoreCase)
@@ -654,6 +692,37 @@ public sealed class MainViewModel : BindableBase
         HistoryItemPicked?.Invoke();
     }
 
+    /// <summary>系统整合入口：命令行 / 拖放 / 右键菜单传进来的 URL 或本地文件。</summary>
+    public void HandleCommandLine(string[] args)
+    {
+        foreach (var arg in args)
+        {
+            var value = arg.Trim().Trim('"');
+            if (string.IsNullOrWhiteSpace(value)) continue;
+
+            if (Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
+                (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
+            {
+                UseRecent(value);
+                return;
+            }
+
+            if (File.Exists(value))
+            {
+                var info = new FileInfo(value);
+                _ = PreviewLocalAsync(new LocalMedia
+                {
+                    Path = value,
+                    Length = info.Length,
+                    Modified = info.LastWriteTime,
+                });
+                return;
+            }
+        }
+    }
+
+    public void PauseTask(DownloadTaskInfo task) => _services.Downloads.Pause(task.TaskId);
+    public void ResumeTask(DownloadTaskInfo task) => _services.Downloads.Resume(task.TaskId);
     public void CancelTask(DownloadTaskInfo task) => _services.Downloads.Cancel(task.TaskId);
     public void RetryTask(DownloadTaskInfo task) => _services.Downloads.Retry(task.TaskId);
     public void RemoveTask(DownloadTaskInfo task) => _services.Downloads.Remove(task.TaskId);
@@ -714,6 +783,32 @@ public sealed class MainViewModel : BindableBase
     }
 
     private void ToggleTheme() => IsDarkTheme = !IsDarkTheme;
+
+    private async Task ShowRulesAsync()
+    {
+        Status = "正在读取站点规则…";
+        var json = await _services.Engine.DescribeRulesAsync(DownloadDir);
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var names = doc.RootElement.EnumerateArray()
+                .Select(r => r.GetProperty("name").GetString())
+                .Where(n => !string.IsNullOrEmpty(n))
+                .ToArray();
+            Status = "站点规则：" + string.Join(" / ", names);
+        }
+        catch { Status = "站点规则读取失败"; }
+    }
+
+    private async Task ScanDuplicatesAsync()
+    {
+        Status = "正在扫描重复文件…";
+        var groups = await _services.Metadata.ScanDuplicatesAsync(DownloadDir);
+        var files = groups.Sum(g => g.Paths.Count);
+        Status = groups.Count == 0
+            ? "未发现重复文件"
+            : $"发现 {groups.Count} 组重复文件，共 {files} 个文件（每组保留一份即可）";
+    }
 
     private async Task CheckUpdateAsync()
     {
@@ -867,16 +962,6 @@ public sealed class MainViewModel : BindableBase
             SelectedLanDevice = null;
             LanStatus = "已断开连接";
         }
-    }
-
-    /// <summary>手动按 IP 添加设备（广播发现不可用时兜底）。</summary>
-    private async Task LanAddManualAsync()
-    {
-        if (_lan is null || string.IsNullOrWhiteSpace(LanManualIp)) return;
-        LanStatus = "正在连接 " + LanManualIp + "…";
-        var (ok, msg) = await _lan.AddManualDeviceAsync(LanManualIp);
-        LanStatus = msg;
-        if (ok) LanManualIp = "";
     }
 
     private void DecideIncomingPair(bool accept)

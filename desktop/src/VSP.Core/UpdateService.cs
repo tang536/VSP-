@@ -13,7 +13,18 @@ public sealed record UpdateInfo(string Version, string DownloadUrl, string PageU
 /// </summary>
 public sealed class UpdateService
 {
-    public const string Version = "1.2.3";
+    /// <summary>当前桌面版本，来自仓库根目录 version.json（嵌入资源）。</summary>
+    public static string Version { get; } = LoadVersion();
+
+    private static string LoadVersion()
+    {
+        using var stream = typeof(UpdateService).Assembly.GetManifestResourceStream("VSP.Version.json")
+            ?? throw new InvalidOperationException("version.json 未嵌入程序集，无法读取桌面版本");
+        using var doc = JsonDocument.Parse(stream);
+        return doc.RootElement.GetProperty("desktop").GetProperty("version").GetString()
+            ?? throw new InvalidOperationException("version.json 缺少 desktop.version");
+    }
+
     private const string GithubApi = "https://api.github.com/repos/tang536/VSP-/releases/latest";
     private const string GiteeApi = "https://gitee.com/api/v5/repos/tang-rongqiang/VSP/releases/latest";
     private const string DesktopIndex = "https://gitee.com/tang-rongqiang/VSP/raw/main/desktop/dist/latest.json";

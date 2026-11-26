@@ -27,7 +27,8 @@
         <!-- 媒体区：纯黑底。VideoView 是原生子窗口，Avalonia 控件叠不上去，
              所以视频控制条放在下面单独一行；音频没有原生窗口，控制条直接叠在画面底部。 -->
         <Grid Grid.Row="1" x:Name="MediaRoot" Background="#000000" ClipToBounds="True"
-              PointerMoved="OnMediaPointerMoved" PointerPressed="OnMediaPointerPressed">
+              PointerMoved="OnMediaPointerMoved" PointerPressed="OnMediaPointerPressed"
+              PointerWheelChanged="OnMediaPointerWheel" DoubleTapped="OnMediaDoubleTapped">
             <Image Source="{Binding ImagePath}" Stretch="Uniform" IsVisible="{Binding IsImage}" />
             <vlc:VideoView x:Name="VideoView" IsVisible="{Binding IsVideo}" />
 

@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 using Avalonia.Media;
+using Avalonia.Platform;
 using Avalonia.Styling;
 using LibVLCSharp.Shared;
 using VSP.Core;
@@ -12,6 +13,8 @@ namespace VSP.Desktop;
 public partial class App : Application
 {
     public static AppServices Services { get; private set; } = null!;
+    private static TrayIcon? _tray;
+    private static bool _exitRequested;
 
     public override void Initialize() => AvaloniaXamlLoader.Load(this);
 
@@ -55,6 +58,7 @@ public partial class App : Application
             }
             else
             {
+                SetupTray(desktop, window);
                 // 冷启动进场动画：先显示 Splash，播完后再显示主窗口。
                 var splash = new SplashWindow();
                 splash.Show();
@@ -62,6 +66,58 @@ public partial class App : Application
             }
         }
         base.OnFrameworkInitializationCompleted();
+    }
+
+    /// <summary>
+    /// 点关闭只把窗口收进托盘：后台下载 / 局域网服务继续运行，托盘菜单可以重新打开或退出。
+    /// </summary>
+    private static void SetupTray(IClassicDesktopStyleApplicationLifetime desktop, MainWindow window)
+    {
+        window.Closing += (_, e) =>
+        {
+            if (_exitRequested) return;
+            e.Cancel = true;
+            window.Hide();
+        };
+
+        var menu = new NativeMenu();
+        var open = new NativeMenuItem("打开主界面");
+        open.Click += (_, _) =>
+        {
+            window.Show();
+            if (window.WindowState == WindowState.Minimized) window.WindowState = WindowState.Normal;
+            window.Activate();
+            window.Focus();
+        };
+        var exit = new NativeMenuItem("退出");
+        exit.Click += (_, _) =>
+        {
+            _exitRequested = true;
+            desktop.Shutdown();
+        };
+        menu.Add(open);
+        menu.Add(new NativeMenuItemSeparator());
+        menu.Add(exit);
+
+        var tray = new TrayIcon
+        {
+            Menu = menu,
+            ToolTipText = "全能工具箱",
+            IsVisible = true,
+        };
+        try
+        {
+            using var stream = AssetLoader.Open(new Uri("avares://VSP.Desktop/Assets/app.png"));
+            tray.Icon = new WindowIcon(stream);
+        }
+        catch { /* 图标加载失败也能用菜单操作 */ }
+
+        _tray = tray;
+        desktop.Exit += (_, _) =>
+        {
+            _tray = null;
+            tray.Dispose();
+        };
     }
 
     private static async System.Threading.Tasks.Task ShowMainWindowAsync(

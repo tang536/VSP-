@@ -8,6 +8,8 @@ WiX 5 tool installed at desktop/tools/wix.exe (see README in this folder).
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 import uuid
 import xml.etree.ElementTree as ET
@@ -15,11 +17,17 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 DESKTOP = HERE.parent
+ROOT = DESKTOP.parent
 PUBLISH = DESKTOP / "publish" / "win-x64"
 WIX = DESKTOP / "tools" / "wix.exe"
 OUT = DESKTOP / "dist"
 WXS = HERE / "VSPDesktop.wxs"
-VERSION = "1.2.3.0"
+
+# 版本号单一来源：仓库根目录 version.json
+VERSIONS = json.loads((ROOT / "version.json").read_text(encoding="utf-8"))
+DESKTOP_VERSION = VERSIONS["desktop"]["version"]
+VERSION = DESKTOP_VERSION + ".0"
+DESKTOP_TAG = VERSIONS["tagPrefix"]["desktop"] + DESKTOP_VERSION
 UPGRADE_CODE = "A0A1D4B2-7D6C-4B8E-9F35-1234567890AB"
 NS = "http://wixtoolset.org/schemas/v4/wxs"
 UI_NS = "http://wixtoolset.org/schemas/v4/wxs/ui"
@@ -134,6 +142,30 @@ def build_wxs(files: list[Path]) -> None:
     install = ET.SubElement(pf, q("Directory"), {"Id": "INSTALLFOLDER", "Name": "VSP解析"})
     component_ids = add_tree(install, files)
 
+    # 右键菜单 / 文件关联：HKCU 不需要管理员权限，命令行转交由 Program.ConsumeHandoff 处理。
+    assoc = ET.SubElement(install, q("Component"), {
+        "Id": "FileAssoc", "Guid": guid_for("file-assoc"),
+    })
+    prog = ET.SubElement(assoc, q("RegistryKey"), {
+        "Root": "HKCU", "Key": r"Software\Classes\VSP.Media",
+    })
+    ET.SubElement(prog, q("RegistryValue"), {
+        "Type": "string", "Value": "VSP 媒体文件", "KeyPath": "yes",
+    })
+    shell = ET.SubElement(prog, q("RegistryKey"), {"Key": r"shell\open\command"})
+    ET.SubElement(shell, q("RegistryValue"), {
+        "Type": "string",
+        "Value": '"[INSTALLFOLDER]VSP.Desktop.exe" "%1"',
+    })
+    for ext in (".mp4", ".mkv", ".webm", ".flv", ".avi", ".mov", ".mp3", ".m4a",
+                ".flac", ".wav", ".jpg", ".jpeg", ".png", ".webp", ".gif"):
+        key = ET.SubElement(assoc, q("RegistryKey"), {
+            "Root": "HKCU", "Key": rf"Software\Classes\{ext}",
+        })
+        ET.SubElement(key, q("RegistryValue"), {
+            "Type": "string", "Value": "VSP.Media",
+        })
+
     shortcuts = ET.SubElement(install, q("Component"), {
         "Id": "Shortcuts", "Guid": guid_for("shortcuts"),
     })
@@ -156,15 +188,45 @@ def build_wxs(files: list[Path]) -> None:
     for cid in component_ids:
         ET.SubElement(group, q("ComponentRef"), {"Id": cid})
     ET.SubElement(group, q("ComponentRef"), {"Id": "Shortcuts"})
+    ET.SubElement(group, q("ComponentRef"), {"Id": "FileAssoc"})
 
     ET.indent(wix, space="  ")
     WXS.write_text('<?xml version="1.0" encoding="utf-8"?>\n' +
                    ET.tostring(wix, encoding="unicode"), encoding="utf-8")
 
 
+def sha256_of(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_latest_json(msi: Path) -> None:
+    """让更新索引始终与本次打包的 MSI 一致，避免手改版本/哈希漏项。"""
+    data = {
+        "platform": "desktop",
+        "version": DESKTOP_VERSION,
+        "msi": f"dist/{msi.name}",
+        "size": msi.stat().st_size,
+        "sha256": sha256_of(msi),
+        "mirrors": [
+            f"https://gitee.com/tang-rongqiang/VSP/releases/download/{DESKTOP_TAG}/{msi.name}",
+            f"https://github.com/tang536/VSP-/releases/download/{DESKTOP_TAG}/{msi.name}",
+        ],
+        "page": f"https://gitee.com/tang-rongqiang/VSP/releases/tag/{DESKTOP_TAG}",
+    }
+    index = OUT / "latest.json"
+    index.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(f"[installer] updated {index} (sha256 {data['sha256']})")
+
+
 def main() -> None:
     if not PUBLISH.exists() or not (PUBLISH / "VSP.Desktop.exe").exists():
         raise SystemExit(f"missing publish output: {PUBLISH}")
+    if not (PUBLISH / "runtime" / "python" / "python.exe").exists():
+        raise SystemExit(f"missing embedded python runtime in {PUBLISH}; run desktop/build.cmd first")
     if not WIX.exists():
         raise SystemExit(f"missing WiX tool: {WIX}")
     files = collect_files()
@@ -177,6 +239,7 @@ def main() -> None:
     print("[installer] " + " ".join(cmd))
     subprocess.run(cmd, check=True)
     print(f"[installer] {msi}  {msi.stat().st_size / 1024 / 1024:.1f} MB")
+    write_latest_json(msi)
 
 
 if __name__ == "__main__":

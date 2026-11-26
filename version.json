@@ -1,0 +1,13 @@
+{
+  "desktop": {
+    "version": "1.2.4"
+  },
+  "android": {
+    "version": "1.4.2",
+    "versionCode": 11402
+  },
+  "tagPrefix": {
+    "desktop": "desktop-v",
+    "android": "v"
+  }
+}

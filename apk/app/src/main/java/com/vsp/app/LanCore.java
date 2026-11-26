@@ -28,8 +28,13 @@ import java.net.Socket;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
@@ -103,6 +108,8 @@ public final class LanCore {
     private final java.util.Set<String> localIps = new java.util.HashSet<>();
     private final Map<String, PairRequest> pairRequests = new ConcurrentHashMap<>();
     private final Map<String, Boolean> pairAnswers = new ConcurrentHashMap<>();
+    private final Map<String, String> sessionKeys = new ConcurrentHashMap<>();
+    private final Map<String, Long> seenNonces = new ConcurrentHashMap<>();
     private final Object connLock = new Object();
     private volatile String connectedPeerId;
     private volatile Device connectedPeer;
@@ -112,6 +119,76 @@ public final class LanCore {
     private DatagramSocket udp;
     private ServerSocket http;
     private String localIp = "";
+
+    // ---------------- 请求签名（配对后使用会话密钥，配对前用 TOKEN） ----------------
+
+    private static String hex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : bytes) sb.append(String.format("%02x", b & 0xff));
+        return sb.toString();
+    }
+
+    private static String sha256Hex(byte[] bytes) {
+        try { return hex(MessageDigest.getInstance("SHA-256").digest(bytes)); }
+        catch (Throwable t) { return ""; }
+    }
+
+    private static String canonicalFromMap(Map<String, String> qs) {
+        java.util.List<String> keys = new ArrayList<>(qs.keySet());
+        Collections.sort(keys);
+        StringBuilder sb = new StringBuilder();
+        for (String k : keys) {
+            if ("k".equalsIgnoreCase(k) || "s".equalsIgnoreCase(k)) continue;
+            if (sb.length() > 0) sb.append('&');
+            sb.append(k).append('=').append(nullToEmpty(qs.get(k)));
+        }
+        return sb.toString();
+    }
+
+    private String canonical(Uri uri) {
+        Map<String, String> qs = new HashMap<>();
+        for (String p : uri.getQueryParameterNames()) qs.put(p, nullToEmpty(uri.getQueryParameter(p)));
+        return canonicalFromMap(qs);
+    }
+
+    private String sign(String peerId, String method, String path, String canonical, byte[] body,
+                        String keyOverride) {
+        String key = keyOverride != null ? keyOverride
+                : (sessionKeys.containsKey(peerId) ? sessionKeys.get(peerId) : TOKEN);
+        String data = method + "\n" + path + "\n" + canonical + "\n" + sha256Hex(body == null ? new byte[0] : body);
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(key.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+            return hex(mac.doFinal(data.getBytes(StandardCharsets.UTF_8)));
+        } catch (Throwable t) { return ""; }
+    }
+
+    private boolean verify(Uri uri, String method, String path, byte[] body) {
+        if (!"2".equals(nullToEmpty(uri.getQueryParameter("v")))) return true; // 兼容旧版
+        String sig = uri.getQueryParameter("s"), nonce = uri.getQueryParameter("n");
+        if (sig == null || nonce == null) return false;
+        long now = System.currentTimeMillis();
+        for (Map.Entry<String, Long> e : new ArrayList<>(seenNonces.entrySet()))
+            if (now - e.getValue() > 5 * 60 * 1000) seenNonces.remove(e.getKey());
+        if (seenNonces.putIfAbsent(nonce, now) != null) return false;
+        String peer = nullToEmpty(uri.getQueryParameter("id"));
+        String p = nullToEmpty(path);
+        boolean pairing = "/pair".equals(p) || "/pair-result".equals(p) || "/unpair".equals(p);
+        return sign(peer, method, path, canonical(uri), body, pairing ? TOKEN : null).equalsIgnoreCase(sig);
+    }
+
+    private String signedUrl(Device d, String path, Map<String, String> params, String method, byte[] body) {
+        Map<String, String> all = params == null ? new HashMap<>() : new HashMap<>(params);
+        all.put("id", deviceId);
+        all.put("n", java.util.UUID.randomUUID().toString().replace("-", ""));
+        all.put("v", "2");
+        String p = nullToEmpty(path);
+        boolean pairing = "/pair".equals(p) || "/pair-result".equals(p) || "/unpair".equals(p);
+        all.put("s", sign(d.id, method, path, canonicalFromMap(all), body, pairing ? TOKEN : null));
+        Uri.Builder b = Uri.parse(base(d) + path).buildUpon().appendQueryParameter("k", TOKEN);
+        for (Map.Entry<String, String> e : all.entrySet()) b.appendQueryParameter(e.getKey(), e.getValue());
+        return b.toString();
+    }
 
     // 被控：屏幕捕获由 LanScreenService（mediaProjection 前台服务）承载，
     // 这里只通过静态方法取帧，不再直接持有 MediaProjection。
@@ -324,12 +401,17 @@ public final class LanCore {
             if (!TOKEN.equals(k)) { respond(out, 403, "text/plain", "forbidden".getBytes()); s.close(); return; }
 
             int len = 0;
+            String range = null;
             String line;
             while ((line = readLine(in)) != null && !line.isEmpty()) {
-                if (line.toLowerCase(Locale.ROOT).startsWith("content-length:")) {
-                    try {
-                        len = Integer.parseInt(line.substring(line.indexOf(':') + 1).trim());
-                    } catch (Throwable ignored) { }
+                int colon = line.indexOf(':');
+                if (colon <= 0) continue;
+                String key = line.substring(0, colon).trim().toLowerCase(Locale.ROOT);
+                String val = line.substring(colon + 1).trim();
+                if ("content-length".equals(key)) {
+                    try { len = Integer.parseInt(val); } catch (Throwable ignored) { }
+                } else if ("range".equals(key)) {
+                    range = val;
                 }
             }
             if (len < 0 || len > 64 * 1024 * 1024) {
@@ -347,6 +429,11 @@ public final class LanCore {
                 if (off < len) { respond(out, 400, "text/plain", "bad request".getBytes()); return; }
             }
 
+            if (!verify(uri, method, nullToEmpty(uri.getPath()), body)) {
+                respond(out, 403, "text/plain", "bad signature".getBytes());
+                return;
+            }
+
             String path = uri.getPath();
             if ("/hello".equals(path)) {
                 respond(out, 200, "text/plain; charset=utf-8", (deviceName + "|android").getBytes(StandardCharsets.UTF_8));
@@ -354,9 +441,10 @@ public final class LanCore {
                 String dir = decode(uri.getQueryParameter("dir"));
                 respond(out, 200, "application/json; charset=utf-8", listFiles(dir).toString().getBytes(StandardCharsets.UTF_8));
             } else if ("/dl".equals(path)) {
-                serveDownload(out, decode(uri.getQueryParameter("path")));
+                serveDownload(out, decode(uri.getQueryParameter("path")), range);
             } else if ("/ul".equals(path)) {
-                receiveUpload(decode(uri.getQueryParameter("name")), body);
+                long off = parseInt(uri.getQueryParameter("off"), 0);
+                receiveUpload(decode(uri.getQueryParameter("name")), body, off);
                 respond(out, 200, "text/plain", "ok".getBytes());
             } else if ("/screen".equals(path)) {
                 byte[] shot = captureScreen();
@@ -373,7 +461,7 @@ public final class LanCore {
                     } else if (pairRequests.containsKey(rid) || pairAnswers.containsKey(rid)) {
                         respond(out, 200, "text/plain", "wait".getBytes());
                     } else {
-                        PairRequest req = new PairRequest(rid, nullToEmpty(uri.getQueryParameter("n")),
+                        PairRequest req = new PairRequest(rid, nullToEmpty(uri.getQueryParameter("dn")),
                                 nullToEmpty(uri.getQueryParameter("t")), rip,
                                 parseInt(uri.getQueryParameter("p"), HTTP_PORT));
                         pairRequests.put(rid, req);
@@ -389,6 +477,7 @@ public final class LanCore {
                 String rid = nullToEmpty(uri.getQueryParameter("id"));
                 Boolean ans = pairAnswers.get(rid);
                 String result = isConnectedTo(rid) ? "ok" : (ans == null ? "wait" : (ans ? "ok" : "no"));
+                if ("ok".equals(result) && sessionKeys.containsKey(rid)) result += ":" + sessionKeys.get(rid);
                 respond(out, 200, "text/plain", result.getBytes(StandardCharsets.UTF_8));
                 if (!"wait".equals(result) && !isConnectedTo(rid)) {
                     pairAnswers.remove(rid); pairRequests.remove(rid);
@@ -437,13 +526,31 @@ public final class LanCore {
         return arr;
     }
 
-    private void serveDownload(OutputStream out, String rel) throws java.io.IOException {
-        // 按块流式写出，不读完整个文件再申请内存，几百 MB 的大文件传输安全。
+    private void serveDownload(OutputStream out, String rel, String range) throws java.io.IOException {
+        // 按块流式写出，支持 Range 断点续传。
         File f = serveFile(rel);
         long len = f.length();
+        long start = 0;
+        if (range != null && range.toLowerCase(Locale.ROOT).startsWith("bytes=")) {
+            String part = range.substring(6).split("-")[0].trim();
+            long parsed = parseInt(part, 0);
+            if (parsed > 0 && parsed < len) start = parsed;
+        }
         try (InputStream in = java.nio.file.Files.newInputStream(f.toPath())) {
-            out.write(("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: "
-                    + len + "\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.ISO_8859_1));
+            if (start > 0) {
+                long skipped = 0;
+                while (skipped < start) {
+                    long s = in.skip(start - skipped);
+                    if (s <= 0) break;
+                    skipped += s;
+                }
+            }
+            long remain = len - start;
+            String head = "HTTP/1.1 " + (start > 0 ? "206 Partial Content" : "200 OK")
+                    + "\r\nContent-Type: application/octet-stream\r\nContent-Length: " + remain
+                    + (start > 0 ? "\r\nContent-Range: bytes " + start + "-" + (len - 1) + "/" + len : "")
+                    + "\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n";
+            out.write(head.getBytes(StandardCharsets.ISO_8859_1));
             byte[] buf = new byte[16384];
             int n;
             while ((n = in.read(buf)) >= 0) out.write(buf, 0, n);
@@ -461,11 +568,12 @@ public final class LanCore {
         return f;
     }
 
-    private void receiveUpload(String name, byte[] body) {
+    private void receiveUpload(String name, byte[] body, long offset) {
         try {
             if (name == null || name.isEmpty()) return;
             File f = new File(shareDir, new File(name).getName());
-            try (FileOutputStream fos = new FileOutputStream(f)) { fos.write(body); }
+            boolean append = offset > 0 && f.exists();
+            try (FileOutputStream fos = new FileOutputStream(f, append)) { fos.write(body); }
             main.post(() -> status("已接收：" + f.getName()));
         } catch (Throwable ignored) { }
     }
@@ -546,18 +654,22 @@ public final class LanCore {
     public boolean requestPair(Device d) {
         try {
             String myIp = nullToEmpty(localIp).isEmpty() ? findPrivateIp() : localIp;
-            String url = base(d) + "/pair?k=" + TOKEN + "&id=" + urlEnc(deviceId)
-                    + "&n=" + urlEnc(deviceName) + "&t=android&p=" + HTTP_PORT + "&ip=" + urlEnc(myIp);
-            return "ok".equals(nullToEmpty(httpGetRaw(url)).trim());
+            Map<String, String> p = new HashMap<>();
+            p.put("dn", deviceName); p.put("t", "android");
+            p.put("p", String.valueOf(HTTP_PORT)); p.put("ip", myIp);
+            String r = nullToEmpty(httpGetRaw(signedUrl(d, "/pair", p, "GET", null))).trim();
+            if (r.startsWith("ok:")) sessionKeys.put(d.id, r.substring(3).trim());
+            return r.equals("ok") || r.startsWith("ok:");
         } catch (Throwable t) { return false; }
     }
 
     /** 轮询对方是否已同意我的申请：wait / ok / no。拿到 ok 即两端同时连接。 */
     public String pollPair(Device d) {
         try {
-            String r = nullToEmpty(httpGet(d, "/pair-result?k=" + TOKEN + "&id=" + urlEnc(deviceId))).trim();
-            if ("ok".equals(r) && !isConnectedTo(d.id)) setConnected(d);
-            return r;
+            String r = nullToEmpty(httpGetRaw(signedUrl(d, "/pair-result", null, "GET", null))).trim();
+            if (r.startsWith("ok:")) sessionKeys.put(d.id, r.substring(3).trim());
+            if ((r.equals("ok") || r.startsWith("ok:")) && !isConnectedTo(d.id)) setConnected(d);
+            return r.startsWith("ok:") ? "ok" : r;
         } catch (Throwable t) { return "wait"; }
     }
 
@@ -568,6 +680,7 @@ public final class LanCore {
         pairRequests.remove(reqId);
         pairAnswers.put(reqId, accept);
         if (accept) {
+            sessionKeys.put(reqId, java.util.UUID.randomUUID().toString().replace("-", ""));
             Device d = new Device(req.id, req.name.isEmpty() ? req.ip : req.name, req.kind, req.ip, req.port);
             devices.put(req.id, d);
             setConnected(d);
@@ -582,7 +695,7 @@ public final class LanCore {
         clearConnected();
         final Device target = d;
         if (target != null) pool.execute(() -> {
-            try { httpGet(target, "/unpair?k=" + TOKEN + "&id=" + urlEnc(deviceId)); }
+            try { httpGetRaw(signedUrl(target, "/unpair", null, "GET", null)); }
             catch (Throwable ignored) { }
         });
     }
@@ -610,8 +723,9 @@ public final class LanCore {
     public List<FileEntry> listRemote(Device d, String dirB64) {
         List<FileEntry> list = new ArrayList<>();
         try {
-            String url = base(d) + "/files?k=" + TOKEN + "&dir=" + urlEnc(nullToEmpty(dirB64));
-            String json = httpGetRaw(url);
+            Map<String, String> p = new HashMap<>();
+            p.put("dir", nullToEmpty(dirB64));
+            String json = httpGetRaw(signedUrl(d, "/files", p, "GET", null));
             JSONArray arr = new JSONArray(json);
             for (int i = 0; i < arr.length(); i++) {
                 JSONObject o = arr.getJSONObject(i);
@@ -625,15 +739,20 @@ public final class LanCore {
     public boolean download(Device d, FileEntry e, File local, ProgressListener progress) {
         java.net.HttpURLConnection c = null;
         try {
-            c = (java.net.HttpURLConnection) new java.net.URL(base(d) + "/dl?k=" + TOKEN
-                    + "&path=" + urlEnc(e.path)).openConnection();
+            Map<String, String> p = new HashMap<>();
+            p.put("path", e.path);
+            c = (java.net.HttpURLConnection) new java.net.URL(signedUrl(d, "/dl", p, "GET", null)).openConnection();
             c.setConnectTimeout(15000); c.setReadTimeout(30000);
+            long have = local.exists() ? local.length() : 0;
+            if (have > 0) c.setRequestProperty("Range", "bytes=" + have + "-");
             c.connect();
-            if (c.getResponseCode() != 200) return false;
-            long total = c.getContentLengthLong();
-            try (InputStream in = c.getInputStream(); FileOutputStream fos = new FileOutputStream(local)) {
+            int code = c.getResponseCode();
+            if (code != 200 && code != 206) return false;
+            boolean append = have > 0 && code == 206;
+            long total = c.getContentLengthLong() + (append ? have : 0);
+            try (InputStream in = c.getInputStream(); FileOutputStream fos = new FileOutputStream(local, append)) {
                 byte[] buf = new byte[16384];
-                long read = 0; int n;
+                long read = append ? have : 0; int n;
                 while ((n = in.read(buf)) > 0) {
                     fos.write(buf, 0, n); read += n;
                     if (progress != null && total > 0) progress.onProgress((double) read / total);
@@ -645,27 +764,30 @@ public final class LanCore {
     }
 
     public boolean upload(Device d, File local) {
-        java.net.HttpURLConnection c = null;
         try {
-            c = (java.net.HttpURLConnection) new java.net.URL(base(d) + "/ul?k=" + TOKEN
-                    + "&name=" + urlEnc(encode(local.getName()))).openConnection();
-            c.setRequestMethod("POST"); c.setDoOutput(true);
-            c.setConnectTimeout(15000); c.setReadTimeout(30000);
-            byte[] bytes = readAll(local);
-            c.setFixedLengthStreamingMode(bytes.length);
-            c.connect();
-            try (OutputStream os = c.getOutputStream()) { os.write(bytes); }
-            return c.getResponseCode() == 200;
+            byte[] all = readAll(local);
+            final int chunk = 4 * 1024 * 1024;
+            long off = 0;
+            while (off < all.length) {
+                int n = (int) Math.min(chunk, all.length - off);
+                byte[] piece = new byte[n];
+                System.arraycopy(all, (int) off, piece, 0, n);
+                Map<String, String> p = new HashMap<>();
+                p.put("name", encode(local.getName())); p.put("off", String.valueOf(off));
+                if (!httpPostUrl(signedUrl(d, "/ul", p, "POST", piece), piece)) return false;
+                off += n;
+            }
+            return true;
         } catch (Throwable ignored) { return false; }
-        finally { if (c != null) c.disconnect(); }
     }
 
     public byte[] screen(Device d) {
-        try { return httpGetBytes(base(d) + "/screen?k=" + TOKEN); } catch (Throwable t) { return null; }
+        try { return httpGetBytes(signedUrl(d, "/screen", null, "GET", null)); } catch (Throwable t) { return null; }
     }
 
     public boolean input(Device d, JSONObject payload) {
-        return httpPost(d, "/input?k=" + TOKEN, payload.toString().getBytes(StandardCharsets.UTF_8));
+        byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
+        return httpPostUrl(signedUrl(d, "/input", null, "POST", body), body);
     }
 
     public interface ProgressListener { void onProgress(double p); }
@@ -694,10 +816,10 @@ public final class LanCore {
         finally { if (c != null) c.disconnect(); }
     }
 
-    private boolean httpPost(Device d, String path, byte[] body) {
+    private boolean httpPostUrl(String url, byte[] body) {
         java.net.HttpURLConnection c = null;
         try {
-            c = (java.net.HttpURLConnection) new java.net.URL(base(d) + path).openConnection();
+            c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
             c.setRequestMethod("POST"); c.setDoOutput(true);
             c.setConnectTimeout(8000); c.setReadTimeout(8000);
             c.setFixedLengthStreamingMode(body.length);

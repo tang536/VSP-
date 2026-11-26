@@ -104,6 +104,104 @@
 
                         <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1" />
 
+                        <Border Padding="16,0" MinHeight="50">
+                            <Grid ColumnDefinitions="Auto,*,Auto">
+                                <PathIcon Grid.Column="0" Data="{StaticResource IconQueue}"
+                                          Foreground="{DynamicResource InkDim}" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="并发下载数" Classes="rowLabel" />
+                                <NumericUpDown Grid.Column="2" Width="110" Minimum="1" Maximum="6"
+                                               Increment="1" Value="{Binding MaxConcurrentDownloads, Mode=TwoWay}" />
+                            </Grid>
+                        </Border>
+
+                        <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1" />
+
+                        <Border Padding="16,0" MinHeight="50">
+                            <Grid ColumnDefinitions="Auto,*,Auto">
+                                <PathIcon Grid.Column="0" Data="{StaticResource IconDownload}"
+                                          Foreground="{DynamicResource InkDim}" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="下载限速 (KB/s，0 不限)" Classes="rowLabel" />
+                                <NumericUpDown Grid.Column="2" Width="120" Minimum="0" Maximum="20480"
+                                               Increment="64" Value="{Binding SpeedLimitKbps, Mode=TwoWay}" />
+                            </Grid>
+                        </Border>
+
+                        <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1" />
+
+                        <Border Padding="16,10" MinHeight="50">
+                            <Grid ColumnDefinitions="Auto,*,Auto">
+                                <TextBlock Grid.Column="1" Text="命名模板" Classes="rowLabel" />
+                                <TextBox Grid.Column="2" Width="320" HorizontalAlignment="Right"
+                                         Text="{Binding NameTemplate, Mode=TwoWay}"
+                                         ToolTip.Tip="支持 {title} / {id} / {uploader} / {quality} / {source} / {date} / {ext}" />
+                            </Grid>
+                        </Border>
+
+                        <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1" />
+
+                        <Border Padding="16,0" MinHeight="50">
+                            <Grid ColumnDefinitions="Auto,*,Auto">
+                                <PathIcon Grid.Column="0" Data="{StaticResource IconHistory}"
+                                          Foreground="{DynamicResource InkDim}" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="解析缓存有效期 (秒，0 不缓存)" Classes="rowLabel" />
+                                <NumericUpDown Grid.Column="2" Width="120" Minimum="0" Maximum="86400"
+                                               Increment="60" Value="{Binding ParseTtlSeconds, Mode=TwoWay}" />
+                            </Grid>
+                        </Border>
+
+                        <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1" />
+
+                        <Button Classes="row" Command="{Binding ShowRulesCommand}">
+                            <Grid ColumnDefinitions="Auto,*,Auto">
+                                <PathIcon Grid.Column="0" Data="{StaticResource IconSearch}"
+                                          Foreground="{DynamicResource InkDim}" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="查看站点规则" Classes="rowLabel" />
+                                <TextBlock Grid.Column="2" Text="内置 + vsp_rules.json" Classes="rowValue" />
+                            </Grid>
+                        </Button>
+
+                        <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1" />
+
+                        <Border Padding="16,0" MinHeight="50">
+                            <Grid ColumnDefinitions="Auto,*,Auto">
+                                <PathIcon Grid.Column="0" Data="{StaticResource IconFolder}"
+                                          Foreground="{DynamicResource InkDim}" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="下载后按来源/月份归类并写入元数据" Classes="rowLabel" />
+                                <Button Grid.Column="2" Command="{Binding ToggleClassifyCommand}"
+                                        Background="Transparent" BorderThickness="0" Padding="0"
+                                        VerticalAlignment="Center" Cursor="Hand">
+                                    <Panel>
+                                        <Border Width="40" Height="22" CornerRadius="11"
+                                                Background="{DynamicResource Accent}"
+                                                IsVisible="{Binding ClassifyAfterDownload}">
+                                            <Ellipse Width="16" Height="16" Fill="{DynamicResource OnAccent}"
+                                                     HorizontalAlignment="Right" Margin="0,0,3,0" />
+                                        </Border>
+                                        <Border Width="40" Height="22" CornerRadius="11"
+                                                Background="{DynamicResource Surface2}"
+                                                BorderBrush="{DynamicResource Line}" BorderThickness="1"
+                                                IsVisible="{Binding !ClassifyAfterDownload}">
+                                            <Ellipse Width="14" Height="14" Fill="{DynamicResource InkDim}"
+                                                     HorizontalAlignment="Left" Margin="4,0,0,0" />
+                                        </Border>
+                                    </Panel>
+                                </Button>
+                            </Grid>
+                        </Border>
+
+                        <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1" />
+
+                        <Button Classes="row" Command="{Binding ScanDuplicatesCommand}">
+                            <Grid ColumnDefinitions="Auto,*,Auto">
+                                <PathIcon Grid.Column="0" Data="{StaticResource IconSearch}"
+                                          Foreground="{DynamicResource InkDim}" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="查找重复文件" Classes="rowLabel" />
+                                <TextBlock Grid.Column="2" Text="按大小 + SHA-256" Classes="rowValue" />
+                            </Grid>
+                        </Button>
+
+                        <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1" />
+
                         <Button Classes="row" Command="{Binding ShowStorageCommand}">
                             <Grid ColumnDefinitions="Auto,*,Auto">
                                 <PathIcon Grid.Column="0" Data="{StaticResource IconImage}"
