@@ -1662,7 +1662,13 @@ public class MainActivity extends Activity {
         if (share == null) share = new File(getFilesDir(), "lan-share");
         lan = new LanCore(this, share, android.os.Build.MODEL, new LanCore.Callback() {
             @Override public void onDevicesChanged() { ui.post(() -> renderLanDevices()); }
-            @Override public void onStatus(String text) { ui.post(() -> { if (lanStatusText != null) lanStatusText.setText(text); }); }
+            @Override public void onStatus(String text) { ui.post(() -> {
+                if (lanStatusText != null) lanStatusText.setText(text);
+                // 前台服务里的授权失败是异步发生的：Toast 让用户知道为什么没共享成功，
+                // 而不是只看到远控页停在“等待授权”。
+                if (text != null && text.startsWith("屏幕共享失败"))
+                    Toast.makeText(MainActivity.this, text, Toast.LENGTH_LONG).show();
+            }); }
             @Override public void onPairRequest(LanCore.PairRequest req) {
                 ui.post(() -> {
                     // 已连接时不再弹申请窗（底层已去重，这里再兜一层）

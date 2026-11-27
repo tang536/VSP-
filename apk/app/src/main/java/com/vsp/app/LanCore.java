@@ -84,8 +84,10 @@ public final class LanCore {
     public static final class PairRequest {
         public final String id, name, kind, ip;
         public final int port;
+        public final long time;
         public PairRequest(String id, String name, String kind, String ip, int port) {
             this.id = id; this.name = name; this.kind = kind; this.ip = ip; this.port = port;
+            this.time = System.currentTimeMillis();
         }
     }
 
@@ -132,6 +134,7 @@ public final class LanCore {
     private final java.util.Set<String> localIps = new java.util.HashSet<>();
     private final Map<String, PairRequest> pairRequests = new ConcurrentHashMap<>();
     private final Map<String, Boolean> pairAnswers = new ConcurrentHashMap<>();
+    private final Map<String, Long> pairAnswerTimes = new ConcurrentHashMap<>();
     private final Map<String, ControlRequest> controlRequests = new ConcurrentHashMap<>();
     private final Map<String, Boolean> controlAnswers = new ConcurrentHashMap<>();
     private volatile String activeControlCid;
@@ -270,6 +273,19 @@ public final class LanCore {
                 status("屏幕共享已停止");
             }
         };
+        LanScreenService.onError = message -> {
+            status("屏幕共享失败：" + message);
+            // 授权之后才失败时，必须把已放行的远控一并撤销并通知主控端，
+            // 否则电脑端会一直停在"远控中"却一帧都拿不到。
+            String cid = activeControlCid;
+            String controllerId = activeControllerId;
+            if (cid != null && controllerId != null) {
+                clearControlState();
+                Device dev = devices.get(controllerId);
+                final String stopCid = cid;
+                if (dev != null) pool.execute(() -> stopControl(dev, stopCid));
+            }
+        };
         status("正在发现附近设备…");
     }
 
@@ -279,6 +295,7 @@ public final class LanCore {
         try { if (http != null) http.close(); } catch (Throwable ignored) { }
         try { if (multicastLock != null && multicastLock.isHeld()) multicastLock.release(); } catch (Throwable ignored) { }
         LanScreenService.onStopped = null;
+        LanScreenService.onError = null;
         clearControlState();
         stopProjectionService();
         pool.shutdownNow();
@@ -546,26 +563,40 @@ public final class LanCore {
                 if (shot == null) respond(out, 503, "text/plain", "no projection".getBytes());
                 else respond(out, 200, "image/jpeg", shot);
             } else if ("/pair".equals(path)) {
-                // 对方请求连接：记录申请并通知 UI 弹窗
+                // 对方请求连接：记录申请并通知 UI 弹窗。IP 以 TCP 对端为准，
+                // 对方自报 0.0.0.0 / VPN 地址时仍要从 socket 拿到可达地址。
                 String rid = nullToEmpty(uri.getQueryParameter("id"));
+                String remoteIp = s.getInetAddress().getHostAddress();
                 String rip = nullToEmpty(uri.getQueryParameter("ip"));
-                if (!rid.isEmpty() && isPrivate(rip)) {
-                    // 已连接或申请正在处理：直接回应，不重复弹窗
-                    if (isConnectedTo(rid)) {
-                        respond(out, 200, "text/plain", "ok".getBytes());
-                    } else if (pairRequests.containsKey(rid) || pairAnswers.containsKey(rid)) {
+                String ip = isPrivate(rip) ? rip : (isPrivate(remoteIp) ? remoteIp : rip);
+                if (rid.isEmpty() || !isPrivate(ip)) {
+                    respond(out, 400, "text/plain", "bad request".getBytes());
+                } else if (isConnectedTo(rid)) {
+                    respond(out, 200, "text/plain", "ok".getBytes());
+                } else {
+                    // 老申请没被处理就过期：否则对方重试时永远收到 wait。
+                    PairRequest old = pairRequests.get(rid);
+                    if (old != null && System.currentTimeMillis() - old.time > 30000) {
+                        pairRequests.remove(rid);
+                        old = null;
+                    }
+                    Long answeredAt = pairAnswerTimes.get(rid);
+                    if (answeredAt != null && System.currentTimeMillis() - answeredAt > 60000) {
+                        pairAnswers.remove(rid);
+                        pairAnswerTimes.remove(rid);
+                    }
+                    if (old != null || pairAnswers.containsKey(rid)) {
                         respond(out, 200, "text/plain", "wait".getBytes());
                     } else {
                         PairRequest req = new PairRequest(rid, nullToEmpty(uri.getQueryParameter("dn")),
-                                nullToEmpty(uri.getQueryParameter("t")), rip,
+                                nullToEmpty(uri.getQueryParameter("t")), ip,
                                 parseInt(uri.getQueryParameter("p"), HTTP_PORT));
                         pairRequests.put(rid, req);
                         pairAnswers.remove(rid);
+                        pairAnswerTimes.remove(rid);
                         try { callback.onPairRequest(req); } catch (Throwable ignored) { }
                         respond(out, 200, "text/plain", "ok".getBytes());
                     }
-                } else {
-                    respond(out, 400, "text/plain", "bad request".getBytes());
                 }
             } else if ("/pair-result".equals(path)) {
                 // 发起方轮询：已连接 / 我是否同意 / 拒绝它的申请
@@ -575,7 +606,7 @@ public final class LanCore {
                 if ("ok".equals(result) && sessionKeys.containsKey(rid)) result += ":" + sessionKeys.get(rid);
                 respond(out, 200, "text/plain", result.getBytes(StandardCharsets.UTF_8));
                 if (!"wait".equals(result) && !isConnectedTo(rid)) {
-                    pairAnswers.remove(rid); pairRequests.remove(rid);
+                    pairAnswers.remove(rid); pairAnswerTimes.remove(rid); pairRequests.remove(rid);
                 }
             } else if ("/unpair".equals(path)) {
                 // 对端主动断开：同步清除本机状态（clearConnected 会停止被控共享）
@@ -876,14 +907,17 @@ public final class LanCore {
     /** 向对方发起连接申请，携带本机信息；对方 UI 会弹窗确认。 */
     public boolean requestPair(Device d) {
         try {
-            String myIp = nullToEmpty(localIp).isEmpty() ? findPrivateIp() : localIp;
             Map<String, String> p = new HashMap<>();
             p.put("dn", deviceName); p.put("t", "android");
-            p.put("p", String.valueOf(HTTP_PORT)); p.put("ip", myIp);
+            p.put("p", String.valueOf(HTTP_PORT));
+            String myIp = preferredLocalIp();
+            // 拿不到私网 IP 时干脆不报：对方会从 TCP 连接里取真实来源地址。
+            if (myIp != null) p.put("ip", myIp);
             for (int i = 0; i < 3; i++) {
                 String r = nullToEmpty(httpGetRaw(signedUrl(d, "/pair", p, "GET", null))).trim();
                 if (r.startsWith("ok:")) sessionKeys.put(d.id, r.substring(3).trim());
-                if (r.equals("ok") || r.startsWith("ok:")) return true;
+                // wait 表示申请已送达、对方正在等用户确认；继续 /pair-result 轮询即可。
+                if (r.equals("ok") || r.startsWith("ok:") || r.equals("wait")) return true;
                 sleep(500);
             }
             return false;
@@ -906,6 +940,7 @@ public final class LanCore {
         if (req == null) return;
         pairRequests.remove(reqId);
         pairAnswers.put(reqId, accept);
+        pairAnswerTimes.put(reqId, System.currentTimeMillis());
         if (accept) {
             sessionKeys.put(reqId, java.util.UUID.randomUUID().toString().replace("-", ""));
             Device d = devices.get(req.id);
@@ -1054,10 +1089,11 @@ public final class LanCore {
     public ControlSession requestControl(Device d) {
         try {
             String cid = java.util.UUID.randomUUID().toString().replace("-", "");
-            String myIp = nullToEmpty(localIp).isEmpty() ? findPrivateIp() : localIp;
             Map<String, String> p = new HashMap<>();
             p.put("cid", cid); p.put("dn", deviceName); p.put("t", "android");
-            p.put("ip", myIp); p.put("p", String.valueOf(HTTP_PORT));
+            String myIp = preferredLocalIp();
+            if (myIp != null) p.put("ip", myIp);
+            p.put("p", String.valueOf(HTTP_PORT));
             String r = nullToEmpty(httpGetRaw(signedUrl(d, "/control-request", p, "GET", null))).trim();
             if (r.isEmpty()) return null;
             return new ControlSession(cid, r);
@@ -1197,6 +1233,14 @@ public final class LanCore {
             }
         } catch (Throwable ignored) { }
         if (!"0.0.0.0".equals(localIp)) localIps.add(localIp);
+    }
+
+    /** 发给对端的本机 IP：优先用已经确认过的活动网卡地址，拿不到就不传（让对端按连接来源判断）。 */
+    private String preferredLocalIp() {
+        for (String ip : localIps) if (isPrivate(ip)) return ip;
+        if (isPrivate(nullToEmpty(localIp))) return localIp;
+        String fresh = findPrivateIp();
+        return isPrivate(fresh) ? fresh : null;
     }
 
     private static String findPrivateIp() {

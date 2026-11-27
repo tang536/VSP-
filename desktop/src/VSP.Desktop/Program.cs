@@ -113,7 +113,12 @@ internal static class Program
         var window = desktop.MainWindow;
         if (window is null) return;
 
-        if (!window.IsVisible)
+        if (App.IsTrayHidden)
+        {
+            // 窗口收在托盘里：先恢复出来，否则单实例激活只会挂一个永远不会触发的 Opened 回调。
+            App.RestoreFromTray(window);
+        }
+        else if (!window.IsVisible)
         {
             // 还在放启动动画：等主窗口显示出来再激活。
             window.Opened += OnMainWindowOpened;

@@ -95,6 +95,7 @@ public sealed class LanService : IDisposable
     private readonly HashSet<string> _localIps = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, LanPairRequest> _pairRequests = new();
     private readonly ConcurrentDictionary<string, bool> _pairAnswers = new();
+    private readonly ConcurrentDictionary<string, DateTime> _pairAnswerTimes = new();
     private readonly ConcurrentDictionary<string, LanControlRequest> _controlRequests = new();
     private readonly ConcurrentDictionary<string, bool> _controlAnswers = new();
     private string? _activeControlCid;
@@ -497,30 +498,61 @@ public sealed class LanService : IDisposable
                     break;
                 case "/pair":
                     {
-                        // 对方请求连接：记录申请并通知 UI 弹窗；附带把对方登记为设备，便于同意后直接操作。
+                        // 对方请求连接：记录申请并通知 UI 弹窗。IP 以 TCP 对端为准，
+                        // 手机自报的 0.0.0.0 / 空值 / VPN 地址不能再让申请被 400 拒绝。
+                        var remote = client.Client.RemoteEndPoint as IPEndPoint;
+                        var remoteIp = remote is { Address.AddressFamily: AddressFamily.InterNetwork }
+                            ? remote.Address.ToString() : "";
+                        var reportedIp = qs.GetValueOrDefault("ip") ?? "";
+                        var ip = IsPrivateOrLoopback(remoteIp) && remoteIp != "127.0.0.1"
+                            ? remoteIp
+                            : reportedIp;
+                        if (!IsPrivateOrLoopback(ip)) ip = remoteIp;
                         var req = new LanPairRequest
                         {
                             Id = qs.GetValueOrDefault("id") ?? "",
                             Name = qs.GetValueOrDefault("dn") ?? "设备",
                             Kind = qs.GetValueOrDefault("t") ?? "android",
-                            Ip = qs.GetValueOrDefault("ip") ?? "",
-                            Port = int.TryParse(qs.GetValueOrDefault("p"), out var pp) ? pp : HttpPort,
+                            Ip = ip,
+                            Port = int.TryParse(qs.GetValueOrDefault("p"), out var pp) && pp > 0 && pp < 65536
+                                ? pp : HttpPort,
                         };
-                        if (!string.IsNullOrEmpty(req.Id) && IsPrivateOrLoopback(req.Ip))
+                        if (string.IsNullOrEmpty(req.Id) || !IsPrivateOrLoopback(req.Ip))
                         {
-                            // 已经和该设备连接，或该设备的申请正在处理：直接回应，绝不重复弹窗。
-                            if (IsConnectedTo(req.Id)) { Respond(stream, 200, "ok"); }
-                            else if (_pairRequests.ContainsKey(req.Id) || _pairAnswers.ContainsKey(req.Id))
-                            { Respond(stream, 200, "wait"); }
-                            else
-                            {
-                                _pairRequests[req.Id] = req;
-                                _pairAnswers.TryRemove(req.Id, out _);
-                                try { PairRequested?.Invoke(req); } catch { }
-                                Respond(stream, 200, "ok");
-                            }
+                            Respond(stream, 400, "bad request");
+                            break;
                         }
-                        else Respond(stream, 400, "bad request");
+
+                        if (IsConnectedTo(req.Id)) { Respond(stream, 200, "ok"); break; }
+
+                        // 过期的申请/答复不能永久堵住后续连接：旧弹窗用户没点就放它重新来。
+                        if (_pairRequests.TryGetValue(req.Id, out var pending)
+                            && DateTime.Now - pending.Time > TimeSpan.FromSeconds(30))
+                        {
+                            _pairRequests.TryRemove(req.Id, out _);
+                            pending = null;
+                        }
+                        if (_pairAnswers.TryGetValue(req.Id, out _)
+                            && _pairAnswerTimes.TryGetValue(req.Id, out var answeredAt)
+                            && DateTime.Now - answeredAt > TimeSpan.FromSeconds(60))
+                        {
+                            _pairAnswers.TryRemove(req.Id, out _);
+                            _pairAnswerTimes.TryRemove(req.Id, out _);
+                        }
+
+                        if (_pairRequests.ContainsKey(req.Id) || _pairAnswers.ContainsKey(req.Id))
+                        {
+                            // wait 表示申请已收到并在等待本机确认，发起方应继续轮询而不是报发送失败。
+                            Respond(stream, 200, "wait");
+                        }
+                        else
+                        {
+                            _pairRequests[req.Id] = req;
+                            _pairAnswers.TryRemove(req.Id, out _);
+                            _pairAnswerTimes.TryRemove(req.Id, out _);
+                            try { PairRequested?.Invoke(req); } catch { }
+                            Respond(stream, 200, "ok");
+                        }
                         break;
                     }
                 case "/pair-result":
@@ -534,7 +566,11 @@ public sealed class LanService : IDisposable
                             answer += ":" + sessionKey;
                         Respond(stream, 200, answer);
                         if (answer != "wait" && !IsConnectedTo(rid))
-                        { _pairAnswers.TryRemove(rid, out _); _pairRequests.TryRemove(rid, out _); }
+                        {
+                            _pairAnswers.TryRemove(rid, out _);
+                            _pairAnswerTimes.TryRemove(rid, out _);
+                            _pairRequests.TryRemove(rid, out _);
+                        }
                         break;
                     }
                 case "/unpair":
@@ -1022,7 +1058,9 @@ public sealed class LanService : IDisposable
             {
                 var r = (await _client.GetStringAsync(url)).Trim();
                 if (r.StartsWith("ok:", StringComparison.Ordinal)) _sessionKeys[dev.Id] = r[3..].Trim();
-                if (r == "ok" || r.StartsWith("ok:", StringComparison.Ordinal)) return true;
+                // wait = 申请已送达、对方还在等用户点确认；交给后面的 /pair-result 轮询，
+                // 不能当成发送失败，否则第二次请求又会被对方当成重复申请继续 wait。
+                if (r is "ok" or "wait" || r.StartsWith("ok:", StringComparison.Ordinal)) return true;
                 await Task.Delay(500);
             }
             return false;
@@ -1057,6 +1095,7 @@ public sealed class LanService : IDisposable
         if (!_pairRequests.TryGetValue(reqId, out var req)) return;
         _pairRequests.TryRemove(reqId, out _);
         _pairAnswers[reqId] = accept;
+        _pairAnswerTimes[reqId] = DateTime.Now;
         if (accept)
         {
             _sessionKeys[reqId] = Guid.NewGuid().ToString("N");

@@ -98,7 +98,6 @@ public partial class MainWindow : Window
             {
                 _notifications?.Show(new Notification("局域网互传", message, NotificationType.Success,
                     TimeSpan.FromSeconds(6)));
-                if (_notifications is null) return;
                 // 窗口收进托盘时应用内通知看不到，至少更新托盘提示说明刚收到文件。
                 App.SetTrayHint(message);
             }

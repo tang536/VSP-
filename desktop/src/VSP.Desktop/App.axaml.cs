@@ -14,12 +14,18 @@ public partial class App : Application
 {
     public static AppServices Services { get; private set; } = null!;
     private static TrayIcon? _tray;
+    private static TrayIcons? _trayIcons;
     private static bool _exitRequested;
+    internal static bool IsTrayHidden { get; private set; }
 
     /// <summary>窗口收进托盘时，接收通知至少能通过托盘提示文本让用户看见。</summary>
     public static void SetTrayHint(string message)
     {
-        if (_tray is not null) _tray.ToolTipText = "全能工具箱 · " + message;
+        if (_tray is not null)
+        {
+            _tray.ToolTipText = "全能工具箱 · " + message;
+            if (!_tray.IsVisible) _tray.IsVisible = true;
+        }
     }
 
     public override void Initialize() => AvaloniaXamlLoader.Load(this);
@@ -63,11 +69,16 @@ public partial class App : Application
         {
             if (_exitRequested) return;
             e.Cancel = true;
-            window.Hide();
+            HideToTray(window);
+        };
+        // 最小化也收进托盘：只把窗口缩到任务栏时，托盘里没有可点的图标，
+        // 用户从后台找不到入口。托盘图标在窗口 Opened 后才会真正注册。
+        window.PropertyChanged += (_, e) =>
+        {
+            if (e.Property == Window.WindowStateProperty && window.WindowState == WindowState.Minimized)
+                HideToTray(window);
         };
 
-        // 托盘图标必须等窗口进入 Opened 之后再建：更早创建时 Avalonia 的平台托盘服务
-        // 还没准备好，图标会被静默丢弃，结果就是进程留在后台但托盘里什么都看不到。
         var created = false;
         window.Opened += (_, _) =>
         {
@@ -77,17 +88,29 @@ public partial class App : Application
         };
     }
 
+    private static void HideToTray(Window window)
+    {
+        IsTrayHidden = true;
+        window.WindowState = WindowState.Normal;
+        window.ShowInTaskbar = false;
+        window.Hide();
+    }
+
+    internal static void RestoreFromTray(Window window)
+    {
+        IsTrayHidden = false;
+        window.Show();
+        window.WindowState = WindowState.Normal;
+        window.ShowInTaskbar = true;
+        window.Activate();
+        window.Focus();
+    }
+
     private static void CreateTray(IClassicDesktopStyleApplicationLifetime desktop, MainWindow window)
     {
         var menu = new NativeMenu();
         var open = new NativeMenuItem("打开主界面");
-        open.Click += (_, _) =>
-        {
-            window.Show();
-            if (window.WindowState == WindowState.Minimized) window.WindowState = WindowState.Normal;
-            window.Activate();
-            window.Focus();
-        };
+        open.Click += (_, _) => RestoreFromTray(window);
         var exit = new NativeMenuItem("退出");
         exit.Click += (_, _) =>
         {
@@ -99,6 +122,7 @@ public partial class App : Application
         menu.Add(exit);
 
         var tray = new TrayIcon { Menu = menu, ToolTipText = "全能工具箱" };
+        tray.Clicked += (_, _) => RestoreFromTray(window);
         // 先设图标再设 IsVisible，顺序反了 Windows 上有机会注册出无图标的空白托盘项。
         try
         {
@@ -109,13 +133,19 @@ public partial class App : Application
         {
             System.Diagnostics.Debug.WriteLine("tray icon failed: " + ex.Message);
         }
+
+        // Avalonia 12 的托盘图标只有挂到 Application.Icons 上才会创建平台实现；
+        // 单独 new TrayIcon + IsVisible=true 只是改了一个属性，不会在通知区注册任何图标。
+        _tray = tray;
+        _trayIcons = new TrayIcons { tray };
+        TrayIcon.SetIcons(Current!, _trayIcons);
         tray.IsVisible = true;
 
-        _tray = tray;
         desktop.Exit += (_, _) =>
         {
             _tray = null;
-            tray.Dispose();
+            _trayIcons = null;
+            tray.IsVisible = false;
         };
     }
 
