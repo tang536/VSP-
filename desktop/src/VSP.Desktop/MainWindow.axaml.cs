@@ -2,6 +2,7 @@ using System.ComponentModel;
 using Avalonia;
 using Avalonia.Animation;
 using Avalonia.Controls;
+using Avalonia.Controls.Notifications;
 using Avalonia.Input;
 using Avalonia.Platform.Storage;
 using Avalonia.Media.Transformation;
@@ -15,6 +16,7 @@ public partial class MainWindow : Window
 {
     private MainViewModel? _vm;
     private bool _ready;
+    private WindowNotificationManager? _notifications;
 
     public MainWindow()
     {
@@ -32,6 +34,11 @@ public partial class MainWindow : Window
         {
             FitToScreen();
             PlayEntrance();
+            _notifications ??= new WindowNotificationManager(this)
+            {
+                Position = NotificationPosition.BottomRight,
+                MaxItems = 3,
+            };
         };
         DataContextChanged += (_, _) => BindViewModel();
         AddHandler(DragDrop.DragOverEvent, OnDragOver);
@@ -70,9 +77,33 @@ public partial class MainWindow : Window
 
     private void BindViewModel()
     {
-        if (_vm is not null) _vm.PropertyChanged -= OnViewModelPropertyChanged;
+        if (_vm is not null)
+        {
+            _vm.PropertyChanged -= OnViewModelPropertyChanged;
+            _vm.LanNotification = null;
+        }
         _vm = DataContext as MainViewModel;
-        if (_vm is not null) _vm.PropertyChanged += OnViewModelPropertyChanged;
+        if (_vm is not null)
+        {
+            _vm.PropertyChanged += OnViewModelPropertyChanged;
+            _vm.LanNotification = ShowLanNotification;
+        }
+    }
+
+    private void ShowLanNotification(string message)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            try
+            {
+                _notifications?.Show(new Notification("局域网互传", message, NotificationType.Success,
+                    TimeSpan.FromSeconds(6)));
+                if (_notifications is null) return;
+                // 窗口收进托盘时应用内通知看不到，至少更新托盘提示说明刚收到文件。
+                App.SetTrayHint(message);
+            }
+            catch { }
+        });
     }
 
     /// <summary>主窗口打开时整体淡入并轻微上浮，与手机端/启动画面的节奏一致。</summary>

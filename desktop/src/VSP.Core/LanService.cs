@@ -172,9 +172,15 @@ public sealed class LanService : IDisposable
 
     public string LocalIp { get; private set; } = "127.0.0.1";
     public string ShareRoot => _shareRoot;
+    /// <summary>发现/HTTP 服务启动失败时非空，UI 必须显示出来，不能静默失败。</summary>
+    public string? ServiceError { get; private set; }
     public IReadOnlyList<LanDevice> Devices => _devices.Values
         .OrderBy(d => d.IsAndroid).ThenBy(d => d.Name).ToList();
     public event Action? DevicesChanged;
+    /// <summary>收到文件分片：name, received, total。</summary>
+    public event Action<string, long, long>? FileIncoming;
+    /// <summary>整个文件接收完成：name, total。</summary>
+    public event Action<string, long>? FileReceived;
     /// <summary>收到一台设备发起的连接申请，UI 应弹窗让用户选择同意/拒绝。</summary>
     public event Action<LanPairRequest>? PairRequested;
     /// <summary>收到远程控制申请，UI 必须弹窗让用户选择，不能默认允许。</summary>
@@ -209,7 +215,8 @@ public sealed class LanService : IDisposable
         try
         {
             _udp = new UdpClient { EnableBroadcast = true };
-            _udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            // 不启用 ReuseAddress：旧实例仍占用端口时新实例必须明确失败，
+            // 否则两个进程静默共用端口，手机连到的可能是旧进程，表现为“互相发现不了/传文件没反应”。
             _udp.Client.Bind(new IPEndPoint(IPAddress.Any, UdpPort));
 
             // hello 携带 c=当前已连接对端的 id，另一端据此实时同步"已连接"状态。
@@ -224,6 +231,7 @@ public sealed class LanService : IDisposable
 
             _ = Task.Run(async () =>
             {
+                var round = 0;
                 while (!ct.IsCancellationRequested)
                 {
                     var helloBytes = HelloBytes();
@@ -240,6 +248,8 @@ public sealed class LanService : IDisposable
                         try { await _udp!.SendAsync(helloBytes, new IPEndPoint(ip, UdpPort), ct); }
                         catch { }
                     }
+                    // 广播被路由器/防火墙丢弃时的兜底：没发现设备就每 12 秒对本机 /24 单播一轮。
+                    if (++round % 6 == 0 && _devices.IsEmpty) await SweepSubnetAsync(helloBytes, ct);
                     try { await Task.Delay(2000, ct); } catch { break; }
                 }
             }, ct);
@@ -324,7 +334,11 @@ public sealed class LanService : IDisposable
                 }
             }, ct);
         }
-        catch { }
+        catch (Exception ex)
+        {
+            ServiceError = "局域网发现启动失败：" + ex.Message;
+            try { DevicesChanged?.Invoke(); } catch { }
+        }
     }
 
     /// <summary>各私网网卡的子网定向广播地址 + 全局广播兜底。</summary>
@@ -359,6 +373,21 @@ public sealed class LanService : IDisposable
         return list;
     }
 
+    /// <summary>广播不可达时的兜底：对本机 /24 的每个地址发单播 hello。</summary>
+    private async Task SweepSubnetAsync(byte[] hello, CancellationToken ct)
+    {
+        if (!IPAddress.TryParse(LocalIp, out var local) || !IsPrivate(local)) return;
+        var b = local.GetAddressBytes();
+        for (var i = 1; i < 255; i++)
+        {
+            if (ct.IsCancellationRequested) return;
+            var target = new IPAddress(new[] { b[0], b[1], b[2], (byte)i });
+            if (target.Equals(local) || _localIps.Contains(target.ToString())) continue;
+            try { await _udp!.SendAsync(hello, new IPEndPoint(target, UdpPort), ct); }
+            catch { }
+        }
+    }
+
     // ---------------- HTTP 服务（被控 / 被传） ----------------
 
     private void StartHttp()
@@ -366,7 +395,6 @@ public sealed class LanService : IDisposable
         try
         {
             _tcp = new TcpListener(IPAddress.Any, HttpPort);
-            _tcp.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
             _tcp.Start();
             _ = Task.Run(async () =>
             {
@@ -379,7 +407,11 @@ public sealed class LanService : IDisposable
                 }
             });
         }
-        catch { }
+        catch (Exception ex)
+        {
+            ServiceError = "局域网服务启动失败：" + ex.Message;
+            try { DevicesChanged?.Invoke(); } catch { }
+        }
     }
 
     private async Task HandleClientAsync(TcpClient client)
@@ -449,7 +481,9 @@ public sealed class LanService : IDisposable
                 case "/files": await RespondJsonAsync(stream, ListFiles(qs.GetValueOrDefault("dir"))); break;
                 case "/dl": await ServeDownloadAsync(stream, qs.GetValueOrDefault("path"), headers.GetValueOrDefault("Range")); break;
                 case "/ul": await ReceiveUploadAsync(stream, qs.GetValueOrDefault("name"), body,
-                               long.TryParse(qs.GetValueOrDefault("off"), out var off) ? off : 0); break;
+                               long.TryParse(qs.GetValueOrDefault("off"), out var off) ? off : 0,
+                               long.TryParse(qs.GetValueOrDefault("size"), out var total) ? total : 0,
+                               qs.GetValueOrDefault("last") == "1"); break;
                 case "/screen":
                     // 只有当前被授权的主控端才能取帧，防止配对后任意设备直接窥屏。
                     if (!IsControlActiveFor(qs.GetValueOrDefault("id")))
@@ -708,7 +742,8 @@ public sealed class LanService : IDisposable
         catch { }
     }
 
-    private async Task ReceiveUploadAsync(NetworkStream stream, string? nameB64, byte[] body, long offset)
+    private async Task ReceiveUploadAsync(NetworkStream stream, string? nameB64, byte[] body, long offset,
+        long total, bool last)
     {
         var name = DecodePath(nameB64);
         if (string.IsNullOrWhiteSpace(name)) { Respond(stream, 400, "no name"); return; }
@@ -719,7 +754,12 @@ public sealed class LanService : IDisposable
             var mode = offset > 0 && File.Exists(full) ? FileMode.Append : FileMode.Create;
             await using var fs = new FileStream(full, mode, FileAccess.Write, FileShare.None, 81920, true);
             await fs.WriteAsync(body.AsMemory());
+            var received = fs.Length;
             Respond(stream, 200, "ok");
+            try { FileIncoming?.Invoke(name, received, total); } catch { }
+            // last 由新版发送方在最后一片带上；老版本没有时按“首片且不足一个分片”兜底。
+            if (last || (!last && offset == 0 && body.Length < 4 * 1024 * 1024))
+                try { FileReceived?.Invoke(name, total > 0 ? total : received); } catch { }
         }
         catch (Exception ex) { Respond(stream, 500, ex.Message); }
     }
@@ -857,18 +897,25 @@ public sealed class LanService : IDisposable
             const int chunk = 4 * 1024 * 1024;
             await using var fs = File.OpenRead(localPath);
             var buf = new byte[chunk];
+            var size = fs.Length;
             long off = 0;
             int n;
             while ((n = await fs.ReadAsync(buf)) > 0)
             {
                 var piece = buf.AsMemory(0, n).ToArray();
-                var url = SignedUrl(dev, "/ul",
-                    new() { ["name"] = name, ["off"] = off.ToString() }, "POST", piece);
+                var query = new Dictionary<string, string>
+                {
+                    ["name"] = name,
+                    ["off"] = off.ToString(),
+                    ["size"] = size.ToString(),
+                };
+                if (off + n >= size) query["last"] = "1";
+                var url = SignedUrl(dev, "/ul", query, "POST", piece);
                 using var content = new ByteArrayContent(piece);
                 var resp = await _client.PostAsync(url, content);
                 resp.EnsureSuccessStatusCode();
                 off += n;
-                progress?.Report(fs.Length > 0 ? (double)off / fs.Length : 1);
+                progress?.Report(size > 0 ? (double)off / size : 1);
             }
             return true;
         }

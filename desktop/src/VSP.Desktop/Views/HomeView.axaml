@@ -17,12 +17,6 @@
                                 <TextBlock Text="解析" VerticalAlignment="Center" />
                             </StackPanel>
                         </Button>
-                        <Button Classes="ghost" Height="42" Command="{Binding ClearCommand}">
-                            <StackPanel Orientation="Horizontal" Spacing="6">
-                                <PathIcon Data="{StaticResource IconClose}" VerticalAlignment="Center" />
-                                <TextBlock Text="清空" VerticalAlignment="Center" />
-                            </StackPanel>
-                        </Button>
                     </StackPanel>
                     <TextBox x:Name="UrlBox" Classes="url" Text="{Binding Url}"
                              PlaceholderText="粘贴视频 / 图片 / 音频页面链接，回车解析"
@@ -43,7 +37,7 @@
                 <Border Classes="card" Padding="18" Margin="0,20,0,0" IsVisible="{Binding HasResult}">
                     <Grid ColumnDefinitions="200,*" ColumnSpacing="20">
                         <Border Grid.Column="0" Width="200" Height="112" Background="{DynamicResource Surface2}">
-                            <Image Source="{Binding CoverPath}" Stretch="UniformToFill" />
+                            <Image Source="{Binding CoverImage}" Stretch="UniformToFill" />
                         </Border>
                         <StackPanel Grid.Column="1" Spacing="8" VerticalAlignment="Center">
                             <TextBlock Text="{Binding ResultTitle}" Classes="h1" TextWrapping="Wrap" />

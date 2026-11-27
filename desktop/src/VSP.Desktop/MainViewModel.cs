@@ -5,6 +5,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Platform.Storage;
+using Avalonia.Media.Imaging;
 using VSP.Core;
 using VSP.Desktop.Views;
 
@@ -187,7 +188,7 @@ public sealed class MainViewModel : BindableBase
     private ParseResult? _result;
     private string _url = "";
     private string _status = "";
-    private string _coverPath = "";
+    private Bitmap? _coverImage;
     private bool _isBusy;
     private int _selectedTab;
     private UpdateInfo? _update;
@@ -205,7 +206,39 @@ public sealed class MainViewModel : BindableBase
     public bool HasStatus => !string.IsNullOrEmpty(Status);
     public bool IsErrorStatus => Status.StartsWith("失败", StringComparison.Ordinal);
     public bool IsInfoStatus => HasStatus && !IsErrorStatus;
-    public string CoverPath { get => _coverPath; private set => Set(ref _coverPath, value); }
+    /// <summary>解析结果封面（Bitmap，XAML 可直接绑定 Image.Source）。</summary>
+    public Bitmap? CoverImage
+    {
+        get => _coverImage;
+        private set
+        {
+            if (ReferenceEquals(_coverImage, value)) return;
+            var old = _coverImage;
+            _coverImage = value;
+            Raise(nameof(CoverImage));
+            old?.Dispose();
+        }
+    }
+    /// <summary>个人头像：与手机端一样支持更换和恢复默认，存到 %APPDATA%\VSP解析。</summary>
+    private Bitmap? _avatarImage;
+    public Bitmap? AvatarImage
+    {
+        get => _avatarImage;
+        private set
+        {
+            if (ReferenceEquals(_avatarImage, value)) return;
+            var old = _avatarImage;
+            _avatarImage = value;
+            Raise(nameof(AvatarImage));
+            Raise(nameof(HasAvatar));
+            old?.Dispose();
+        }
+    }
+    public bool HasAvatar => _avatarImage is not null;
+    private static string AvatarFile => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VSP解析", "avatar.img");
+    public string AvatarHint => HasAvatar ? "点击头像可再次更换 · 长按恢复默认" : "点击头像可更换 · 长按恢复默认";
+
     public bool IsBusy { get => _isBusy; set => Set(ref _isBusy, value); }
     public bool HasResult => _result is not null;
     public string ResultTitle => _result?.Title ?? "";
@@ -342,6 +375,9 @@ public sealed class MainViewModel : BindableBase
     public ICommand OpenReleaseCommand { get; }
     public ICommand OpenGiteeCommand { get; }
     public ICommand OpenGithubCommand { get; }
+    public ICommand ChangeAvatarCommand { get; }
+    public ICommand ResetAvatarCommand { get; }
+    public ICommand ShowDownloadSettingsCommand { get; }
 
     // ---------------- 局域网互传与远控 ----------------
     private LanService? _lan;
@@ -358,6 +394,13 @@ public sealed class MainViewModel : BindableBase
     private readonly Stack<string> _lanDirStack = new();
     public bool LanBusy { get => _lanBusy; private set => Set(ref _lanBusy, value); }
     private bool _lanBusy;
+    /// <summary>互传进度（0~1），由 LanView 显示为进度条。</summary>
+    public double LanTransferProgress { get => _lanTransferProgress; private set => Set(ref _lanTransferProgress, value); }
+    private double _lanTransferProgress;
+    public bool LanTransferring { get => _lanTransferring; private set => Set(ref _lanTransferring, value); }
+    private bool _lanTransferring;
+    /// <summary>收到文件时的通知，MainWindow 用它弹应用内通知（即使停在别的页面也能看到）。</summary>
+    public Action<string>? LanNotification;
     /// <summary>远控画面：由 LanView 把字节转成 Bitmap 显示。</summary>
     public byte[]? LanScreenBytes { get => _lanScreenBytes; private set => Set(ref _lanScreenBytes, value); }
     private byte[]? _lanScreenBytes;
@@ -451,6 +494,10 @@ public sealed class MainViewModel : BindableBase
         OpenReleaseCommand = new RelayCommand(() => LocalLibrary.OpenUrl(UpdateService.PageUrl));
         OpenGiteeCommand = new RelayCommand(() => LocalLibrary.OpenUrl("https://gitee.com/tang-rongqiang/VSP"));
         OpenGithubCommand = new RelayCommand(() => LocalLibrary.OpenUrl("https://github.com/tang536/VSP-"));
+        ChangeAvatarCommand = new RelayCommand(() => _ = ChangeAvatarAsync());
+        ResetAvatarCommand = new RelayCommand(ResetAvatar);
+        ShowDownloadSettingsCommand = new RelayCommand(() => _ = ShowDownloadSettingsAsync());
+        LoadAvatar();
 
         // 局域网互传与远控
         ShowLanCommand = new RelayCommand(() => { Go(6); RefreshLanDevices(); });
@@ -488,9 +535,9 @@ public sealed class MainViewModel : BindableBase
 
     private void Clear()
     {
-        Url = ""; Status = ""; _result = null; _coverPath = "";
+        Url = ""; Status = ""; _result = null; CoverImage = null;
         CurrentFormats.Clear();
-        Raise(nameof(HasResult)); Raise(nameof(CoverPath)); RaiseTabs(); Raise(nameof(FormatCountText));
+        Raise(nameof(HasResult)); RaiseTabs(); Raise(nameof(FormatCountText));
     }
 
     private void Go(int page)
@@ -558,7 +605,7 @@ public sealed class MainViewModel : BindableBase
 
     private async Task LoadCoverAsync(string url)
     {
-        CoverPath = "";
+        CoverImage = null;
         if (string.IsNullOrWhiteSpace(url)) return;
         try
         {
@@ -566,12 +613,10 @@ public sealed class MainViewModel : BindableBase
             RefererPolicy.Apply(req, url);
             using var resp = await _http.SendAsync(req);
             if (!resp.IsSuccessStatusCode) return;
-            var dir = Path.Combine(Path.GetTempPath(), "vsp-preview");
-            Directory.CreateDirectory(dir);
-            var path = Path.Combine(dir, "cover-" + Guid.NewGuid().ToString("N") + MediaUtil.GuessExtension(url, ".jpg"));
-            await using (var file = File.Create(path))
-                await (await resp.Content.ReadAsStreamAsync()).CopyToAsync(file);
-            CoverPath = path;
+            await using var ms = new MemoryStream();
+            await (await resp.Content.ReadAsStreamAsync()).CopyToAsync(ms);
+            ms.Position = 0;
+            CoverImage = new Bitmap(ms);
         }
         catch { }
     }
@@ -884,6 +929,63 @@ public sealed class MainViewModel : BindableBase
         finally { IsUpdating = false; }
     }
 
+    // ---------------- 头像 / 高级设置 ----------------
+
+    private void LoadAvatar()
+    {
+        AvatarImage = null;
+        try
+        {
+            if (!File.Exists(AvatarFile)) return;
+            using var fs = File.OpenRead(AvatarFile);
+            AvatarImage = new Bitmap(fs);
+        }
+        catch { }
+    }
+
+    private async Task ChangeAvatarAsync()
+    {
+        var lifetime = Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime;
+        if (lifetime?.MainWindow?.StorageProvider is not { } storage) return;
+        var files = await storage.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            AllowMultiple = false,
+            Title = "选择头像图片",
+            FileTypeFilter = [FilePickerFileTypes.ImageAll],
+        });
+        var path = files.FirstOrDefault()?.TryGetLocalPath();
+        if (string.IsNullOrWhiteSpace(path)) return;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(AvatarFile)!);
+            File.Copy(path!, AvatarFile, true);
+            LoadAvatar();
+            Status = "头像已更新";
+        }
+        catch (Exception ex) { Status = "头像更新失败：" + ex.Message; }
+    }
+
+    private void ResetAvatar()
+    {
+        try { if (File.Exists(AvatarFile)) File.Delete(AvatarFile); } catch { }
+        AvatarImage = null;
+        Status = "已恢复默认头像";
+    }
+
+    /// <summary>命名模板 / 解析缓存移到独立弹窗，避免主界面误触，也把占位符含义说清楚。</summary>
+    private async Task ShowDownloadSettingsAsync()
+    {
+        var lifetime = Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime;
+        var owner = lifetime?.MainWindow;
+        if (owner is null) return;
+        var dialog = new Views.DownloadSettingsWindow(NameTemplate, ParseTtlSeconds);
+        var saved = await dialog.ShowDialog<bool>(owner);
+        if (!saved) return;
+        NameTemplate = dialog.ResultTemplate;
+        ParseTtlSeconds = dialog.ResultTtl;
+        Status = "下载与解析设置已保存";
+    }
+
     // ---------------- 局域网互传与远控实现 ----------------
 
     private void StartLan()
@@ -910,6 +1012,20 @@ public sealed class MainViewModel : BindableBase
                 IncomingControl = req;
                 LanStatus = $"{req.Name} 请求远程控制本机，请在弹窗中选择是否允许";
                 RequestControlDialog?.Invoke();
+            });
+            _lan.FileIncoming += (name, received, total) => Dispatch(() =>
+            {
+                LanTransferring = true;
+                LanTransferProgress = total > 0 ? Math.Clamp((double)received / total, 0, 1) : 0;
+                LanStatus = $"正在接收 {name} · {LanTransferProgress:P0}";
+            });
+            _lan.FileReceived += (name, total) => Dispatch(() =>
+            {
+                LanTransferring = false;
+                LanTransferProgress = 0;
+                LanStatus = $"已接收：{name}";
+                LanNotification?.Invoke($"已接收：{name}");
+                RefreshLocal();
             });
             _lan.Start();
             Dispatch(() => { Raise(nameof(LanLocalIp)); LanStatus = "正在发现附近设备…"; });
@@ -1043,6 +1159,11 @@ public sealed class MainViewModel : BindableBase
         foreach (var d in list)
             if (!LanDevices.Any(x => x.Id == d.Id)) LanDevices.Add(d);
         Raise(nameof(HasNoLanDevices));
+        if (!string.IsNullOrEmpty(_lan.ServiceError))
+        {
+            LanStatus = _lan.ServiceError + "（请检查防火墙或端口 45320/45321 是否被占用）";
+            return;
+        }
         // 已连接/正在连接时不要被周期性的设备发现刷掉状态
         if (_lan.ConnectedPeer is not null || LanPairing) return;
         LanStatus = list.Count == 0
@@ -1071,16 +1192,22 @@ public sealed class MainViewModel : BindableBase
     {
         if (_lan is null || SelectedLanDevice is null) return;
         LanBusy = true;
+        LanTransferring = true;
+        LanTransferProgress = 0;
         LanStatus = $"正在接收 {entry.Name}…";
         try
         {
             var local = Path.Combine(DownloadDir, entry.Name);
             var ok = await _lan.DownloadAsync(SelectedLanDevice, entry, local,
-                new Progress<double>(p => LanStatus = $"正在接收 {entry.Name} · {p:P0}"));
+                new Progress<double>(p =>
+                {
+                    LanTransferProgress = Math.Clamp(p, 0, 1);
+                    LanStatus = $"正在接收 {entry.Name} · {p:P0}";
+                }));
             LanStatus = ok ? $"已接收：{entry.Name}" : "接收失败";
             if (ok) RefreshLocal();
         }
-        finally { LanBusy = false; }
+        finally { LanBusy = false; LanTransferring = false; }
     }
 
     private async Task UploadLanAsync()
@@ -1096,13 +1223,21 @@ public sealed class MainViewModel : BindableBase
         {
             foreach (var path in paths)
             {
-                LanStatus = $"正在发送 {Path.GetFileName(path!)}…";
-                var ok = await _lan.UploadAsync(SelectedLanDevice, path!);
-                LanStatus = ok ? $"已发送：{Path.GetFileName(path!)}" : "发送失败";
+                var name = Path.GetFileName(path!);
+                LanStatus = $"正在发送 {name}…";
+                LanTransferring = true;
+                LanTransferProgress = 0;
+                var ok = await _lan.UploadAsync(SelectedLanDevice, path!,
+                    new Progress<double>(p =>
+                    {
+                        LanTransferProgress = Math.Clamp(p, 0, 1);
+                        LanStatus = $"正在发送 {name} · {p:P0}";
+                    }));
+                LanStatus = ok ? $"已发送：{name}" : "发送失败";
             }
             await RefreshLanFilesAsync();
         }
-        finally { LanBusy = false; }
+        finally { LanBusy = false; LanTransferring = false; }
     }
 
     private async Task StartLanControlAsync()

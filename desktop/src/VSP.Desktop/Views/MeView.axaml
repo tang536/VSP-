@@ -10,13 +10,25 @@
                 <!-- 本地用户，对应 App 端 me 页头像卡片 -->
                 <Border Classes="card" Padding="18">
                     <StackPanel Orientation="Horizontal" Spacing="16">
-                        <Border Width="56" Height="56" Background="{DynamicResource Accent}" CornerRadius="2">
-                            <TextBlock Text="V" FontSize="28" FontWeight="Bold" Foreground="{DynamicResource OnAccent}"
-                                       HorizontalAlignment="Center" VerticalAlignment="Center" />
-                        </Border>
+                        <Button Padding="0" Background="Transparent" BorderThickness="0" Cursor="Hand"
+                                Command="{Binding ChangeAvatarCommand}">
+                            <Border Width="56" Height="56" Background="{DynamicResource Accent}" CornerRadius="2"
+                                    ClipToBounds="True">
+                                <Panel>
+                                    <TextBlock Text="V" FontSize="28" FontWeight="Bold" Foreground="{DynamicResource OnAccent}"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                                               IsVisible="{Binding !HasAvatar}" />
+                                    <Image Source="{Binding AvatarImage}" Stretch="UniformToFill"
+                                           IsVisible="{Binding HasAvatar}" />
+                                </Panel>
+                            </Border>
+                        </Button>
                         <StackPanel VerticalAlignment="Center" Spacing="3">
                             <TextBlock Text="本地用户" Classes="h1" />
-                            <TextBlock Text="{Binding AppVersion}" Classes="sub" />
+                            <TextBlock Text="{Binding AvatarHint}" Classes="sub" />
+                            <TextBlock Text="{Binding AppVersion}" Classes="dim" />
+                            <Button Classes="ghost small" Content="恢复默认头像" HorizontalAlignment="Left"
+                                    Command="{Binding ResetAvatarCommand}" IsVisible="{Binding HasAvatar}" />
                         </StackPanel>
                     </StackPanel>
                 </Border>
@@ -128,29 +140,19 @@
 
                         <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1" />
 
-                        <Border Padding="16,10" MinHeight="50">
+                        <!-- 命名模板 / 解析缓存独立弹窗，避免主界面误触 -->
+                        <Button Classes="row" Command="{Binding ShowDownloadSettingsCommand}">
                             <Grid ColumnDefinitions="Auto,*,Auto">
                                 <PathIcon Grid.Column="0" Data="{StaticResource IconDownload}"
                                           Foreground="{DynamicResource InkDim}" VerticalAlignment="Center" />
-                                <TextBlock Grid.Column="1" Text="命名模板" Classes="rowLabel"
-                                           VerticalAlignment="Center" />
-                                <TextBox Grid.Column="2" Classes="setting" Width="320" HorizontalAlignment="Right"
-                                         Text="{Binding NameTemplate, Mode=TwoWay}"
-                                         ToolTip.Tip="支持 {title} / {id} / {uploader} / {quality} / {source} / {date} / {ext}" />
+                                <StackPanel Grid.Column="1" Margin="14,0,16,0" Spacing="2" VerticalAlignment="Center">
+                                    <TextBlock Text="下载与解析设置" FontSize="14" Foreground="{DynamicResource Ink}" />
+                                    <TextBlock Text="命名模板、解析缓存有效期（含说明）" Classes="sub" />
+                                </StackPanel>
+                                <PathIcon Grid.Column="2" Data="{StaticResource IconChevron}" Width="12" Height="12"
+                                          Classes="rowArrow" />
                             </Grid>
-                        </Border>
-
-                        <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1" />
-
-                        <Border Padding="16,0" MinHeight="50">
-                            <Grid ColumnDefinitions="Auto,*,Auto">
-                                <PathIcon Grid.Column="0" Data="{StaticResource IconHistory}"
-                                          Foreground="{DynamicResource InkDim}" VerticalAlignment="Center" />
-                                <TextBlock Grid.Column="1" Text="解析缓存有效期 (秒，0 不缓存)" Classes="rowLabel" />
-                                <NumericUpDown Grid.Column="2" Classes="setting" Width="120" Minimum="0" Maximum="86400"
-                                               Increment="60" Value="{Binding ParseTtlSeconds, Mode=TwoWay}" />
-                            </Grid>
-                        </Border>
+                        </Button>
 
                         <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1" />
 

@@ -5,6 +5,9 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.app.DownloadManager;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.animation.AnimatorListenerAdapter;
 import android.animation.ValueAnimator;
 import android.content.ContentUris;
@@ -154,6 +157,9 @@ public class MainActivity extends Activity {
     private Intent pendingIntent;
     /** 恢复的解析结果已过期，等 Python 就绪后自动重新解析 */
     private boolean pendingReparse;
+    /** 解析超时保证：每次解析递增，超时/结束后旧线程的回调一律丢弃，转圈不会永远不消失 */
+    private volatile int parseGeneration;
+    private static final long PARSE_TIMEOUT_MS = 90000L;
 
     /** 真·检查更新：GitHub + Gitee 双源，取版本更高的那个 */
     private static final String UPDATE_REPO = "tang536/VSP-";
@@ -205,6 +211,8 @@ public class MainActivity extends Activity {
     private boolean suppressThemeSwitch = false;
     private int currentPage = PAGE_HOME;
     private Palette P;
+    /** 软键盘弹起时隐藏底部标签，避免三个标签被顶到键盘上方。 */
+    private boolean keyboardVisible;
 
     private View root, pageHome, pageMe, pageQueue, pageLocal, pageStorage, pageFiles, pageVideos, pageScan, pageBrowser, pageLan;
     private View topBar, btnHistory, btnMore, bottomTab, selectionBar, playerPanel;
@@ -217,7 +225,7 @@ public class MainActivity extends Activity {
     private AlertDialog lanDevicesDialog;
     private LinearLayout lanDialogList;
     private LanCore.Device lanConnecting;
-    private android.widget.ProgressBar lanPairingBar;
+    private android.widget.ProgressBar lanPairingBar, lanTransferBar;
     private TextView lanStatusText, lanLocalIpText, lanSelectedName, lanBreadcrumbText;
     private ImageView lanScreen;
     private ImageView lanScreenFull;
@@ -647,6 +655,7 @@ public class MainActivity extends Activity {
 
             setContentView(R.layout.activity_main);
             root = findViewById(R.id.root);
+            setupKeyboardWatcher();
             pageHome = getLayoutInflater().inflate(R.layout.page_home, null);
             pageMe = getLayoutInflater().inflate(R.layout.page_me, null);
             pageQueue = getLayoutInflater().inflate(R.layout.page_queue, null);
@@ -928,28 +937,8 @@ public class MainActivity extends Activity {
             if (!suppressSilentSwitch) setSilentMode(checked);
         });
 
-        // 命名模板与解析缓存：与桌面端共用同名设置语义
-        EditText nameTpl = pageMe.findViewById(R.id.name_template_input);
-        nameTpl.setText(nameTemplate());
-        nameTpl.addTextChangedListener(new android.text.TextWatcher() {
-            public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
-            public void onTextChanged(CharSequence s, int a, int b, int c) { }
-            public void afterTextChanged(android.text.Editable s) {
-                prefs.edit().putString("name_template", s.toString()).apply();
-            }
-        });
-        EditText ttlInput = pageMe.findViewById(R.id.parse_ttl_input);
-        ttlInput.setText(String.valueOf(prefs.getInt("parse_ttl", 600)));
-        ttlInput.addTextChangedListener(new android.text.TextWatcher() {
-            public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
-            public void onTextChanged(CharSequence s, int a, int b, int c) { }
-            public void afterTextChanged(android.text.Editable s) {
-                try {
-                    int v = Integer.parseInt(s.toString());
-                    prefs.edit().putInt("parse_ttl", Math.max(0, v)).apply();
-                } catch (Throwable ignored) { }
-            }
-        });
+        // 命名模板与解析缓存有效期移到独立弹窗，主界面只保留入口（防止误触）
+        pageMe.findViewById(R.id.row_download_settings).setOnClickListener(v -> showDownloadSettingsDialog());
 
         pageMe.findViewById(R.id.row_storage).setOnClickListener(v -> switchPage(PAGE_STORAGE));
         pageMe.findViewById(R.id.row_update).setOnClickListener(v -> checkUpdate());
@@ -959,6 +948,43 @@ public class MainActivity extends Activity {
             showAvatarActions();
             return true;
         });
+    }
+
+    /** 独立弹窗编辑命名模板与解析缓存，附带占位符和缓存语义说明，避免主界面误触。 */
+    private void showDownloadSettingsDialog() {
+        View view = getLayoutInflater().inflate(R.layout.dialog_download_settings, null);
+        EditText tpl = view.findViewById(R.id.name_template_input);
+        EditText ttl = view.findViewById(R.id.parse_ttl_input);
+        tpl.setText(nameTemplate());
+        ttl.setText(String.valueOf(prefs.getInt("parse_ttl", 600)));
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setView(view)
+                .setPositiveButton("保存", (d, which) -> applyDownloadSettings(
+                        tpl.getText().toString(), ttl.getText().toString()))
+                .setNeutralButton("恢复默认", (d, which) -> applyDownloadSettings("", "600"))
+                .setNegativeButton("取消", null)
+                .create();
+        dialog.show();
+        try {
+            dialog.getWindow().setBackgroundDrawable(new ColorDrawable(P.card));
+        } catch (Throwable ignored) { }
+    }
+
+    private void applyDownloadSettings(String template, String ttlText) {
+        String t = template == null ? "" : template.trim();
+        if (t.isEmpty()) t = "{title} [{quality}]";
+        int seconds;
+        try {
+            seconds = Math.max(0, Integer.parseInt(ttlText == null ? "" : ttlText.trim()));
+        } catch (Throwable e) {
+            seconds = 600;
+        }
+        prefs.edit().putString("name_template", t).putInt("parse_ttl", seconds).apply();
+        // 必须立刻同步到 Python 引擎，原来只在启动时设置一次，改了 TTL 要重启才生效。
+        if (pyReady) {
+            try { py.getModule("vsp").callAttr("set_parse_ttl", seconds); } catch (Throwable ignored) { }
+        }
+        Toast.makeText(this, "已保存设置", Toast.LENGTH_SHORT).show();
     }
 
     private void bindQueue() {
@@ -1648,13 +1674,26 @@ public class MainActivity extends Activity {
                 ui.post(() -> showControlRequestDialog(req));
             }
             @Override public void onConnectionChanged() { ui.post(MainActivity.this::applyLanConnection); }
+            @Override public void onFileIncoming(String name, long received, long total) {
+                ui.post(() -> setLanTransfer(true, total > 0 ? (int) (received * 100 / total) : -1,
+                        "正在接收：" + name));
+            }
+            @Override public void onFileReceived(String name, long total) {
+                ui.post(() -> {
+                    setLanTransfer(false, 0, null);
+                    showLanReceivedNotification(name, total);
+                    refreshStorage();
+                });
+            }
         });
+        ensureNotificationPermission();
         lan.start();
         if (lanLocalIpText != null) lanLocalIpText.setText("本机地址：" + lan.getLocalIp());
     }
 
     private void bindLan() {
         lanPairingBar = pageLan.findViewById(R.id.lan_pairing);
+        lanTransferBar = pageLan.findViewById(R.id.lan_transfer_progress);
         lanDiscovery = pageLan.findViewById(R.id.lan_discovery);
         lanDeviceList = pageLan.findViewById(R.id.lan_device_list);
         pageLan.findViewById(R.id.lan_find_devices).setOnClickListener(v -> {
@@ -1986,15 +2025,58 @@ public class MainActivity extends Activity {
         });
     }
 
+    private void setLanTransfer(boolean active, int percent, String text) {
+        if (lanTransferBar != null) {
+            lanTransferBar.setVisibility(active ? View.VISIBLE : View.GONE);
+            if (percent < 0) lanTransferBar.setIndeterminate(true);
+            else {
+                lanTransferBar.setIndeterminate(false);
+                lanTransferBar.setProgress(Math.max(0, Math.min(100, percent)));
+            }
+        }
+        if (text != null && lanStatusText != null) lanStatusText.setText(text);
+    }
+
+    /** 接收完成弹系统通知：用户可能停在别的页面，不能只靠页面内的一行文字。 */
+    private void showLanReceivedNotification(String name, long size) {
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm == null) return;
+            String channel = "vsp_lan_transfer";
+            if (Build.VERSION.SDK_INT >= 26) {
+                NotificationChannel ch = new NotificationChannel(channel, "局域网文件互传",
+                        NotificationManager.IMPORTANCE_DEFAULT);
+                ch.setDescription("收到其他设备发来的文件时提醒");
+                nm.createNotificationChannel(ch);
+            }
+            Intent open = new Intent(this, MainActivity.class);
+            open.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            int flags = Build.VERSION.SDK_INT >= 31
+                    ? PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                    : PendingIntent.FLAG_UPDATE_CURRENT;
+            PendingIntent pi = PendingIntent.getActivity(this, 0, open, flags);
+            androidx.core.app.NotificationCompat.Builder b =
+                    new androidx.core.app.NotificationCompat.Builder(this, channel)
+                            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                            .setContentTitle("已收到文件：" + name)
+                            .setContentText(size > 0 ? formatSize(size) + " · 已保存到下载目录" : "已保存到下载目录")
+                            .setContentIntent(pi)
+                            .setAutoCancel(true);
+            nm.notify(0x5A19, b.build());
+        } catch (Throwable ignored) { }
+    }
+
     private void downloadLanFile(LanCore.FileEntry f) {
         if (lan == null || lanSelected == null) return;
-        Toast.makeText(this, "正在接收 " + f.name + "…", Toast.LENGTH_SHORT).show();
+        setLanTransfer(true, -1, "正在接收 " + f.name + "…");
         new Thread(() -> {
             File dest = new File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), f.name);
-            boolean ok = lan.download(lanSelected, f, dest, null);
+            boolean ok = lan.download(lanSelected, f, dest, p ->
+                    ui.post(() -> setLanTransfer(true, (int) (p * 100), "正在接收 " + f.name + " · " + (int) (p * 100) + "%")));
             ui.post(() -> {
+                setLanTransfer(false, 0, null);
                 Toast.makeText(this, ok ? "已接收：" + f.name : "接收失败", Toast.LENGTH_SHORT).show();
-                if (ok) refreshStorage();
+                if (ok) { showLanReceivedNotification(f.name, dest.length()); refreshStorage(); }
             });
         }, "lan-dl").start();
     }
@@ -2750,6 +2832,35 @@ public class MainActivity extends Activity {
 
     // ---------------- 页面 ----------------
 
+    /**
+     * 软键盘弹起时把底部三个标签隐藏，而不是让它们跟着窗口一起上浮。
+     * 用全局布局监听比较可用高度，兼容 adjustResize 与各种键盘实现方式。
+     */
+    private void setupKeyboardWatcher() {
+        final android.graphics.Rect frame = new android.graphics.Rect();
+        View decor = getWindow().getDecorView();
+        decor.getViewTreeObserver().addOnGlobalLayoutListener(() -> {
+            decor.getWindowVisibleDisplayFrame(frame);
+            int available = frame.height();
+            int screen = decor.getRootView().getHeight();
+            boolean visible = screen - available > dp(120);
+            if (visible != keyboardVisible) {
+                keyboardVisible = visible;
+                updateBottomTabVisibility();
+            }
+        });
+    }
+
+    private boolean isTopLevelPage() {
+        return currentPage == PAGE_HOME || currentPage == PAGE_LOCAL || currentPage == PAGE_ME;
+    }
+
+    private void updateBottomTabVisibility() {
+        if (bottomTab == null) return;
+        bottomTab.setVisibility(isTopLevelPage() && !keyboardVisible && !fullscreen
+                ? View.VISIBLE : View.GONE);
+    }
+
     private void switchPage(int page) {
         if (selectionMode && page != selectionOwner) exitSelection();
         if (fullscreen && page != currentPage) exitWatch();
@@ -2780,7 +2891,7 @@ public class MainActivity extends Activity {
         topBar.setVisibility(topLevel ? View.VISIBLE : View.GONE);
         btnHistory.setVisibility(page == PAGE_HOME ? View.VISIBLE : View.GONE);
         btnMore.setVisibility(page == PAGE_LOCAL ? View.VISIBLE : View.GONE);
-        bottomTab.setVisibility(topLevel ? View.VISIBLE : View.GONE);
+        updateBottomTabVisibility();
         refreshTabColors();
         // 扫描只由用户主动触发（扫描页 / 切换扫描区域），切页不重扫，结果一直复用
         if (page == PAGE_STORAGE) refreshStorage();
@@ -2974,12 +3085,21 @@ public class MainActivity extends Activity {
                             byte[] buf = new byte[16384]; int n;
                             while ((n = in.read(buf)) > 0) fos.write(buf, 0, n);
                             fos.close(); in.close();
-                            if (lan.upload(target, tmp)) ok++;
+                            final String display = name;
+                            ui.post(() -> setLanTransfer(true, 0, "正在发送：" + display));
+                            if (lan.upload(target, tmp, p -> {
+                                final int pct = (int) (p * 100);
+                                ui.post(() -> setLanTransfer(true, pct, "正在发送：" + display + " · " + pct + "%"));
+                            })) ok++;
                             tmp.delete();
                         } catch (Throwable ignored) { }
                     }
                     final int sent = ok;
-                    ui.post(() -> { Toast.makeText(this, "已发送 " + sent + " 个文件", Toast.LENGTH_SHORT).show(); refreshLanFiles(); });
+                    ui.post(() -> {
+                        setLanTransfer(false, 0, null);
+                        Toast.makeText(this, "已发送 " + sent + " 个文件", Toast.LENGTH_SHORT).show();
+                        refreshLanFiles();
+                    });
                 }, "lan-upload").start();
             }
             return;
@@ -3532,11 +3652,22 @@ public class MainActivity extends Activity {
         setParsing(true);
 
         final String target = u;
+        final int token = ++parseGeneration;
+        // 解析可能卡在站点风控/网络重试上；90 秒后无条件收起转圈并给出可重试的提示。
+        ui.postDelayed(() -> {
+            if (token != parseGeneration) return;
+            parseGeneration++;
+            setParsing(false);
+            errorText.setText("解析超时，请检查网络后点「解析」重试");
+            errorText.setVisibility(View.VISIBLE);
+        }, PARSE_TIMEOUT_MS);
         new Thread(() -> {
             try {
                 String result = py.getModule("vsp").callAttr("parse", target).toString();
-                JSONObject data = parseResultJson(result, target);
+                JSONObject data = parseResultJson(result, target, token);
                 ui.post(() -> {
+                    if (token != parseGeneration) return;
+                    parseGeneration++;
                     setParsing(false);
                     parsedData = data;
                     currentThumb = data.optString("thumbnail", "");
@@ -3562,6 +3693,8 @@ public class MainActivity extends Activity {
                 });
             } catch (Exception e) {
                 ui.post(() -> {
+                    if (token != parseGeneration) return;
+                    parseGeneration++;
                     setParsing(false);
                     errorText.setText("解析失败：" + friendlyError(e));
                     errorText.setVisibility(View.VISIBLE);
@@ -3575,20 +3708,17 @@ public class MainActivity extends Activity {
      * 直接 new JSONObject 会抛「End of input at character …」这种用户看不懂的英文。
      * 这里先做一次结构检查，失败就立刻重解析一次，仍不行再抛可读原因。
      */
-    private JSONObject parseResultJson(String result, String target) throws Exception {
+    private JSONObject parseResultJson(String result, String target, int token) throws Exception {
         String text = result == null ? "" : result.trim();
-        if (text.isEmpty() || !text.startsWith("{")) {
+        // 引擎偶发返回空串时最多重试一次；多次串联调用会让转圈几分钟不结束。
+        if ((text.isEmpty() || !text.startsWith("{")) && token == parseGeneration) {
             text = py.getModule("vsp").callAttr("parse", target).toString().trim();
         }
         try {
             return new JSONObject(text);
         } catch (Exception first) {
-            try {
-                String retry = py.getModule("vsp").callAttr("parse", target).toString().trim();
-                return new JSONObject(retry);
-            } catch (Exception second) {
-                throw new Exception("解析结果不完整，请重试");
-            }
+            if (token != parseGeneration) throw new Exception("已取消", first);
+            throw new Exception("解析结果不完整，请重试");
         }
     }
 
@@ -4026,6 +4156,7 @@ public class MainActivity extends Activity {
         boolean keepFull = playerFull;
         playerType = type;
         fullscreen = true;
+        updateBottomTabVisibility();
         watchingAvatar = false;
         watchSource = source;
         watchTitle = title;
@@ -6013,6 +6144,7 @@ public class MainActivity extends Activity {
             stopPlayer();
             hidePlayerOverlay();
             fullscreen = false;
+            updateBottomTabVisibility();
             try {
                 setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
             } catch (Throwable ignored) {

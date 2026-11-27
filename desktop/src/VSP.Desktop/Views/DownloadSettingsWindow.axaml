@@ -1,0 +1,36 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="VSP.Desktop.Views.DownloadSettingsWindow"
+        Title="下载与解析设置"
+        Width="520" Height="440"
+        MinWidth="420" MinHeight="380"
+        WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource AppBackground}">
+    <Grid Margin="24,20" RowDefinitions="*,Auto">
+        <ScrollViewer Grid.Row="0" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel Spacing="8">
+                <TextBlock Text="下载命名模板" Classes="h2" />
+                <TextBlock Classes="sub" TextWrapping="Wrap"
+                           Text="决定下载文件的保存名称。可用占位符：{title} 标题、{id} 视频 ID、{uploader} 作者、{quality} 清晰度、{source} 来源、{date} 日期、{ext} 扩展名。留空将恢复默认值。" />
+                <TextBox x:Name="TemplateBox" Classes="setting" Height="34"
+                         PlaceholderText="{}{title} [{quality}]" />
+
+                <TextBlock Text="解析缓存有效期（秒）" Classes="h2" Margin="0,16,0,0" />
+                <TextBlock Classes="sub" TextWrapping="Wrap"
+                           Text="同一链接在有效期内再次解析会直接使用缓存，不会重新请求站点。填 0 表示每次都重新解析；默认 600 秒（10 分钟）。直链过期后播放器仍会自动重解析。" />
+                <NumericUpDown x:Name="TtlBox" Classes="setting" Height="34" Width="180"
+                               HorizontalAlignment="Left" Minimum="0" Maximum="864000"
+                               Increment="60" />
+
+                <TextBlock Classes="dim" TextWrapping="Wrap" Margin="0,14,0,0"
+                           Text="提示：修改只影响之后发起的下载和解析，不会重命名已经下载好的文件。" />
+            </StackPanel>
+        </ScrollViewer>
+
+        <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10"
+                    Margin="0,18,0,0">
+            <Button Classes="ghost" Width="90" Content="取消" Click="Cancel_Click" />
+            <Button Classes="primary" Width="90" Content="保存" Click="Save_Click" />
+        </StackPanel>
+    </Grid>
+</Window>

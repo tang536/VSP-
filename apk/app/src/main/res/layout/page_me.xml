@@ -310,42 +310,11 @@
                     android:checked="false" />
             </LinearLayout>
 
-            <!-- 下载命名模板：占位符与桌面端一致 -->
+            <!-- 下载命名模板 / 解析缓存有效期放到独立设置弹窗，主界面只留入口，避免误触 -->
             <LinearLayout
-                android:id="@+id/row_name_template"
+                android:id="@+id/row_download_settings"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:background="#171a21"
-                android:tag="card"
-                android:paddingStart="14dp"
-                android:paddingEnd="14dp"
-                android:paddingTop="10dp"
-                android:paddingBottom="10dp"
-                android:layout_marginBottom="1px">
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="下载命名模板"
-                    android:textColor="#e8eaed"
-                    android:tag="text"
-                    android:textSize="14sp" />
-                <EditText
-                    android:id="@+id/name_template_input"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="{title} [{quality}]"
-                    android:textColor="#e8eaed"
-                    android:textSize="12sp"
-                    android:hint="{title}/{id}/{uploader}/{quality}/{source}/{date}/{ext}"
-                    android:importantForAutofill="no" />
-            </LinearLayout>
-
-            <!-- 解析缓存有效期（秒） -->
-            <LinearLayout
-                android:id="@+id/row_parse_ttl"
-                android:layout_width="match_parent"
-                android:layout_height="52dp"
+                android:layout_height="60dp"
                 android:orientation="horizontal"
                 android:gravity="center_vertical"
                 android:background="#171a21"
@@ -353,24 +322,40 @@
                 android:paddingStart="14dp"
                 android:paddingEnd="14dp"
                 android:layout_marginBottom="1px">
-                <TextView
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:src="@drawable/ic_download"
+                    android:tag="icon"
+                    android:scaleType="fitCenter" />
+                <LinearLayout
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="解析缓存有效期（秒）"
-                    android:textColor="#e8eaed"
-                    android:tag="text"
-                    android:textSize="14sp"
-                    android:layout_marginStart="12dp" />
-                <EditText
-                    android:id="@+id/parse_ttl_input"
-                    android:layout_width="96dp"
+                    android:orientation="vertical"
+                    android:layout_marginStart="12dp">
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="下载与解析设置"
+                        android:textColor="#e8eaed"
+                        android:tag="text"
+                        android:textSize="14sp" />
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="命名模板、解析缓存有效期"
+                        android:textColor="#8b909a"
+                        android:tag="dim"
+                        android:textSize="11sp" />
+                </LinearLayout>
+                <TextView
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:inputType="number"
-                    android:text="600"
-                    android:textColor="#e8eaed"
-                    android:textSize="13sp"
-                    android:importantForAutofill="no" />
+                    android:text="设置 ›"
+                    android:textColor="#8b909a"
+                    android:tag="dim"
+                    android:textSize="12sp" />
             </LinearLayout>
 
             <LinearLayout

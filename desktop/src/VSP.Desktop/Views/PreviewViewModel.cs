@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Windows.Input;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using LibVLCSharp.Shared;
 using VSP.Core;
@@ -23,8 +24,8 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
     private bool _seeking;
     private bool _disposed;
     private string _error = "";
-    private string _imagePath = "";
-    private string _coverPath = "";
+    private Bitmap? _imageBitmap;
+    private Bitmap? _coverBitmap;
     private double _position;
     private double _volume = 100;
     private bool _isMuted;
@@ -76,9 +77,33 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
     public bool ShowMediaError => HasError && !IsVideo;
     public bool ShowBarError => HasError && IsVideo;
     public bool IsLoading { get => _isLoading; private set => Set(ref _isLoading, value); }
-    public string ImagePath { get => _imagePath; private set => Set(ref _imagePath, value); }
-    public string CoverPath { get => _coverPath; private set => Set(ref _coverPath, value); }
-    public bool HasCover => !string.IsNullOrEmpty(CoverPath);
+    /// <summary>图片预览：本地文件或网络下载都统一转成 Bitmap，XAML 可直接绑定。</summary>
+    public Bitmap? ImageBitmap
+    {
+        get => _imageBitmap;
+        private set
+        {
+            if (ReferenceEquals(_imageBitmap, value)) return;
+            var old = _imageBitmap;
+            _imageBitmap = value;
+            Raise(nameof(ImageBitmap));
+            old?.Dispose();
+        }
+    }
+    public Bitmap? CoverBitmap
+    {
+        get => _coverBitmap;
+        private set
+        {
+            if (ReferenceEquals(_coverBitmap, value)) return;
+            var old = _coverBitmap;
+            _coverBitmap = value;
+            Raise(nameof(CoverBitmap));
+            Raise(nameof(HasCover));
+            old?.Dispose();
+        }
+    }
+    public bool HasCover => CoverBitmap is not null;
 
     public double Position
     {
@@ -283,36 +308,41 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
 
     public async Task LoadImageAsync()
     {
-        var path = await DownloadAsync(_request.Url, "image-");
-        if (path is not null) ImagePath = path;
+        var bitmap = await LoadBitmapAsync(_request.Url, "image-");
+        if (bitmap is not null) ImageBitmap = bitmap;
     }
 
     public async Task LoadCoverAsync()
     {
-        var path = await DownloadAsync(_request.CoverUrl, "cover-");
-        if (path is not null)
-        {
-            CoverPath = path;
-            Raise(nameof(HasCover));
-        }
+        var bitmap = await LoadBitmapAsync(_request.CoverUrl, "cover-");
+        if (bitmap is not null) CoverBitmap = bitmap;
     }
 
-    private async Task<string?> DownloadAsync(string url, string prefix)
+    private async Task<Bitmap?> LoadBitmapAsync(string url, string prefix)
     {
         if (string.IsNullOrWhiteSpace(url)) return null;
         try
         {
+            // 本地文件直接读路径，不能交给 HttpClient：file:// 不是它支持的 scheme。
+            if (Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.IsFile && File.Exists(uri.LocalPath))
+            {
+                await using var file = File.OpenRead(uri.LocalPath);
+                return new Bitmap(file);
+            }
+            if (File.Exists(url))
+            {
+                await using var file = File.OpenRead(url);
+                return new Bitmap(file);
+            }
             using var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = true });
             using var req = new HttpRequestMessage(HttpMethod.Get, url);
             RefererPolicy.Apply(req, url);
             using var resp = await client.SendAsync(req);
             resp.EnsureSuccessStatusCode();
-            var dir = Path.Combine(Path.GetTempPath(), "vsp-preview");
-            Directory.CreateDirectory(dir);
-            var path = Path.Combine(dir, prefix + Guid.NewGuid().ToString("N") + MediaUtil.GuessExtension(url, ".jpg"));
-            await using (var file = File.Create(path))
-                await (await resp.Content.ReadAsStreamAsync()).CopyToAsync(file);
-            return path;
+            await using var ms = new MemoryStream();
+            await (await resp.Content.ReadAsStreamAsync()).CopyToAsync(ms);
+            ms.Position = 0;
+            return new Bitmap(ms);
         }
         catch (Exception ex)
         {
@@ -452,6 +482,8 @@ public sealed class PreviewViewModel : INotifyPropertyChanged
         try { _player?.Stop(); } catch { }
         _media?.Dispose();
         _player?.Dispose();
+        _imageBitmap?.Dispose();
+        _coverBitmap?.Dispose();
         // LibVLC 是进程内共享的，这里不能释放，否则下一个预览会失败。
         _libvlc = null;
     }

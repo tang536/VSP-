@@ -60,8 +60,9 @@ public final class LanCore {
     private static final String TAG = "LanCore";
 
     public static final class Device {
-        public final String id, name, kind, ip;
-        public final int port;
+        // 发现循环会复用同一个实例并刷新字段：UI 列表按引用缓存，新建对象会让“已连接”标记刷新不到。
+        public String id, name, kind, ip;
+        public int port;
         public long lastSeen;
         public volatile boolean connected;
         public Device(String id, String name, String kind, String ip, int port) {
@@ -114,6 +115,10 @@ public final class LanCore {
         default void onControlRequest(ControlRequest req) { }
         /** 连接建立/断开（含对方通过 hello 同步过来的状态） */
         default void onConnectionChanged() { }
+        /** 收到对方发来的文件（每个分片都会回调一次，UI 可据此显示实时进度） */
+        default void onFileIncoming(String name, long received, long total) { }
+        /** 对方发完整个文件，UI 应弹出通知，避免用户在别的页面错过 */
+        default void onFileReceived(String name, long total) { }
     }
 
     private final Context ctx;
@@ -304,6 +309,7 @@ public final class LanCore {
         // 这是 Android 上可靠发送 UDP 广播的标准做法；全局广播仅作为兜底保留。
         final java.util.List<InetAddress> broadcastTargets = broadcastAddresses();
         pool.execute(() -> {
+            int round = 0;
             while (running) {
                 // 每次重建 hello，使其携带最新的已连接对端 id
                 byte[] hello = helloJson().getBytes(StandardCharsets.UTF_8);
@@ -319,6 +325,9 @@ public final class LanCore {
                                 InetAddress.getByName(d.ip), UDP_PORT));
                     } catch (Throwable ignored) { }
                 }
+                // 兜底：部分路由器/Android 版本会把广播丢掉，但允许同网段单播。
+                // 没发现任何设备时，每隔约 12 秒对本机 /24 发一轮定向 hello。
+                if ((++round % 6 == 0) && devices.isEmpty()) sweepSubnet(hello);
                 sleep(2000);
             }
         });
@@ -361,9 +370,20 @@ public final class LanCore {
                     String id = o.optString("id");
                     if (id.isEmpty() || id.equals(deviceId)) continue;
                     String peerConnectedTo = o.optString("c", "");
-                    Device d = new Device(id, o.optString("n", "设备"), o.optString("t", "pc"),
-                            ip, o.optInt("p", HTTP_PORT));
-                    devices.put(id, d);
+                    // 复用同一个 Device 实例：UI 列表和 connectedPeer 都按引用持有，
+                    // 每次 hello 新建对象会让“已连接”标记刷新不到，也破坏断开检测。
+                    Device d = devices.get(id);
+                    if (d == null) {
+                        d = new Device(id, o.optString("n", "设备"), o.optString("t", "pc"),
+                                ip, o.optInt("p", HTTP_PORT));
+                        devices.put(id, d);
+                    } else {
+                        d.name = o.optString("n", "设备");
+                        d.kind = o.optString("t", "pc");
+                        d.ip = ip;
+                        d.port = o.optInt("p", HTTP_PORT);
+                    }
+                    d.lastSeen = System.currentTimeMillis();
                     if (peerConnectedTo.equals(deviceId)) {
                         // 对方 hello 声明连着我：刷新心跳并补上连接状态。
                         peerClaimsMeAt = System.currentTimeMillis();
@@ -410,6 +430,22 @@ public final class LanCore {
             } catch (Throwable ignored) { }
         }
         return list;
+    }
+
+    /** 广播不可达时的兜底：对本机同网段的每个地址发一条单播 hello（254 个 UDP 小包，开销很低）。 */
+    private void sweepSubnet(byte[] hello) {
+        if (!isPrivate(localIp)) return;
+        int dot = localIp.lastIndexOf('.');
+        if (dot < 0) return;
+        String prefix = localIp.substring(0, dot + 1);
+        for (int i = 1; i < 255; i++) {
+            String ip = prefix + i;
+            if (ip.equals(localIp) || localIps.contains(ip)) continue;
+            try {
+                udp.send(new DatagramPacket(hello, hello.length,
+                        InetAddress.getByName(ip), UDP_PORT));
+            } catch (Throwable ignored) { }
+        }
     }
 
     private String helloJson() {
@@ -495,8 +531,10 @@ public final class LanCore {
             } else if ("/dl".equals(path)) {
                 serveDownload(out, decode(uri.getQueryParameter("path")), range);
             } else if ("/ul".equals(path)) {
-                long off = parseInt(uri.getQueryParameter("off"), 0);
-                receiveUpload(decode(uri.getQueryParameter("name")), body, off);
+                long off = parseLong(uri.getQueryParameter("off"), 0);
+                long total = parseLong(uri.getQueryParameter("size"), 0);
+                boolean last = "1".equals(uri.getQueryParameter("last"));
+                receiveUpload(decode(uri.getQueryParameter("name")), body, off, total, last);
                 respond(out, 200, "text/plain", "ok".getBytes());
             } else if ("/screen".equals(path)) {
                 // 只有当前被授权的主控端才能取帧，防止配对后任意设备直接窥屏。
@@ -709,14 +747,31 @@ public final class LanCore {
         return f;
     }
 
-    private void receiveUpload(String name, byte[] body, long offset) {
+    private void receiveUpload(String name, byte[] body, long offset, long total, boolean last) {
         try {
             if (name == null || name.isEmpty()) return;
             File f = new File(shareDir, new File(name).getName());
             boolean append = offset > 0 && f.exists();
             try (FileOutputStream fos = new FileOutputStream(f, append)) { fos.write(body); }
-            main.post(() -> status("已接收：" + f.getName()));
+            final long received = f.length();
+            final String fileName = f.getName();
+            main.post(() -> {
+                status("正在接收：" + fileName + " · " + formatBytes(received)
+                        + (total > 0 ? " / " + formatBytes(total) : ""));
+                try { callback.onFileIncoming(fileName, received, total); } catch (Throwable ignored) { }
+                // last 由新版发送方在最后一片带上；老版本没有这个参数时按文件名去重通知一次。
+                if (last || (!last && offset == 0 && body.length < 4 * 1024 * 1024)) {
+                    try { callback.onFileReceived(fileName, total > 0 ? total : received); }
+                    catch (Throwable ignored) { }
+                }
+            });
         } catch (Throwable ignored) { }
+    }
+
+    private static String formatBytes(long n) {
+        if (n < 1024) return n + " B";
+        if (n < 1024 * 1024) return String.format(Locale.CHINA, "%.1f KB", n / 1024.0);
+        return String.format(Locale.CHINA, "%.1f MB", n / 1024.0 / 1024.0);
     }
 
     // ---------------- 被控：截屏与输入 ----------------
@@ -853,8 +908,15 @@ public final class LanCore {
         pairAnswers.put(reqId, accept);
         if (accept) {
             sessionKeys.put(reqId, java.util.UUID.randomUUID().toString().replace("-", ""));
-            Device d = new Device(req.id, req.name.isEmpty() ? req.ip : req.name, req.kind, req.ip, req.port);
-            devices.put(req.id, d);
+            Device d = devices.get(req.id);
+            if (d == null) {
+                d = new Device(req.id, req.name.isEmpty() ? req.ip : req.name, req.kind, req.ip, req.port);
+                devices.put(req.id, d);
+            } else {
+                d.name = req.name.isEmpty() ? req.ip : req.name;
+                d.kind = req.kind; d.ip = req.ip; d.port = req.port;
+                d.lastSeen = System.currentTimeMillis();
+            }
             setConnected(d);
             changed();
         }
@@ -958,23 +1020,35 @@ public final class LanCore {
         finally { if (c != null) c.disconnect(); }
     }
 
-    public boolean upload(Device d, File local) {
+    /** 流式发送：不再把整个文件读进内存，大文件也不会把 App 撑爆。 */
+    public boolean upload(Device d, File local, final ProgressListener progress) {
+        java.io.InputStream in = null;
         try {
-            byte[] all = readAll(local);
+            final long size = local.length();
             final int chunk = 4 * 1024 * 1024;
+            in = new java.io.FileInputStream(local);
             long off = 0;
-            while (off < all.length) {
-                int n = (int) Math.min(chunk, all.length - off);
+            byte[] buf = new byte[chunk];
+            int n;
+            while ((n = in.read(buf)) > 0) {
                 byte[] piece = new byte[n];
-                System.arraycopy(all, (int) off, piece, 0, n);
+                System.arraycopy(buf, 0, piece, 0, n);
+                boolean last = off + n >= size;
                 Map<String, String> p = new HashMap<>();
-                p.put("name", encode(local.getName())); p.put("off", String.valueOf(off));
+                p.put("name", encode(local.getName()));
+                p.put("off", String.valueOf(off));
+                p.put("size", String.valueOf(size));
+                if (last) p.put("last", "1");
                 if (!httpPostUrl(signedUrl(d, "/ul", p, "POST", piece), piece)) return false;
                 off += n;
+                if (progress != null) progress.onProgress(size > 0 ? (double) off / size : 1.0);
             }
             return true;
         } catch (Throwable ignored) { return false; }
+        finally { if (in != null) try { in.close(); } catch (Throwable ignored) { } }
     }
+
+    public boolean upload(Device d, File local) { return upload(d, local, null); }
 
     /** 先向对端申请远控；对方弹窗同意并完成系统授权后才返回 ok。 */
     public ControlSession requestControl(Device d) {
@@ -1050,7 +1124,8 @@ public final class LanCore {
         try {
             c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
             c.setRequestMethod("POST"); c.setDoOutput(true);
-            c.setConnectTimeout(8000); c.setReadTimeout(8000);
+            // 文件分片可达 4MB，慢速 Wi-Fi 下 8 秒读超时会误判失败；远控输入也不介意更长超时。
+            c.setConnectTimeout(8000); c.setReadTimeout(30000);
             c.setFixedLengthStreamingMode(body.length);
             c.connect();
             try (OutputStream os = c.getOutputStream()) { os.write(body); }
@@ -1161,5 +1236,9 @@ public final class LanCore {
     private static String nullToEmpty(String s) { return s == null ? "" : s; }
     private static int parseInt(String s, int def) {
         try { return Integer.parseInt(s); } catch (Throwable t) { return def; }
+    }
+
+    private static long parseLong(String s, long def) {
+        try { return Long.parseLong(s); } catch (Throwable t) { return def; }
     }
 }

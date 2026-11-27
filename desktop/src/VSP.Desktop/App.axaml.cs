@@ -16,6 +16,12 @@ public partial class App : Application
     private static TrayIcon? _tray;
     private static bool _exitRequested;
 
+    /// <summary>窗口收进托盘时，接收通知至少能通过托盘提示文本让用户看见。</summary>
+    public static void SetTrayHint(string message)
+    {
+        if (_tray is not null) _tray.ToolTipText = "全能工具箱 · " + message;
+    }
+
     public override void Initialize() => AvaloniaXamlLoader.Load(this);
 
     public override void OnFrameworkInitializationCompleted()
