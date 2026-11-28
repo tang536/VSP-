@@ -2,14 +2,9 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="clr-namespace:VSP.Desktop"
              xmlns:core="clr-namespace:VSP.Core;assembly=VSP.Core"
-             xmlns:views="clr-namespace:VSP.Desktop.Views"
              x:Class="VSP.Desktop.Views.LanView"
              x:DataType="vm:MainViewModel"
              Background="{DynamicResource AppBackground}">
-    <UserControl.Resources>
-        <views:BytesToBitmapConverter x:Key="BytesToBitmap" />
-    </UserControl.Resources>
-
     <Grid Margin="28,24" RowDefinitions="Auto,*">
         <StackPanel Grid.Row="0" Margin="0,0,0,18">
             <TextBlock Text="互传与远控" Classes="h1" />
@@ -121,13 +116,17 @@
                         <Border Grid.Row="0" Background="#000000" CornerRadius="6" ClipToBounds="True"
                                 HorizontalAlignment="Stretch" VerticalAlignment="Stretch" MinHeight="220">
                             <Image x:Name="RemoteScreen"
-                                   Source="{Binding LanScreenBytes, Converter={StaticResource BytesToBitmap}}"
+                                   Source="{Binding LanScreenFrame}"
                                    Stretch="Uniform" StretchDirection="Both" Cursor="Hand" />
                         </Border>
                         <TextBlock Grid.Row="0" Text="远控画面加载中…" Classes="dim"
                                    HorizontalAlignment="Center" VerticalAlignment="Center"
-                                   IsVisible="{Binding LanScreenBytes, Converter={x:Static ObjectConverters.IsNull}}" />
+                                   IsVisible="{Binding LanScreenFrame, Converter={x:Static ObjectConverters.IsNull}}" />
                         <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center" Margin="0,12,0,0">
+                            <Border Background="{DynamicResource AccentSoft}" CornerRadius="4" Padding="8,2" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding LanStreamFps, StringFormat={}{0} FPS}"
+                                           Foreground="{DynamicResource Accent}" FontSize="12" />
+                            </Border>
                             <Button Classes="ghost small" Content="← 返回" Command="{Binding LanKeyCommand}" CommandParameter="back" />
                             <Button Classes="ghost small" Content="⌂ 主页" Command="{Binding LanKeyCommand}" CommandParameter="home" />
                             <Button Classes="ghost small" Content="▤ 多任务" Command="{Binding LanKeyCommand}" CommandParameter="recent" />

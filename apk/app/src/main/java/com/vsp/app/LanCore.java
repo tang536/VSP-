@@ -492,6 +492,8 @@ public final class LanCore {
     private void handle(Socket s) {
         try {
             s.setSoTimeout(15000);
+            // 远控输入是小包高频请求，Nagle 会额外叠加几十毫秒延迟。
+            s.setTcpNoDelay(true);
             InputStream in = s.getInputStream();
             OutputStream out = s.getOutputStream();
             String requestLine = readLine(in);
@@ -562,6 +564,13 @@ public final class LanCore {
                 byte[] shot = captureScreen();
                 if (shot == null) respond(out, 503, "text/plain", "no projection".getBytes());
                 else respond(out, 200, "image/jpeg", shot);
+            } else if ("/screen-stream".equals(path)) {
+                // 长连接推帧：每帧 4 字节大端长度 + JPEG。主控端不用再每 600ms 发一次请求。
+                if (!isControlActiveFor(uri.getQueryParameter("id"))) {
+                    respond(out, 403, "text/plain", "control not allowed".getBytes());
+                    return;
+                }
+                serveScreenStream(out, uri.getQueryParameter("id"));
             } else if ("/pair".equals(path)) {
                 // 对方请求连接：记录申请并通知 UI 弹窗。IP 以 TCP 对端为准，
                 // 对方自报 0.0.0.0 / VPN 地址时仍要从 socket 拿到可达地址。
@@ -872,6 +881,47 @@ public final class LanCore {
         return LanScreenService.isProjecting() ? LanScreenService.getLatestFrame() : null;
     }
 
+    /**
+     * 持续把最新帧写给主控端。手机屏幕由系统直接产出 JPEG，这里只控制发送节奏：
+     * 有新帧最多 16ms 发一次（约 60fps），画面静止时每秒补一帧保活。
+     */
+    private void serveScreenStream(OutputStream out, String controllerId) {
+        try {
+            String head = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"
+                    + "Cache-Control: no-store\r\nConnection: close\r\n\r\n";
+            out.write(head.getBytes(StandardCharsets.ISO_8859_1));
+            out.flush();
+            byte[] last = null;
+            long lastSentAt = 0;
+            byte[] lenBuf = new byte[4];
+            while (running && isControlActiveFor(controllerId)) {
+                byte[] frame = captureScreen();
+                long now = System.currentTimeMillis();
+                boolean fresh = frame != null && frame != last;
+                boolean keepAlive = frame != null && now - lastSentAt >= 1000;
+                boolean paced = last == null || now - lastSentAt >= 16;
+                if ((fresh || keepAlive) && paced) {
+                    int n = frame.length;
+                    lenBuf[0] = (byte) (n >>> 24);
+                    lenBuf[1] = (byte) (n >>> 16);
+                    lenBuf[2] = (byte) (n >>> 8);
+                    lenBuf[3] = (byte) n;
+                    out.write(lenBuf);
+                    out.write(frame);
+                    out.flush();
+                    last = frame;
+                    lastSentAt = now;
+                }
+                sleep(4);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    // 被控端记录按下位置，主控端用 down/move/up 手势时在抬手时合成点击或滑动。
+    private volatile float inputDownX, inputDownY;
+    private volatile boolean inputDown;
+
     private boolean applyInput(byte[] body) {
         LanAccessibilityService acc = LanAccessibilityService.getInstance();
         if (acc == null) return false;
@@ -891,6 +941,25 @@ public final class LanCore {
                 float x2 = (float) (o.getDouble("x2") * dm.widthPixels);
                 float y2 = (float) (o.getDouble("y2") * dm.heightPixels);
                 return acc.swipe(x1, y1, x2, y2);
+            } else if ("down".equals(a)) {
+                inputDownX = (float) (o.getDouble("x") * dm.widthPixels);
+                inputDownY = (float) (o.getDouble("y") * dm.heightPixels);
+                inputDown = true;
+                return true;
+            } else if ("move".equals(a)) {
+                // 无障碍不能连续注入“移动中”的指针；保留接口，抬手时按轨迹合成手势。
+                return true;
+            } else if ("up".equals(a)) {
+                float x = (float) (o.getDouble("x") * dm.widthPixels);
+                float y = (float) (o.getDouble("y") * dm.heightPixels);
+                boolean wasDown = inputDown;
+                inputDown = false;
+                if (!wasDown) return true;
+                float dx = x - inputDownX, dy = y - inputDownY;
+                float threshold = dm.widthPixels * 0.02f;
+                if (dx * dx + dy * dy > threshold * threshold)
+                    return acc.swipe(inputDownX, inputDownY, x, y);
+                return acc.tap(x, y);
             } else if ("key".equals(a)) {
                 return acc.key(o.optString("k"));
             }
@@ -1124,9 +1193,79 @@ public final class LanCore {
         try { return httpGetBytes(signedUrl(d, "/screen", null, "GET", null)); } catch (Throwable t) { return null; }
     }
 
+    /** 主控端的长连接推流；失败返回 null，由调用方退回 /screen 轮询。 */
+    public static final class ScreenStream {
+        private final Socket socket;
+        private final InputStream in;
+
+        ScreenStream(Socket socket, InputStream in) {
+            this.socket = socket;
+            this.in = in;
+        }
+
+        /** 读取下一帧 JPEG；连接断开或数据异常时返回 null。 */
+        public byte[] readFrame() {
+            try {
+                byte[] len = new byte[4];
+                if (!readFully(in, len)) return null;
+                int n = ((len[0] & 0xff) << 24) | ((len[1] & 0xff) << 16)
+                        | ((len[2] & 0xff) << 8) | (len[3] & 0xff);
+                if (n <= 0 || n > 8 * 1024 * 1024) return null;
+                byte[] frame = new byte[n];
+                return readFully(in, frame) ? frame : null;
+            } catch (Throwable t) {
+                return null;
+            }
+        }
+
+        public void close() {
+            try { socket.close(); } catch (Throwable ignored) { }
+        }
+    }
+
+    public ScreenStream openScreenStream(Device d) {
+        Socket s = null;
+        try {
+            java.net.URL u = new java.net.URL(signedUrl(d, "/screen-stream", null, "GET", null));
+            int port = u.getPort() > 0 ? u.getPort() : 80;
+            s = new Socket();
+            s.setTcpNoDelay(true);
+            s.connect(new java.net.InetSocketAddress(u.getHost(), port), 5000);
+            s.setSoTimeout(15000);
+            String req = "GET " + u.getFile() + " HTTP/1.1\r\nHost: " + u.getHost()
+                    + "\r\nConnection: close\r\n\r\n";
+            OutputStream os = s.getOutputStream();
+            os.write(req.getBytes(StandardCharsets.ISO_8859_1));
+            os.flush();
+            InputStream in = s.getInputStream();
+            String status = readLine(in);
+            if (status == null || !status.contains(" 200")) {
+                try { s.close(); } catch (Throwable ignored) { }
+                return null;
+            }
+            String line;
+            while ((line = readLine(in)) != null && !line.isEmpty()) { }
+            return new ScreenStream(s, in);
+        } catch (Throwable t) {
+            try { if (s != null) s.close(); } catch (Throwable ignored) { }
+            return null;
+        }
+    }
+
+    private static boolean readFully(InputStream in, byte[] buf) throws java.io.IOException {
+        int off = 0;
+        while (off < buf.length) {
+            int n = in.read(buf, off, buf.length - off);
+            if (n <= 0) return false;
+            off += n;
+        }
+        return true;
+    }
+
     public boolean input(Device d, JSONObject payload) {
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
-        return httpPostUrl(signedUrl(d, "/input", null, "POST", body), body);
+        // 输入事件不能套 30 秒文件超时：网络一抖就会堵住后续手势。
+        return httpPostUrl(signedUrl(d, "/input", null, "POST", body), body, 4000);
     }
 
     public interface ProgressListener { void onProgress(double p); }
@@ -1156,12 +1295,16 @@ public final class LanCore {
     }
 
     private boolean httpPostUrl(String url, byte[] body) {
+        return httpPostUrl(url, body, 30000);
+    }
+
+    private boolean httpPostUrl(String url, byte[] body, int readTimeout) {
         java.net.HttpURLConnection c = null;
         try {
             c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
             c.setRequestMethod("POST"); c.setDoOutput(true);
-            // 文件分片可达 4MB，慢速 Wi-Fi 下 8 秒读超时会误判失败；远控输入也不介意更长超时。
-            c.setConnectTimeout(8000); c.setReadTimeout(30000);
+            // 文件分片可达 4MB，慢速 Wi-Fi 下 8 秒读超时会误判失败。
+            c.setConnectTimeout(8000); c.setReadTimeout(readTimeout);
             c.setFixedLengthStreamingMode(body.length);
             c.connect();
             try (OutputStream os = c.getOutputStream()) { os.write(body); }

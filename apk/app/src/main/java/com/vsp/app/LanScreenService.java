@@ -153,9 +153,17 @@ public final class LanScreenService extends Service {
             DisplayMetrics dm = new DisplayMetrics();
             WindowManager wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
             if (wm != null) wm.getDefaultDisplay().getRealMetrics(dm);
-            int w = dm.widthPixels > 0 ? dm.widthPixels : 1080;
-            int h = dm.heightPixels > 0 ? dm.heightPixels : 1920;
+            int realW = dm.widthPixels > 0 ? dm.widthPixels : 1080;
+            int realH = dm.heightPixels > 0 ? dm.heightPixels : 1920;
             int dpi = dm.densityDpi > 0 ? dm.densityDpi : 320;
+
+            // 远控不需要原分辨率：限制长边 1280 能显著降低系统 JPEG 编码耗时和推流带宽，
+            // 输入坐标仍是 0~1 归一化值，按真实屏幕尺寸换算，不受这里缩放影响。
+            final int maxSide = 1280;
+            float scale = Math.min(1f, maxSide / (float) Math.max(realW, realH));
+            int w = Math.max(2, Math.round(realW * scale));
+            int h = Math.max(2, Math.round(realH * scale));
+            dpi = Math.max(120, Math.round(dpi * scale));
 
             imageReader = ImageReader.newInstance(w, h, ImageFormat.JPEG, 2);
             imageReader.setOnImageAvailableListener(reader -> {

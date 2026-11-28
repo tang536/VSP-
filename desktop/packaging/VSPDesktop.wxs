@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
-  <Package Name="全能工具箱 桌面端" Language="2052" Codepage="936" Manufacturer="全能工具箱" Version="1.2.11.0" UpgradeCode="A0A1D4B2-7D6C-4B8E-9F35-1234567890AB" ProductCode="*" Scope="perUserOrMachine">
+  <Package Name="全能工具箱 桌面端" Language="2052" Codepage="936" Manufacturer="全能工具箱" Version="1.2.12.0" UpgradeCode="A0A1D4B2-7D6C-4B8E-9F35-1234567890AB" ProductCode="*" Scope="perUserOrMachine">
     <MajorUpgrade Schedule="afterInstallValidate" AllowSameVersionUpgrades="yes" DowngradeErrorMessage="已安装更新版本的全能工具箱桌面端，无法降级安装。" />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
     <Icon Id="AppIcon" SourceFile="C:\Users\32854\Desktop\university\VSP解析\desktop\packaging\app.ico" />
@@ -7207,6 +7207,12 @@
             </Component>
           </Directory>
         </Directory>
+        <Component Id="cmp4fbd54244c73" Guid="1ECC5DDE-0310-5DC9-893A-E17B928D84C6">
+          <File Id="filf155b2ea3ce6" Source="C:\Users\32854\Desktop\university\VSP解析\desktop\publish\win-x64\SharpGen.Runtime.COM.dll" KeyPath="yes" />
+        </Component>
+        <Component Id="cmp4e85dfaf8842" Guid="16E99030-AD73-5A11-AFFF-27C6B4B53475">
+          <File Id="fil5d5451047a58" Source="C:\Users\32854\Desktop\university\VSP解析\desktop\publish\win-x64\SharpGen.Runtime.dll" KeyPath="yes" />
+        </Component>
         <Component Id="cmp9fe221c9c0af" Guid="471EB1EF-7264-51CB-B133-DAFDB1914C72">
           <File Id="fila6d2d39765a2" Source="C:\Users\32854\Desktop\university\VSP解析\desktop\publish\win-x64\SkiaSharp.dll" KeyPath="yes" />
         </Component>
@@ -7716,6 +7722,18 @@
         </Component>
         <Component Id="cmp0ebcaf6f4a25" Guid="670B2870-F925-5006-9B8F-B786BE2E5877">
           <File Id="fil3ea6c9ba3abe" Source="C:\Users\32854\Desktop\university\VSP解析\desktop\publish\win-x64\Tmds.DBus.Protocol.dll" KeyPath="yes" />
+        </Component>
+        <Component Id="cmp9212ec54c1fb" Guid="206B450F-0A44-5D03-8F09-6DC174377531">
+          <File Id="fil7cb675c54209" Source="C:\Users\32854\Desktop\university\VSP解析\desktop\publish\win-x64\Vortice.Direct3D11.dll" KeyPath="yes" />
+        </Component>
+        <Component Id="cmp20ea34246cd6" Guid="62F6B913-4FC4-5EEB-97F3-8E67EE4936C1">
+          <File Id="fil90e6135131e7" Source="C:\Users\32854\Desktop\university\VSP解析\desktop\publish\win-x64\Vortice.DirectX.dll" KeyPath="yes" />
+        </Component>
+        <Component Id="cmp4578aa727685" Guid="14837015-B08A-5364-BF13-F53843D3F179">
+          <File Id="fil38d352e93aa6" Source="C:\Users\32854\Desktop\university\VSP解析\desktop\publish\win-x64\Vortice.DXGI.dll" KeyPath="yes" />
+        </Component>
+        <Component Id="cmp9446907c84f4" Guid="EF91CA05-4FE6-55E4-9778-8319B6151BE4">
+          <File Id="filfe72ed54775c" Source="C:\Users\32854\Desktop\university\VSP解析\desktop\publish\win-x64\Vortice.Mathematics.dll" KeyPath="yes" />
         </Component>
         <Component Id="cmp3b52cbc844bd" Guid="60A20F88-D368-5527-8309-EF03EB436ED0">
           <File Id="fil643fff6ac3db" Source="C:\Users\32854\Desktop\university\VSP解析\desktop\publish\win-x64\VSP.Core.dll" KeyPath="yes" />
@@ -10110,6 +10128,8 @@
       <ComponentRef Id="cmp94194d3f19bd" />
       <ComponentRef Id="cmpbd38f5659136" />
       <ComponentRef Id="cmp29880d22f666" />
+      <ComponentRef Id="cmp4fbd54244c73" />
+      <ComponentRef Id="cmp4e85dfaf8842" />
       <ComponentRef Id="cmp9fe221c9c0af" />
       <ComponentRef Id="cmp9d35759daa6f" />
       <ComponentRef Id="cmpaa7f6d12c3f7" />
@@ -10280,6 +10300,10 @@
       <ComponentRef Id="cmp66b8591daabe" />
       <ComponentRef Id="cmpe33fa82fd20b" />
       <ComponentRef Id="cmp0ebcaf6f4a25" />
+      <ComponentRef Id="cmp9212ec54c1fb" />
+      <ComponentRef Id="cmp20ea34246cd6" />
+      <ComponentRef Id="cmp4578aa727685" />
+      <ComponentRef Id="cmp9446907c84f4" />
       <ComponentRef Id="cmp3b52cbc844bd" />
       <ComponentRef Id="cmp7e0e99344eb5" />
       <ComponentRef Id="cmp4ddb563f9197" />

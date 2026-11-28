@@ -5,11 +5,16 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <InvariantGlobalization>false</InvariantGlobalization>
+    <!-- DXGI 映射内存到普通 Bitmap 的整屏拷贝用 Buffer.MemoryCopy -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
     <!-- 局域网远程控制需要截屏；桌面端仅 Windows x64 发布 -->
     <PackageReference Include="System.Drawing.Common" Version="10.0.0" />
+    <!-- 远控 60fps：DXGI Desktop Duplication 直接从 GPU 取帧，绕开 GDI 截屏的几十毫秒开销 -->
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.2" />
+    <PackageReference Include="Vortice.DXGI" Version="3.8.2" />
   </ItemGroup>
 
   <ItemGroup>

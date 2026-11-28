@@ -14,6 +14,7 @@ import android.content.ContentUris;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.database.Cursor;
@@ -40,6 +41,7 @@ import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.provider.Settings;
 import android.util.Base64;
+import android.util.DisplayMetrics;
 import android.util.Log;
 import android.util.Size;
 import android.view.KeyEvent;
@@ -227,10 +229,14 @@ public class MainActivity extends Activity {
     private LanCore.Device lanConnecting;
     private android.widget.ProgressBar lanPairingBar, lanTransferBar;
     private TextView lanStatusText, lanLocalIpText, lanSelectedName, lanBreadcrumbText;
-    private ImageView lanScreen;
-    private ImageView lanScreenFull;
+    private TextView lanStreamFpsText, lanStreamFpsFullText;
+    private long lanFpsWindowStart;
+    private int lanFpsFrames;
+    private RemoteScreenView lanScreen;
+    private RemoteScreenView lanScreenFull;
     private FrameLayout lanFullscreenHost;
     private android.graphics.Bitmap lanScreenBitmap;
+    private byte[] lanLastFrameBytes;
     private boolean lanFullscreen = false;
     private LanCore.Device lanSelected;
     private final java.util.Stack<String> lanDirStack = new java.util.Stack<>();
@@ -241,8 +247,17 @@ public class MainActivity extends Activity {
     private String lanPendingControlCid;
     private AlertDialog lanControlDialog;
     private boolean lanAwaitingAccessibility;
-    private final Handler lanScreenHandler = new Handler(Looper.getMainLooper());
-    private Runnable lanScreenTask;
+    private volatile LanCore.ScreenStream lanScreenStream;
+    private Thread lanScreenThread;
+    // 上一帧还在等 UI 绘制时丢掉新帧，防止解码/位图在消息队列里堆积。
+    private volatile boolean lanFramePostPending;
+    // 手势事件单独排队：移动只保留最新坐标，点击/抬起按顺序发送，避免请求堆积。
+    private final Object lanInputLock = new Object();
+    private final java.util.ArrayDeque<JSONObject> lanInputQueue = new java.util.ArrayDeque<>();
+    private float lanPendingMoveX, lanPendingMoveY;
+    private boolean lanPendingMove;
+    private volatile boolean lanInputRunning;
+    private Thread lanInputThread;
     // 首页
     private EditText urlInput;
     private Button btnParse;
@@ -1722,8 +1737,17 @@ public class MainActivity extends Activity {
         lanScreen = pageLan.findViewById(R.id.lan_screen);
         lanScreenFull = pageLan.findViewById(R.id.lan_screen_full);
         lanFullscreenHost = pageLan.findViewById(R.id.lan_fullscreen_host);
+        lanStreamFpsText = pageLan.findViewById(R.id.lan_stream_fps);
+        lanStreamFpsFullText = pageLan.findViewById(R.id.lan_stream_fps_full);
         pageLan.findViewById(R.id.lan_fullscreen).setOnClickListener(v -> setLanFullscreen(true));
         pageLan.findViewById(R.id.lan_fullscreen_exit).setOnClickListener(v -> setLanFullscreen(false));
+        RemoteScreenView.Listener lanTouch = new RemoteScreenView.Listener() {
+            @Override public void onPointerDown(float x, float y) { queueLanInput("down", x, y); }
+            @Override public void onPointerMove(float x, float y) { queueLanMove(x, y); }
+            @Override public void onPointerUp(float x, float y, boolean moved) { queueLanInput("up", x, y); }
+        };
+        lanScreen.setListener(lanTouch);
+        lanScreenFull.setListener(lanTouch);
 
         pageLan.findViewById(R.id.lan_back).setOnClickListener(v -> switchPage(PAGE_ME));
         pageLan.findViewById(R.id.lan_dir_up).setOnClickListener(v -> {
@@ -1746,41 +1770,8 @@ public class MainActivity extends Activity {
         pageLan.findViewById(R.id.lan_key_home).setOnClickListener(v -> sendLanKey("home"));
         pageLan.findViewById(R.id.lan_key_recent).setOnClickListener(v -> sendLanKey("recent"));
 
-        // 远控画面触摸：按下-移动-抬起区分点击 / 滑动，归一化坐标发给对方
-        final float[] downX = new float[1];
-        final float[] downY = new float[1];
-        final boolean[] moved = new boolean[1];
-        lanScreen.setOnTouchListener((v, event) -> {
-            if (lan == null || lanSelected == null || !lanControlling) return false;
-            float x = Math.max(0f, Math.min(1f, event.getX() / v.getWidth()));
-            float y = Math.max(0f, Math.min(1f, event.getY() / v.getHeight()));
-            switch (event.getAction()) {
-                case MotionEvent.ACTION_DOWN:
-                    downX[0] = x; downY[0] = y; moved[0] = false;
-                    return true;
-                case MotionEvent.ACTION_MOVE:
-                    if (Math.abs(x - downX[0]) > 0.02f || Math.abs(y - downY[0]) > 0.02f) moved[0] = true;
-                    return true;
-                case MotionEvent.ACTION_UP:
-                    final boolean isSwipe = moved[0];
-                    final float sx = downX[0], sy = downY[0], ex = x, ey = y;
-                    new Thread(() -> {
-                        try {
-                            JSONObject o = new JSONObject();
-                            if (isSwipe) {
-                                o.put("a", "swipe");
-                                o.put("x1", sx); o.put("y1", sy); o.put("x2", ex); o.put("y2", ey);
-                            } else {
-                                o.put("a", "tap"); o.put("x", ex); o.put("y", ey);
-                            }
-                            lan.input(lanSelected, o);
-                        } catch (Throwable ignored) { }
-                    }, "lan-input").start();
-                    return true;
-                default:
-                    return true;
-            }
-        });
+        // 触摸手势由 RemoteScreenView 统一处理：本机立即绘制鼠标指针，
+        // 坐标以归一化值排队发给对方，移动事件只保留最新位置。
     }
 
     private void renderLanDevices() {
@@ -2144,36 +2135,165 @@ public class MainActivity extends Activity {
         lanControlPanel.setVisibility(View.VISIBLE);
         showLanFiles(false);
         if (lanStatusText != null) lanStatusText.setText("正在加载 " + dev.name + " 的屏幕…");
-        cancelLanScreenTask();
-        lanScreenTask = new Runnable() {
-            @Override public void run() {
-                if (!lanControlling || lan == null || lanSelected != dev) return;
-                // 网络 + 图片解码放后台：全屏 JPEG 在主线程解码极易 OOM，同步 HTTP 会卡死 UI。
-                swipePool.execute(() -> {
-                    if (!lanControlling || lanSelected != dev) return;
-                    byte[] shot = lan.screen(dev);
-                    android.graphics.Bitmap bmp = null;
-                    if (shot != null && shot.length > 0) {
-                        try {
-                            android.graphics.BitmapFactory.Options opt = new android.graphics.BitmapFactory.Options();
-                            opt.inSampleSize = 2; // 缩放到 1/2，远控预览 260dp 足够，显存降为 1/4
-                            bmp = android.graphics.BitmapFactory.decodeByteArray(shot, 0, shot.length, opt);
-                        } catch (Throwable ignored) { }
+        stopLanScreenStream();
+        stopLanInputLoop();
+        lanLastFrameBytes = null;
+        lanFramePostPending = false;
+        resetLanFps();
+        if (lanScreen != null) { lanScreen.setCursorVisible(true); lanScreen.resetCursor(); }
+        if (lanScreenFull != null) { lanScreenFull.setCursorVisible(true); lanScreenFull.resetCursor(); }
+        startLanInputLoop();
+        startLanScreenStream(dev, token);
+    }
+
+    /**
+     * 优先使用长连接推流。旧版被控端没有 /screen-stream 时退回 200ms 单帧轮询，
+     * 至少比原来的 700ms 明显跟手。网络抖动断流时短暂重连，对方真的停止共享才退出。
+     */
+    private void startLanScreenStream(final LanCore.Device dev, final int token) {
+        final LanCore core = lan;
+        Thread t = new Thread(() -> {
+            boolean usedStream = false;
+            boolean statusShown = false;
+            int failures = 0;
+            while (lanControlling && token == lanControlToken && lanSelected == dev) {
+                LanCore.ScreenStream stream = core.openScreenStream(dev);
+                if (stream == null) {
+                    if (!usedStream) {
+                        lanScreenPollFallback(dev, token, core);
+                        return;
                     }
-                    final android.graphics.Bitmap frame = bmp;
+                    String cid = lanControlCid;
+                    String state = cid == null ? "no" : core.pollControl(dev, cid);
+                    if (!lanControlling || token != lanControlToken || lanSelected != dev) return;
+                    if ("no".equals(state) || "busy".equals(state)) {
+                        finishLanStream(token);
+                        return;
+                    }
+                    if (++failures >= 5) {
+                        finishLanStream(token);
+                        return;
+                    }
+                    try { Thread.sleep(400); } catch (InterruptedException e) { return; }
+                    continue;
+                }
+                if (!lanControlling || token != lanControlToken || lanSelected != dev) {
+                    stream.close();
+                    return;
+                }
+                lanScreenStream = stream;
+                boolean gotFrame = false;
+                while (lanControlling && token == lanControlToken && lanSelected == dev) {
+                    final byte[] shot = stream.readFrame();
+                    if (shot == null) break;
+                    gotFrame = true;
+                    // UI 还没画完上一帧时直接丢帧，避免解码/位图在消息队列里越积越多。
+                    if (lanFramePostPending) continue;
+                    final android.graphics.Bitmap bmp = decodeLanFrame(shot);
+                    if (bmp == null) continue;
+                    final boolean first = !statusShown;
+                    statusShown = true;
+                    lanFramePostPending = true;
                     ui.post(() -> {
-                        if (!lanControlling || lanSelected != dev) return;
-                        if (frame != null) {
-                            setLanScreenBitmap(frame);
-                        } else if (lanStatusText != null) {
-                            lanStatusText.setText("远控画面等待中…");
+                        lanFramePostPending = false;
+                        if (lanControlling && token == lanControlToken && lanSelected == dev) {
+                            lanLastFrameBytes = shot;
+                            setLanScreenBitmap(bmp);
+                            countLanFrame();
+                            if (first && lanStatusText != null)
+                                lanStatusText.setText("远控中 · 手指移动即可移动对方鼠标");
+                        } else if (!bmp.isRecycled()) {
+                            bmp.recycle();
                         }
                     });
-                });
-                if (lanControlling) lanScreenHandler.postDelayed(this, 700);
+                }
+                stream.close();
+                lanScreenStream = null;
+                if (!lanControlling || token != lanControlToken || lanSelected != dev) return;
+                if (gotFrame) { usedStream = true; failures = 0; }
+                String cid = lanControlCid;
+                String state = cid == null ? "no" : core.pollControl(dev, cid);
+                if (!lanControlling || token != lanControlToken || lanSelected != dev) return;
+                if ("no".equals(state) || "busy".equals(state)) {
+                    finishLanStream(token);
+                    return;
+                }
+                if (!usedStream) {
+                    lanScreenPollFallback(dev, token, core);
+                    return;
+                }
+                if (++failures >= 5) {
+                    finishLanStream(token);
+                    return;
+                }
+                try { Thread.sleep(400); } catch (InterruptedException e) { return; }
             }
-        };
-        lanScreenHandler.post(lanScreenTask);
+        }, "lan-screen-stream");
+        lanScreenThread = t;
+        t.start();
+    }
+
+    /** 推流断开且确认无法恢复：收尾并给出明确提示。 */
+    private void finishLanStream(final int token) {
+        ui.post(() -> {
+            if (lanControlling && token == lanControlToken) {
+                stopLanControl(false);
+                if (lanStatusText != null) lanStatusText.setText("对方已停止屏幕共享");
+            }
+        });
+    }
+
+    /** 兼容旧版被控端：没有流式接口时仍能看画面。 */
+    private void lanScreenPollFallback(final LanCore.Device dev, final int token, final LanCore core) {
+        while (lanControlling && token == lanControlToken && lanSelected == dev) {
+            final byte[] shot = core.screen(dev);
+            if (shot != null && !lanFramePostPending) {
+                final android.graphics.Bitmap bmp = decodeLanFrame(shot);
+                if (bmp != null) {
+                    lanFramePostPending = true;
+                    ui.post(() -> {
+                        lanFramePostPending = false;
+                        if (lanControlling && token == lanControlToken && lanSelected == dev) {
+                            lanLastFrameBytes = shot;
+                            setLanScreenBitmap(bmp);
+                            countLanFrame();
+                        } else if (!bmp.isRecycled()) {
+                            bmp.recycle();
+                        }
+                    });
+                }
+            }
+            try { Thread.sleep(200); } catch (InterruptedException e) { return; }
+        }
+    }
+
+    /** 按目标显示尺寸解码：预览用小图，横屏全屏用接近原图，避免每帧都分配全尺寸位图。 */
+    private android.graphics.Bitmap decodeLanFrame(byte[] shot) {
+        try {
+            android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            android.graphics.BitmapFactory.decodeByteArray(shot, 0, shot.length, bounds);
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null;
+            int targetW, targetH;
+            if (lanFullscreen) {
+                DisplayMetrics dm = getResources().getDisplayMetrics();
+                targetW = dm.widthPixels;
+                targetH = dm.heightPixels;
+            } else {
+                targetW = lanScreen != null ? lanScreen.getWidth() : 0;
+                targetH = lanScreen != null ? lanScreen.getHeight() : 0;
+            }
+            if (targetW <= 1 || targetH <= 1) { targetW = 1280; targetH = 720; }
+            int sample = 1;
+            while (bounds.outWidth / (sample * 2) >= targetW
+                    && bounds.outHeight / (sample * 2) >= targetH) sample *= 2;
+            android.graphics.BitmapFactory.Options opt = new android.graphics.BitmapFactory.Options();
+            opt.inSampleSize = sample;
+            opt.inPreferredConfig = android.graphics.Bitmap.Config.RGB_565;
+            return android.graphics.BitmapFactory.decodeByteArray(shot, 0, shot.length, opt);
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     private void failLanControl(int token, String message) {
@@ -2203,36 +2323,176 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void cancelLanScreenTask() {
-        setLanFullscreen(false);
-        if (lanScreenTask != null) { lanScreenHandler.removeCallbacks(lanScreenTask); lanScreenTask = null; }
+    private void stopLanScreenStream() {
+        LanCore.ScreenStream stream = lanScreenStream;
+        lanScreenStream = null;
+        if (stream != null) stream.close();
+        Thread t = lanScreenThread;
+        lanScreenThread = null;
+        if (t != null) t.interrupt();
     }
 
     private void stopLanControlLoop() {
         lanControlling = false;
-        cancelLanScreenTask();
+        stopLanScreenStream();
+        stopLanInputLoop();
+        setLanFullscreen(false);
+        if (lanScreen != null) lanScreen.setCursorVisible(false);
+        if (lanScreenFull != null) lanScreenFull.setCursorVisible(false);
+        resetLanFps();
+        releaseLanScreenBitmap();
     }
 
-    /** 远控画面同时更新预览和全屏层；旧帧在两个 View 都替换后再回收，避免 recycled bitmap 崩溃 */
+    /** 主控端实际显示帧率：每秒刷新一次；界面卡顿时数字会跟着掉，便于判断真实流畅度。 */
+    private void countLanFrame() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (lanFpsWindowStart == 0) lanFpsWindowStart = now;
+        lanFpsFrames++;
+        long elapsed = now - lanFpsWindowStart;
+        if (elapsed < 1000) return;
+        int fps = (int) Math.round(lanFpsFrames * 1000.0 / elapsed);
+        lanFpsWindowStart = now;
+        lanFpsFrames = 0;
+        String text = fps + " FPS";
+        if (lanStreamFpsText != null) lanStreamFpsText.setText(text);
+        if (lanStreamFpsFullText != null) lanStreamFpsFullText.setText(text);
+    }
+
+    private void resetLanFps() {
+        lanFpsWindowStart = 0;
+        lanFpsFrames = 0;
+        if (lanStreamFpsText != null) lanStreamFpsText.setText("0 FPS");
+        if (lanStreamFpsFullText != null) lanStreamFpsFullText.setText("0 FPS");
+    }
+
+    private void releaseLanScreenBitmap() {
+        android.graphics.Bitmap old = lanScreenBitmap;
+        lanScreenBitmap = null;
+        lanLastFrameBytes = null;
+        if (lanScreen != null) lanScreen.setFrame(null);
+        if (lanScreenFull != null) lanScreenFull.setFrame(null);
+        if (old != null && !old.isRecycled()) {
+            try { old.recycle(); } catch (Throwable ignored) { }
+        }
+    }
+
+    /** 远控画面同时更新预览和全屏层；旧帧在两个 View 都替换后再回收，避免 recycled bitmap 崩溃。 */
     private void setLanScreenBitmap(android.graphics.Bitmap bmp) {
         android.graphics.Bitmap old = lanScreenBitmap;
         lanScreenBitmap = bmp;
-        if (lanScreen != null) lanScreen.setImageBitmap(bmp);
-        if (lanScreenFull != null && lanFullscreenHost != null
-                && lanFullscreenHost.getVisibility() == View.VISIBLE) {
-            lanScreenFull.setImageBitmap(bmp);
-        }
+        if (lanScreen != null) lanScreen.setFrame(bmp);
+        if (lanScreenFull != null) lanScreenFull.setFrame(bmp);
         if (old != null && old != bmp && !old.isRecycled()) {
             try { old.recycle(); } catch (Throwable ignored) { }
         }
     }
 
+    /**
+     * 横屏全屏：旋转到传感器横屏 + 隐藏系统栏，手指仍按同一套归一化坐标操作。
+     * 退出时恢复系统方向和状态栏，不影响其他页面的播放全屏。
+     */
     private void setLanFullscreen(boolean on) {
         if (lanFullscreenHost == null) return;
+        if (on == lanFullscreen) return;
         lanFullscreen = on;
         lanFullscreenHost.setVisibility(on ? View.VISIBLE : View.GONE);
-        if (on && lanScreenBitmap != null && lanScreenFull != null) {
-            lanScreenFull.setImageBitmap(lanScreenBitmap);
+        try {
+            if (on) {
+                setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+                getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                applyImmersive(true);
+            } else {
+                setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+                getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                applyImmersive(false);
+            }
+        } catch (Throwable ignored) { }
+        if (on) redecodeLanFullFrame();
+    }
+
+    /** 进入横屏时立刻用更高分辨率重解码最近一帧，不用等下一帧到达。 */
+    private void redecodeLanFullFrame() {
+        final byte[] shot = lanLastFrameBytes;
+        if (shot == null) return;
+        new Thread(() -> {
+            final android.graphics.Bitmap bmp = decodeLanFrame(shot);
+            if (bmp == null) return;
+            ui.post(() -> {
+                if (!lanFullscreen || !lanControlling) { bmp.recycle(); return; }
+                if (lanLastFrameBytes != shot && lanLastFrameBytes != null) { bmp.recycle(); return; }
+                setLanScreenBitmap(bmp);
+            });
+        }, "lan-frame-full").start();
+    }
+
+    // ---------------- 远控输入队列 ----------------
+
+    private void startLanInputLoop() {
+        if (lanInputRunning) return;
+        lanInputRunning = true;
+        synchronized (lanInputLock) {
+            lanInputQueue.clear();
+            lanPendingMove = false;
+        }
+        lanInputThread = new Thread(() -> {
+            while (lanInputRunning && lanControlling) {
+                JSONObject evt = null;
+                synchronized (lanInputLock) {
+                    if (!lanInputQueue.isEmpty()) {
+                        evt = lanInputQueue.poll();
+                    } else if (lanPendingMove) {
+                        try {
+                            evt = new JSONObject();
+                            evt.put("a", "move");
+                            evt.put("x", lanPendingMoveX);
+                            evt.put("y", lanPendingMoveY);
+                        } catch (Throwable ignored) { }
+                        lanPendingMove = false;
+                    }
+                }
+                if (evt != null && lan != null && lanSelected != null) {
+                    lan.input(lanSelected, evt);
+                    if ("move".equals(evt.optString("a"))) {
+                        try { Thread.sleep(22); } catch (InterruptedException e) { return; }
+                    }
+                } else {
+                    try { Thread.sleep(6); } catch (InterruptedException e) { return; }
+                }
+            }
+        }, "lan-input-loop");
+        lanInputThread.start();
+    }
+
+    private void stopLanInputLoop() {
+        lanInputRunning = false;
+        Thread t = lanInputThread;
+        lanInputThread = null;
+        if (t != null) t.interrupt();
+        synchronized (lanInputLock) {
+            lanInputQueue.clear();
+            lanPendingMove = false;
+        }
+    }
+
+    private void queueLanInput(String action, float x, float y) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("a", action);
+            o.put("x", x);
+            o.put("y", y);
+            synchronized (lanInputLock) {
+                // 新手势开始/结束时丢掉上一条待发移动，避免把鼠标甩到旧位置。
+                if ("down".equals(action) || "up".equals(action)) lanPendingMove = false;
+                lanInputQueue.add(o);
+            }
+        } catch (Throwable ignored) { }
+    }
+
+    private void queueLanMove(float x, float y) {
+        synchronized (lanInputLock) {
+            lanPendingMoveX = x;
+            lanPendingMoveY = y;
+            lanPendingMove = true;
         }
     }
 
@@ -2918,6 +3178,10 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        if (lanFullscreen) {
+            setLanFullscreen(false);
+            return;
+        }
         if (fullscreen) {
             exitWatch();
             return;

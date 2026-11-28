@@ -1,6 +1,9 @@
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Net;
 using System.Net.NetworkInformation;
@@ -86,6 +89,8 @@ public sealed class LanService : IDisposable
 {
     public const int UdpPort = 45320;
     public const int HttpPort = 45321;
+    /// <summary>远控画面宽度：1024 在 60fps 与清晰度之间比较平衡。</summary>
+    private const int DesktopCaptureWidth = 1024;
     public const string Token = "TBOX2026";
 
     private readonly string _deviceId = Guid.NewGuid().ToString("N")[..10];
@@ -106,6 +111,24 @@ public sealed class LanService : IDisposable
     private readonly ConcurrentDictionary<string, string> _sessionKeys = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, long> _seenNonces = new(StringComparer.OrdinalIgnoreCase);
     private readonly HttpClient _client = new() { Timeout = TimeSpan.FromSeconds(8) };
+    // 流式取帧要一直挂着连接，不能套用普通请求的 8 秒超时。
+    private readonly HttpClient _streamClient = new(new SocketsHttpHandler
+    {
+        ConnectTimeout = TimeSpan.FromSeconds(8),
+        PooledConnectionIdleTimeout = TimeSpan.FromSeconds(30),
+    })
+    { Timeout = Timeout.InfiniteTimeSpan };
+    private readonly object _screenCaptureLock = new();
+    private CancellationTokenSource? _screenCaptureCts;
+    private volatile byte[]? _screenFrame;
+    private long _screenFrameStamp;
+    private int _screenStreamClients;
+    // 采集线程发布新帧时唤醒所有推流连接，替代 15ms 级别的轮询等待。
+    private readonly object _frameSignalLock = new();
+    private TaskCompletionSource _frameSignal = CreateFrameSignal();
+
+    private static TaskCompletionSource CreateFrameSignal() =>
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly object _connLock = new();
     private string? _connectedPeerId;
     private LanDevice? _connectedPeer;
@@ -173,6 +196,8 @@ public sealed class LanService : IDisposable
 
     public string LocalIp { get; private set; } = "127.0.0.1";
     public string ShareRoot => _shareRoot;
+    /// <summary>本机在局域网里的设备 Id（诊断/回环测试用）。</summary>
+    public string SelfId => _deviceId;
     /// <summary>发现/HTTP 服务启动失败时非空，UI 必须显示出来，不能静默失败。</summary>
     public string? ServiceError { get; private set; }
     public IReadOnlyList<LanDevice> Devices => _devices.Values
@@ -421,6 +446,8 @@ public sealed class LanService : IDisposable
         {
             client.ReceiveTimeout = 20000;
             client.SendTimeout = 20000;
+            // 远控输入是大量小包，Nagle 算法会把几十毫秒的延迟叠成肉眼可见的迟滞。
+            client.NoDelay = true;
             var stream = client.GetStream();
 
             var requestLine = await ReadLineAsync(stream);
@@ -490,6 +517,14 @@ public sealed class LanService : IDisposable
                     if (!IsControlActiveFor(qs.GetValueOrDefault("id")))
                     { Respond(stream, 403, "control not allowed"); break; }
                     await ServeScreenAsync(stream);
+                    break;
+                case "/screen-stream":
+                    // 长连接持续推帧：每帧 4 字节大端长度 + JPEG。
+                    // 轮询一帧要一次完整 HTTP 往返，延迟被固定间隔和慢启动放大；
+                    // 流式连接只在授权期间保持一次握手。
+                    if (!IsControlActiveFor(qs.GetValueOrDefault("id")))
+                    { Respond(stream, 403, "control not allowed"); break; }
+                    await ServeScreenStreamAsync(stream, qs.GetValueOrDefault("id") ?? "");
                     break;
                 case "/input":
                     if (!IsControlActiveFor(qs.GetValueOrDefault("id")))
@@ -804,19 +839,234 @@ public sealed class LanService : IDisposable
     {
         try
         {
-            var w = GetSystemMetrics(0);
-            var h = GetSystemMetrics(1);
-            using var bmp = new Bitmap(w, h);
-            using (var g = Graphics.FromImage(bmp))
-                g.CopyFromScreen(0, 0, 0, 0, new Size(w, h));
-            using var ms = new MemoryStream();
-            var codec = ImageCodecInfo.GetImageEncoders().First(c => c.MimeType == "image/jpeg");
-            using var ep = new EncoderParameters(1);
-            ep.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 68L);
-            bmp.Save(ms, codec, ep);
-            await RespondBytesAsync(stream, 200, "image/jpeg", ms.ToArray());
+            EnsureScreenCapture();
+            TryGetScreenFrame(out var frame, out var stamp);
+            var age = Stopwatch.GetTimestamp() - stamp;
+            // 缓存超过 2 秒就现场补一帧，避免老客户端拿到很久以前的画面。
+            if (frame is null || age > Stopwatch.Frequency * 2)
+                frame = CaptureScreenJpeg();
+            if (frame is null) { Respond(stream, 503, "no screen"); return; }
+            await RespondBytesAsync(stream, 200, "image/jpeg", frame);
         }
         catch { }
+    }
+
+    /// <summary>
+    /// 被控端屏幕采集循环：优先用 DXGI 从 GPU 取帧，目标 60fps；DXGI 不可用时退回 GDI。
+    /// 所有取帧请求共享最新一帧，避免每个 /screen 请求都重新截屏 + 编码。
+    /// </summary>
+    private void EnsureScreenCapture()
+    {
+        lock (_screenCaptureLock)
+        {
+            if (_screenCaptureCts is not null) return;
+            var cts = new CancellationTokenSource();
+            _screenCaptureCts = cts;
+            _ = Task.Run(() => ScreenCaptureLoopAsync(cts));
+        }
+    }
+
+#pragma warning disable CA1416 // 远控采集只在 Windows 桌面端启用
+    private async Task ScreenCaptureLoopAsync(CancellationTokenSource cts)
+    {
+        var ct = cts.Token;
+        DxgiScreenCapture? dxgi = null;
+        var lastDxgiAttempt = 0L;
+        try
+        {
+            while (!ct.IsCancellationRequested && _activeControlCid is not null)
+            {
+                byte[]? frame = null;
+                if (dxgi is not null && dxgi.IsAvailable)
+                {
+                    // 有主控端在拉流时按 90fps 采集（高刷屏实际约 60~80fps）；
+                    // 只有旧版 /screen 轮询时降到 25fps，避免白烧 CPU。
+                    var targetFps = Volatile.Read(ref _screenStreamClients) > 0 ? 90 : 25;
+                    frame = dxgi.TryCaptureJpeg(DesktopCaptureWidth, targetFps);
+                    if (!dxgi.IsAvailable)
+                    {
+                        dxgi.Dispose();
+                        dxgi = null;
+                        lastDxgiAttempt = Stopwatch.GetTimestamp();
+                    }
+                }
+                else
+                {
+                    // DXGI 初始化失败（老显卡/远程会话）时每 30 秒再试一次，期间用 GDI 兜底。
+                    if (dxgi is null && Stopwatch.GetTimestamp() - lastDxgiAttempt > Stopwatch.Frequency * 30)
+                    {
+                        lastDxgiAttempt = Stopwatch.GetTimestamp();
+                        dxgi = DxgiScreenCapture.TryCreate();
+                    }
+                    if (dxgi is null || !dxgi.IsAvailable)
+                    {
+                        frame = CaptureScreenJpeg();
+                        // GDI 单帧约 30~80ms，不加延迟也会自然限速。
+                    }
+                }
+
+                if (frame is not null)
+                {
+                    PublishScreenFrame(frame);
+                }
+                else if (dxgi is null || !dxgi.IsAvailable)
+                {
+                    try { await Task.Delay(15, ct); }
+                    catch (OperationCanceledException) { break; }
+                }
+            }
+        }
+        finally
+        {
+            dxgi?.Dispose();
+            bool restart;
+            lock (_screenCaptureLock)
+            {
+                restart = ReferenceEquals(_screenCaptureCts, cts) && _activeControlCid is not null;
+                if (ReferenceEquals(_screenCaptureCts, cts)) _screenCaptureCts = null;
+            }
+            cts.Dispose();
+            // 上一轮刚退出时如果新的远控会话已经建立，这里要把采集循环接上，
+            // 否则新主控端会一直等不到帧。
+            if (restart) EnsureScreenCapture();
+        }
+    }
+#pragma warning restore CA1416
+
+    /// <summary>GDI 兜底截屏：宽度限制在 1024，质量 58，尽量跟上推流节奏。</summary>
+#pragma warning disable CA1416 // 桌面端只发布 Windows x64，System.Drawing 的屏幕捕获在目标平台可用
+    private static byte[]? CaptureScreenJpeg()
+    {
+        try
+        {
+            var w = GetSystemMetrics(0);
+            var h = GetSystemMetrics(1);
+            if (w <= 0 || h <= 0) return null;
+            const int maxWidth = DesktopCaptureWidth;
+            var scale = Math.Min(1.0, (double)maxWidth / w);
+            var outW = Math.Max(2, (int)Math.Round(w * scale));
+            var outH = Math.Max(2, (int)Math.Round(h * scale));
+
+            using var full = new Bitmap(w, h);
+            using (var g = Graphics.FromImage(full))
+                g.CopyFromScreen(0, 0, 0, 0, new Size(w, h));
+
+            using var ms = new MemoryStream(128 * 1024);
+            var codec = ImageCodecInfo.GetImageEncoders().First(c => c.MimeType == "image/jpeg");
+            using var ep = new EncoderParameters(1);
+            ep.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 58L);
+            if (scale < 0.999)
+            {
+                using var scaled = new Bitmap(outW, outH);
+                using (var gs = Graphics.FromImage(scaled))
+                {
+                    gs.InterpolationMode = InterpolationMode.Bilinear;
+                    gs.DrawImage(full, new Rectangle(0, 0, outW, outH));
+                }
+                scaled.Save(ms, codec, ep);
+            }
+            else
+            {
+                full.Save(ms, codec, ep);
+            }
+            return ms.ToArray();
+        }
+        catch { return null; }
+    }
+#pragma warning restore CA1416
+
+    /// <summary>持续推送最新帧；画面没变化时每秒重发一次，客户端可据此判断连接仍然有效。</summary>
+    private async Task ServeScreenStreamAsync(NetworkStream stream, string controllerId)
+    {
+        Interlocked.Increment(ref _screenStreamClients);
+        try
+        {
+            EnsureScreenCapture();
+            var head = Encoding.ASCII.GetBytes(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n" +
+                "Cache-Control: no-store\r\nConnection: close\r\n\r\n");
+            await stream.WriteAsync(head.AsMemory());
+            await stream.FlushAsync();
+
+            var lenBuf = new byte[4];
+            long lastStamp = 0;
+            var lastSendAt = 0L;
+            while (IsControlActiveFor(controllerId))
+            {
+                TryGetScreenFrame(out var frame, out var stamp);
+                var now = Stopwatch.GetTimestamp();
+                if (frame is not null && (stamp != lastStamp || now - lastSendAt > Stopwatch.Frequency))
+                {
+                    BinaryPrimitives.WriteInt32BigEndian(lenBuf, frame.Length);
+                    await stream.WriteAsync(lenBuf.AsMemory());
+                    await stream.WriteAsync(frame.AsMemory());
+                    await stream.FlushAsync();
+                    lastStamp = stamp;
+                    lastSendAt = now;
+                }
+                else
+                {
+                    // 等采集线程发布新帧；最长 250ms 回来检查会话是否已结束。
+                    await WaitForNextScreenFrameAsync(lastStamp);
+                }
+            }
+        }
+        catch { }
+        finally
+        {
+            Interlocked.Decrement(ref _screenStreamClients);
+        }
+    }
+
+    /// <summary>
+    /// 取当前帧和时间戳。采集线程先写帧再写时间戳，这里前后各读一次时间戳，
+    /// 只有两次一致才返回，避免把“新时间戳 + 旧帧”当成新帧而让画面卡到下一次保活。
+    /// </summary>
+    private bool TryGetScreenFrame(out byte[]? frame, out long stamp)
+    {
+        for (var i = 0; i < 4; i++)
+        {
+            var before = Volatile.Read(ref _screenFrameStamp);
+            var current = _screenFrame;
+            if (before == Volatile.Read(ref _screenFrameStamp))
+            {
+                frame = current;
+                stamp = before;
+                return current is not null;
+            }
+        }
+        frame = _screenFrame;
+        stamp = Volatile.Read(ref _screenFrameStamp);
+        return frame is not null;
+    }
+
+    /// <summary>采集线程发布新帧：写入帧和时间戳后唤醒所有正在等待的推流连接。</summary>
+    private void PublishScreenFrame(byte[] frame)
+    {
+        _screenFrame = frame;
+        Volatile.Write(ref _screenFrameStamp, Stopwatch.GetTimestamp());
+        TaskCompletionSource signal;
+        lock (_frameSignalLock)
+        {
+            signal = _frameSignal;
+            _frameSignal = CreateFrameSignal();
+        }
+        signal.TrySetResult();
+    }
+
+    /// <summary>等采集线程发布比 lastStamp 更新的帧；250ms 超时让调用方复查会话状态和保活。</summary>
+    private async Task WaitForNextScreenFrameAsync(long lastStamp)
+    {
+        Task wait;
+        lock (_frameSignalLock)
+        {
+            if (TryGetScreenFrame(out _, out var current) && current != lastStamp) return;
+            wait = _frameSignal.Task;
+        }
+        // 取信号和复查之间可能刚好来了新帧，这里补一次判断，避免白等 250ms。
+        if (TryGetScreenFrame(out _, out var again) && again != lastStamp) return;
+        try { await wait.WaitAsync(TimeSpan.FromMilliseconds(250)); }
+        catch (TimeoutException) { }
     }
 
     private async Task ReceiveInputAsync(NetworkStream stream, byte[] body)
@@ -830,6 +1080,33 @@ public sealed class LanService : IDisposable
             var sh = GetSystemMetrics(1);
             switch (action)
             {
+                case "move":
+                {
+                    // 手机端手指移动时高频发送，鼠标指针实时跟手，不需要等抬手。
+                    var x = (int)(root.GetProperty("x").GetDouble() * sw);
+                    var y = (int)(root.GetProperty("y").GetDouble() * sh);
+                    SetCursorPos(x, y);
+                    break;
+                }
+                case "down":
+                {
+                    var x = (int)(root.GetProperty("x").GetDouble() * sw);
+                    var y = (int)(root.GetProperty("y").GetDouble() * sh);
+                    SetCursorPos(x, y);
+                    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+                    break;
+                }
+                case "up":
+                {
+                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+                    break;
+                }
+                case "wheel":
+                {
+                    var delta = (int)root.GetProperty("d").GetDouble();
+                    mouse_event(MOUSEEVENTF_WHEEL, 0, 0, (uint)delta, UIntPtr.Zero);
+                    break;
+                }
                 case "tap":
                 {
                     var x = (int)(root.GetProperty("x").GetDouble() * sw);
@@ -986,6 +1263,52 @@ public sealed class LanService : IDisposable
     {
         try { return await _client.GetByteArrayAsync(SignedUrl(dev, "/screen")); }
         catch { return null; }
+    }
+
+    /// <summary>
+    /// 主控端持续读取对方推送的屏幕帧。返回 true 表示流式接口可用（至少收到过一帧），
+    /// false 表示对方是旧版、只能退回 /screen 轮询。取消令牌用于停止远控。
+    /// </summary>
+    public async Task<bool> StreamScreenAsync(LanDevice dev, Func<byte[], Task> onFrame, CancellationToken ct)
+    {
+        var gotFrame = false;
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, SignedUrl(dev, "/screen-stream"));
+            using var response = await _streamClient.SendAsync(
+                request, HttpCompletionOption.ResponseHeadersRead, ct);
+            if (!response.IsSuccessStatusCode) return false;
+            await using var stream = await response.Content.ReadAsStreamAsync(ct);
+            var lenBuf = new byte[4];
+            while (!ct.IsCancellationRequested)
+            {
+                if (!await ReadExactAsync(stream, lenBuf, ct)) break;
+                var len = BinaryPrimitives.ReadInt32BigEndian(lenBuf);
+                if (len <= 0 || len > 8 * 1024 * 1024) break;
+                var frame = new byte[len];
+                if (!await ReadExactAsync(stream, frame, ct)) break;
+                gotFrame = true;
+                await onFrame(frame);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch { }
+        return gotFrame;
+    }
+
+    private static async Task<bool> ReadExactAsync(Stream stream, byte[] buffer, CancellationToken ct)
+    {
+        // 被控端每秒至少发一帧保活；10 秒没有任何数据说明连接已死，主动断开让上层重连。
+        using var readCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        readCts.CancelAfter(TimeSpan.FromSeconds(10));
+        var offset = 0;
+        while (offset < buffer.Length)
+        {
+            var n = await stream.ReadAsync(buffer.AsMemory(offset), readCts.Token);
+            if (n <= 0) return false;
+            offset += n;
+        }
+        return true;
     }
 
     public async Task<bool> SendInputAsync(LanDevice dev, object payload)
@@ -1278,6 +1601,7 @@ public sealed class LanService : IDisposable
 
     private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
     private const uint MOUSEEVENTF_LEFTUP = 0x0004;
+    private const uint MOUSEEVENTF_WHEEL = 0x0800;
     private const byte VK_ESCAPE = 0x1B;
     private const byte VK_LWIN = 0x5B;
     private const byte VK_MENU = 0x12;
@@ -1289,6 +1613,8 @@ public sealed class LanService : IDisposable
         _cts?.Cancel();
         try { _udp?.Close(); } catch { }
         try { _tcp?.Stop(); } catch { }
+        try { _screenCaptureCts?.Cancel(); } catch { }
         _client.Dispose();
+        _streamClient.Dispose();
     }
 }

@@ -401,9 +401,17 @@ public sealed class MainViewModel : BindableBase
     private bool _lanTransferring;
     /// <summary>收到文件时的通知，MainWindow 用它弹应用内通知（即使停在别的页面也能看到）。</summary>
     public Action<string>? LanNotification;
-    /// <summary>远控画面：由 LanView 把字节转成 Bitmap 显示。</summary>
-    public byte[]? LanScreenBytes { get => _lanScreenBytes; private set => Set(ref _lanScreenBytes, value); }
-    private byte[]? _lanScreenBytes;
+    /// <summary>远控画面：JPEG 在后台解码成 Bitmap，UI 线程只负责显示。</summary>
+    public Bitmap? LanScreenFrame { get => _lanScreenFrame; private set => Set(ref _lanScreenFrame, value); }
+    private Bitmap? _lanScreenFrame;
+    /// <summary>远控实时帧率，控制面板上显示。</summary>
+    public int LanStreamFps { get => _lanStreamFps; private set => Set(ref _lanStreamFps, value); }
+    private int _lanStreamFps;
+    private long _lanFpsWindowStart;
+    private int _lanFpsFrames;
+    // 网络线程只把最新一帧放进这个槽位，解码任务跟不上时自动丢旧帧。
+    private byte[]? _lanLatestFrameBytes;
+    private int _lanDecodeBusy;
     public bool IsRemoteControlling { get => _remoteCtl; private set => Set(ref _remoteCtl, value); }
     private bool _remoteCtl;
     /// <summary>正在等待对方同意远控申请（尚未开始拉画面）。</summary>
@@ -1289,25 +1297,56 @@ public sealed class MainViewModel : BindableBase
 
             if (cts.IsCancellationRequested) return;
             IsRemoteControlling = true;
-            LanStatus = "远控中";
+            LanStatus = "远控中 · 实时画面";
+            // 优先走长连接推帧：省掉每帧一次 HTTP 往返，延迟从数百毫秒降到几十毫秒。
+            var usedStream = false;
+            var reconnectFailures = 0;
+            while (IsRemoteControlling && !cts.IsCancellationRequested)
+            {
+                var gotFrame = await _lan.StreamScreenAsync(dev, bytes =>
+                {
+                    if (IsRemoteControlling && !cts.IsCancellationRequested)
+                        ShowLanScreenFrame(bytes);
+                    return Task.CompletedTask;
+                }, cts.Token);
+                if (cts.IsCancellationRequested || !IsRemoteControlling) return;
+                if (gotFrame)
+                {
+                    usedStream = true;
+                    reconnectFailures = 0;
+                }
+
+                // 流断开后先确认会话：对方主动停止就立刻收尾，网络抖动则短暂重连。
+                var state = await _lan.PollControlAsync(dev, start.Cid);
+                if (cts.IsCancellationRequested || !IsRemoteControlling) return;
+                if (state == "no") { LanStatus = "对方已停止屏幕共享"; return; }
+                if (state == "busy") { LanStatus = "对方正在被其他设备控制"; return; }
+
+                if (!usedStream) break; // 旧版被控端没有 /screen-stream，退回单帧轮询
+                if (++reconnectFailures >= 5) { LanStatus = "远控画面连接中断"; return; }
+                try { await Task.Delay(400, cts.Token); }
+                catch (OperationCanceledException) { return; }
+            }
+
+            if (cts.IsCancellationRequested || !IsRemoteControlling) return;
             var ticks = 0;
             while (IsRemoteControlling && !cts.IsCancellationRequested)
             {
                 var bytes = await _lan.GetScreenAsync(dev);
                 if (cts.IsCancellationRequested || !IsRemoteControlling) break;
-                if (bytes is not null) Dispatch(() => LanScreenBytes = bytes);
-                // 每 5 秒左右确认一次对方是否已停止共享，避免画面卡在最后一帧。
+                if (bytes is not null) ShowLanScreenFrame(bytes);
+                // 每 2 秒确认一次对方是否已停止共享，避免画面卡在最后一帧。
                 if (++ticks % 8 == 0)
                 {
-                    var state = await _lan.PollControlAsync(dev, start.Cid);
+                    var polled = await _lan.PollControlAsync(dev, start.Cid);
                     if (cts.IsCancellationRequested || !IsRemoteControlling) break;
-                    if (state == "no")
+                    if (polled == "no")
                     {
                         LanStatus = "对方已停止屏幕共享";
                         break;
                     }
                 }
-                try { await Task.Delay(600, cts.Token); }
+                try { await Task.Delay(250, cts.Token); }
                 catch (OperationCanceledException) { break; }
             }
         }
@@ -1317,7 +1356,7 @@ public sealed class MainViewModel : BindableBase
         {
             LanControlPending = false;
             IsRemoteControlling = false;
-            Dispatch(() => LanScreenBytes = null);
+            ClearLanScreenFrame();
             // 正常停止时 StopLanControl 已经取走 cid 并通知过对方；这里只为异常/超时兜底。
             var cid = _lanControlCid;
             _lanControlCid = null;
@@ -1334,7 +1373,7 @@ public sealed class MainViewModel : BindableBase
         var dev = SelectedLanDevice;
         IsRemoteControlling = false;
         LanControlPending = false;
-        Dispatch(() => LanScreenBytes = null);
+        ClearLanScreenFrame();
         if (cid is not null && dev is not null && _lan is not null)
             _ = _lan.StopControlAsync(dev, cid);
         LanStatus = "已停止远控";
@@ -1348,7 +1387,7 @@ public sealed class MainViewModel : BindableBase
         _lanControlCid = null;
         LanControlPending = false;
         IsRemoteControlling = false;
-        Dispatch(() => LanScreenBytes = null);
+        ClearLanScreenFrame();
     }
 
     private async Task LanTapAsync(object? p)
@@ -1379,6 +1418,89 @@ public sealed class MainViewModel : BindableBase
     {
         if (string.IsNullOrEmpty(s)) return null;
         try { return System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(s)); } catch { return null; }
+    }
+
+    /// <summary>
+    /// 网络线程只保存最新一帧并唤醒解码任务；解码跟不上时旧帧直接覆盖丢弃，
+    /// 避免 TCP 缓冲区堆积让画面越看越滞后。
+    /// </summary>
+    private void ShowLanScreenFrame(byte[] bytes)
+    {
+        Interlocked.Exchange(ref _lanLatestFrameBytes, bytes);
+        if (Interlocked.CompareExchange(ref _lanDecodeBusy, 1, 0) != 0) return;
+        _ = Task.Run(DecodeLatestLanFrame);
+    }
+
+    /// <summary>后台线程解码 JPEG，再切回 UI 线程只做一次绑定赋值。</summary>
+    private void DecodeLatestLanFrame()
+    {
+        try
+        {
+            while (true)
+            {
+                var bytes = Interlocked.Exchange(ref _lanLatestFrameBytes, null);
+                if (bytes is null || !IsRemoteControlling) return;
+
+                Bitmap? decoded;
+                try
+                {
+                    using var ms = new MemoryStream(bytes);
+                    decoded = new Bitmap(ms);
+                }
+                catch { continue; }
+
+                var frame = decoded;
+                Dispatch(() =>
+                {
+                    if (!IsRemoteControlling)
+                    {
+                        frame.Dispose();
+                        return;
+                    }
+                    var old = _lanScreenFrame;
+                    LanScreenFrame = frame;
+                    // 等这一轮渲染结束后再释放旧帧，避免渲染线程仍持有旧位图。
+                    if (old is not null)
+                        Avalonia.Threading.Dispatcher.UIThread.Post(old.Dispose, Avalonia.Threading.DispatcherPriority.Background);
+                    CountLanFrame();
+                });
+            }
+        }
+        finally
+        {
+            Volatile.Write(ref _lanDecodeBusy, 0);
+            // 退出前刚好来了新帧时把解码任务重新拉起，避免最后一帧一直停在槽位里。
+            if (Volatile.Read(ref _lanLatestFrameBytes) is not null &&
+                Interlocked.CompareExchange(ref _lanDecodeBusy, 1, 0) == 0)
+                _ = Task.Run(DecodeLatestLanFrame);
+        }
+    }
+
+    private void CountLanFrame()
+    {
+        var now = Environment.TickCount64;
+        if (_lanFpsWindowStart == 0) _lanFpsWindowStart = now;
+        _lanFpsFrames++;
+        var elapsed = now - _lanFpsWindowStart;
+        if (elapsed < 1000) return;
+        LanStreamFps = (int)Math.Round(_lanFpsFrames * 1000.0 / elapsed);
+        _lanFpsWindowStart = now;
+        _lanFpsFrames = 0;
+    }
+
+    private void ClearLanScreenFrame()
+    {
+        Interlocked.Exchange(ref _lanLatestFrameBytes, null);
+        Dispatch(() =>
+        {
+            var old = _lanScreenFrame;
+            LanScreenFrame = null;
+            LanStreamFps = 0;
+            _lanFpsWindowStart = 0;
+            _lanFpsFrames = 0;
+            if (old is not null)
+                Avalonia.Threading.Dispatcher.UIThread.Post(old.Dispose, Avalonia.Threading.DispatcherPriority.Background);
+        });
     }
 
     private static void Dispatch(Action a)

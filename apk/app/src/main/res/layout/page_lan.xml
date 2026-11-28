@@ -241,13 +241,36 @@
                         android:orientation="vertical"
                         android:visibility="gone"
                         android:layout_marginTop="6dp">
-                        <ImageView
+                        <com.vsp.app.RemoteScreenView
                             android:id="@+id/lan_screen"
                             android:layout_width="match_parent"
                             android:layout_height="260dp"
                             android:background="#000000"
-                            android:scaleType="fitCenter"
                             android:contentDescription="对方屏幕" />
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal"
+                            android:gravity="center_vertical"
+                            android:layout_marginTop="4dp">
+                            <TextView
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:text="手指移动即可移动对方鼠标，轻点单击，拖动拖拽"
+                                android:tag="dim"
+                                android:textSize="11sp"
+                                android:gravity="center" />
+                            <TextView
+                                android:id="@+id/lan_stream_fps"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="0 FPS"
+                                android:textColor="#5ee7a8"
+                                android:textSize="11sp"
+                                android:textStyle="bold"
+                                android:layout_marginStart="8dp" />
+                        </LinearLayout>
                         <LinearLayout
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
@@ -284,9 +307,9 @@
                                     android:layout_width="0dp"
                                     android:layout_height="wrap_content"
                                     android:layout_weight="1"
-                                    android:text="全屏"
+                                    android:text="横屏全屏"
                                     android:tag="soft"
-                        android:textSize="12sp"
+                        android:textSize="11sp"
                                     android:layout_marginStart="6dp" />
                                 <Button
                                     android:id="@+id/lan_control_stop"
@@ -319,13 +342,27 @@
         android:layout_height="match_parent"
         android:background="#000000"
         android:visibility="gone">
-        <ImageView
+        <com.vsp.app.RemoteScreenView
             android:id="@+id/lan_screen_full"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:background="#000000"
-            android:scaleType="fitCenter"
-            android:contentDescription="对方屏幕（全屏）" />
+            android:contentDescription="对方屏幕（横屏全屏）" />
+        <TextView
+            android:id="@+id/lan_stream_fps_full"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|start"
+            android:layout_margin="12dp"
+            android:paddingLeft="8dp"
+            android:paddingRight="8dp"
+            android:paddingTop="4dp"
+            android:paddingBottom="4dp"
+            android:background="#99000000"
+            android:text="0 FPS"
+            android:textColor="#5ee7a8"
+            android:textSize="12sp"
+            android:textStyle="bold" />
         <Button
             android:id="@+id/lan_fullscreen_exit"
             android:layout_width="wrap_content"
